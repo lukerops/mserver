@@ -36,41 +36,56 @@ módulos, em uma instância diferente), a partir do mesmo binário.
    implementação, a infra é acessada via interface para permitir novos
    backends no futuro. Pastas de backends ainda não implementados (ex.:
    `redis/`, `nats/`) **não** devem ser criadas antecipadamente.
-5. **Compatibilidade com Jellyfin antes de UI própria.** Os clientes
-   oficiais do Jellyfin são a interface de reprodução; a administração é
-   feita via API (curl/Bruno) até existir uma interface web.
+5. **Compatibilidade com Jellyfin antes de UI própria, com isolamento total no plugin.**
+   Os clientes oficiais do Jellyfin são a interface de reprodução; a
+   administração é feita via API (curl/Bruno) até existir uma interface web.
+   **Todas as regras de negócio, conceitos, DTOs, convenções e adaptações
+   referentes ao Jellyfin devem estar 100% isoladas no plugin
+   `plugins/api/jellyfin`.** Nenhum módulo do núcleo pode conhecer conceitos ou
+   regras do Jellyfin, e **nenhum conceito não discutido deve existir fora do
+   plugin do Jellyfin** — tudo o que for preciso adicionar fora de
+   `plugins/api/jellyfin` deve ser discutido e aprovado antes.
 6. **Processamento multimídia exclusivamente pela suíte FFmpeg.** Probe,
    transcode, geração de imagens, conversão de legendas e qualquer outro
    processamento de mídia usam os binários `ffprobe`/`ffmpeg` disponíveis
    no ambiente, executados como processos externos.
-7. **Interfaces Go hoje, gRPC amanhã.** A comunicação entre módulos começa
-   com interfaces Go in-process, mas todo contrato é escrito para permitir
-   a migração para gRPC sem alterar os consumidores (ver seção 4).
+7. **Arquitetura orientada a eventos (ECST) com `Resync` universal.** Os
+   módulos propagam estado de forma assíncrona via _Event-Carried State
+   Transfer_ (ECST): cada módulo mantém projeções locais dos dados de que
+   precisa em seu próprio banco, evitando chamadas em cascata (_fan-out_
+   síncrono) no caminho crítico de leitura. Todo módulo produtor de estado
+   expõe uma operação de `Resync` para republicar seu estado atual na
+   outbox, garantindo consistência eventual e reconstrução de projeções.
+8. **Interfaces Go hoje, gRPC amanhã.** A comunicação síncrona entre
+   módulos começa com interfaces Go in-process, mas todo contrato é
+   escrito para permitir a migração para gRPC sem alterar os consumidores
+   (ver seção 4).
 
 ## 3. Decisões de arquitetura
 
-| Tema                          | Decisão                                                                                                                                                                                                       |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linguagem                     | Go 1.27.3                                                                                                                                                                                                     |
-| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                     |
-| Comunicação entre módulos     | **Agora:** interfaces Go in-process. **Futuro:** gRPC (`bufconn` no monolito, TCP quando distribuído)                                                                                                         |
-| Contratos entre módulos       | **Agora:** pacote `api/` de cada módulo. **Futuro:** `.proto` gerenciados com `buf`                                                                                                                           |
-| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` (com `Range`/`PUT`); bytes nunca trafegam pelos contratos                                                                                                                  |
-| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                           |
-| Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface |
-| Cache                         | Em memória                                                                                                                                                                                                    |
-| Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                             |
-| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                              |
-| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; hashes são metadados (seção 7)                                                                                                   |
-| API do projeto                | Surface do núcleo em `internal/server` (não é plugin)                                                                                                                                                         |
-| Processamento multimídia      | `ffprobe`/`ffmpeg` disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas                                                                                                    |
-| FFmpeg ausente                | Módulos que dependem dele não inicializam; no monolito, o servidor falha no startup                                                                                                                           |
-| Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                                                                                                         |
-| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                     |
-| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                    |
-| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                    |
-| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12**                                                                                                                                                                                  |
-| Licença                       | Apache 2.0                                                                                                                                                                                                    |
+| Tema                          | Decisão                                                                                                                                                                                                                                |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linguagem                     | Go 1.27.3                                                                                                                                                                                                                              |
+| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                                              |
+| Comunicação entre módulos     | **Agora:** interfaces Go in-process. **Futuro:** gRPC (`bufconn` no monolito, TCP quando distribuído)                                                                                                                                  |
+| Contratos entre módulos       | **Agora:** pacote `api/` de cada módulo. **Futuro:** `.proto` gerenciados com `buf`                                                                                                                                                    |
+| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` no MVP; `PUT` no pós-MVP); bytes nunca trafegam pelos contratos de RPC/eventos                                                         |
+| Sincronização de estado       | **ECST (Event-Carried State Transfer)** via eventos duráveis (outbox) + operação `Resync` em todos os módulos produtores para _cold start_ e reconciliação                                                                             |
+| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                                                    |
+| Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface                          |
+| Cache                         | Em memória                                                                                                                                                                                                                             |
+| Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                                                      |
+| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                                                       |
+| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes entram no pós-MVP (seção 7)                                                                   |
+| API do projeto                | Surface do núcleo em `internal/server` (não é plugin)                                                                                                                                                                                  |
+| Processamento multimídia      | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas |
+| FFmpeg ausente                | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; no monolito, o servidor falha no startup                                                                             |
+| Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                                                                                                                                  |
+| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                                              |
+| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                                             |
+| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                                             |
+| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12.4.0** (`docs/jellyfin-openapi-stable.json`); cliente alvo do MVP: **`jellyfin-web`** (`jellyfin-android` e `jellyfin-tizen` no pós-MVP)                                                                     |
+| Licença                       | Apache 2.0                                                                                                                                                                                                                             |
 
 ## 4. Comunicação entre módulos
 
@@ -117,8 +132,8 @@ Toda interface em `api/` (entre módulos **e** de plugins) deve seguir:
    devolve `io.Reader`/`io.Writer` nem caminhos absolutos. Caminhos só
    aparecem como **dados relativos a uma localização** (ex.: o caminho de
    um arquivo dentro de um diretório da biblioteca).
-8. **Contexto de chamada explícito:** identidade do usuário/dispositivo e
-   correlation ID trafegam pelo `ctx` usando helpers do pacote de
+8. **Contexto de chamada explícito:** identidade da conta/perfil/dispositivo
+   e correlation ID trafegam pelo `ctx` usando helpers do pacote de
    contrato, mapeáveis para metadata gRPC no futuro.
 9. **Eventos versionados e idempotentes:** eventos usam o envelope
    CloudEvents (seção 4.3) com ID, timestamp e tipo versionado;
@@ -202,6 +217,49 @@ db, fn)` e `ConnFrom(ctx, db)`. A transação aberta viaja no `ctx`, e
 
   Consumidores decodificam `queue.Envelope[<api do módulo>.<Evento>]`.
 
+### 4.4 ECST (Event-Carried State Transfer) e `Resync`
+
+Para atingir baixa latência de leitura (estilo Netflix) mesmo com bancos
+isolados por módulo, a comunicação entre módulos prioriza **eventos
+carregando estado (ECST)** em vez de chamadas síncronas em cascata:
+
+- **Projeções locais (padrão obrigatório):** cada módulo escuta os eventos dos
+  módulos dos quais depende e mantém uma projeção local enxuta no seu próprio
+  banco SQLite, evitando consultas síncronas entre módulos. Métodos de consulta
+  síncrona que deixarem de ser necessários por conta das projeções locais (ex.:
+  `ListSiblings` ou `ListFiles` no contrato do `storage`) serão removidos na
+  implementação. Por exemplo, a `library` consolida o catálogo completo (itens,
+  streams do `ffprobe`, capítulos, segmentos, legendas e metadados) reagindo a
+  eventos; o `subtitles` mantém sua projeção local de arquivos e itens da
+  `library` para fazer o match bidirecional; e o `watchstate` mantém uma
+  projeção da topologia do catálogo (`Series → Season → Episode`) para calcular
+  próximos episódios, itens em andamento e contadores localmente em `O(1)`.
+- **Escrita de arquivos sempre síncrona (Push no `storage`):** apenas o
+  `storage` manipula dados físicos. Qualquer módulo que produza um arquivo
+  (`transcoder`, `subtitles`, `metadata`, `downloader`) grava-o de forma
+  síncrona no `storage` (via contrato/HTTP `PUT`), e o `storage` emite os
+  eventos correspondentes (`FileIndexed`, `FileAnalyzed`). O `storage`
+  nunca busca dados nos outros módulos.
+- **RPC síncrono restrito ao estritamente necessário:** chamadas síncronas
+  entre módulos ocorrem apenas quando há interação imediata bloqueante
+  (ex.: `playback` chamando `StartTranscode` no `transcoder` ao iniciar um
+  stream HLS, ou módulos gravando arquivos no `storage`).
+- **Operação `Resync` universal:** todo módulo produtor de estado implementa
+  uma operação `Resync(ctx, escopo)` em seu contrato `api/`. Ao ser
+  invocada, ela lê os registros atuais do banco do módulo e republica os
+  eventos de estado na outbox. Como todo consumidor é idempotente (upsert
+  por ID), o `Resync` resolve:
+  1. **Cold start:** quando uma nova biblioteca é cadastrada ou um módulo
+     opcional (ex.: `metadata`, `subtitles`) é habilitado depois que o
+     sistema já possui dados.
+  2. **Reconstrução e autocura:** se o banco de um módulo derivado for
+     recriado ou ficar inconsistente, basta acionar o `Resync` dos módulos
+     produtores para reconstruir o estado sem perda.
+
+> O detalhamento completo do contexto de cada módulo e o catálogo de todos
+> os eventos e seus payloads estão em
+> [`docs/modulos-e-eventos.md`](modulos-e-eventos.md).
+
 ## 5. Plugins vs. backends
 
 Critério: **quem escolhe e quantos ficam ativos ao mesmo tempo?**
@@ -222,11 +280,12 @@ operador escolhe, é backend.**
 
 - **Backends:** SQLite, cache em memória, filas (memória/outbox), drivers
   do VFS (disco local; S3 no futuro — ficam dentro do módulo `storage`).
-- **Plugins:** analisadores de arquivos do `storage` (SHA-256, ED2K),
-  provedores de metadados (TVDB, TMDB, AniDB — pós-MVP), indexers
-  (Torznab, Newznab, Cardigann), clientes de download (qBittorrent,
-  Transmission, SABnzbd), provedores de legenda, motores de tradução,
-  notificações e a API de compatibilidade Jellyfin.
+- **Plugins:** analisadores de arquivos do `storage` (`ffprobe`, SHA-256,
+  ED2K), provedores de metadados e segmentos (TVDB, TMDB, AniDB, AniSkip,
+  IntroDB — pós-MVP), sincronizadores de estado no `watchstate` (Trakt,
+  AniList — pós-MVP), indexers (Torznab, Newznab, Cardigann), clientes de
+  download (qBittorrent, Transmission, SABnzbd), provedores de legenda,
+  motores de tradução, notificações e a API de compatibilidade Jellyfin.
 
 ### 5.2 Tipos de plugin
 
@@ -253,75 +312,99 @@ operador escolhe, é backend.**
 
 ## 6. Módulos
 
-| Módulo         | Substitui            | Responsabilidade                                                                  | Fase   |
-| -------------- | -------------------- | --------------------------------------------------------------------------------- | ------ |
-| `storage`      | —                    | VFS, localizações, indexação e `FileID`, analisadores, API HTTP de dados, eventos | MVP    |
-| `identity`     | —                    | Usuários, dispositivos, sessões, tokens de acesso                                 | MVP    |
-| `library`      | Jellyfin (dados)     | Cadastro de bibliotecas, scan via VFS, identificação pelo path, probe, `UserData` | MVP    |
-| `streamer`     | Jellyfin (playback)  | Sessões de playback, `PlaybackInfo`, decisão de reprodução                        | MVP    |
-| `subtitles`    | Bazarr               | MVP: descoberta de legendas externas locais. Futuro: provedores externos          | MVP    |
-| `transcoder`   | Jellyfin (transcode) | Execução do `ffmpeg`. MVP: áudio e conversão de legendas. Futuro: vídeo, remoto   | MVP    |
-| `metadata`     | —                    | Provedores de metadados (plugins: TVDB, TMDB, AniDB, ...)                         | Futuro |
-| `indexer`      | Prowlarr             | Indexers e busca                                                                  | Futuro |
-| `downloader`   | (parte dos \*arr)    | Integração com clientes de download externos (plugins)                            | Futuro |
-| `acquisition`  | Sonarr + Radarr      | Monitoramento, perfis de qualidade, decisão, grab, import/rename                  | Futuro |
-| `translation`  | Lingarr              | Tradução de legendas (plugins)                                                    | Futuro |
-| `notification` | —                    | Notificações e webhooks (plugins)                                                 | Futuro |
+| Módulo         | Substitui                      | Responsabilidade                                                                                                                                     | Fase    |
+| -------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `storage`      | —                              | VFS, localizações, indexação e `FileID`, analisadores (`ffprobe` no MVP; hashes no pós-MVP), API HTTP de dados (`Range`), eventos, `Resync`          | MVP     |
+| `identity`     | —                              | Contas (`Account`: email, username, senha), perfis (`Profile`: handle, nome), dispositivos, sessões e tokens                                         | MVP     |
+| `library`      | Jellyfin (catálogo)            | Catálogo materializado global (100% cacheável): bibliotecas, identificação por path via eventos (filmes e séries), informações técnicas e legendas   | MVP     |
+| `playback`     | Jellyfin (playback)            | Sessões de reprodução ativas, decisão de reprodução (Direct Play no MVP) e eventos de playback (salas compartilhadas no pós-MVP)                     | MVP     |
+| `subtitles`    | Bazarr                         | MVP: match bidirecional de legendas locais `.srt` via projeção própria alimentada por eventos. Pós-MVP: outros formatos e provedores externos        | MVP     |
+| `watchstate`   | Jellyfin (`UserData`)/Tautulli | Estado e histórico por **perfil** (`ProfileID`): progresso, assistidos, favoritos, próximos episódios e _watch history_                              | Pós-MVP |
+| `transcoder`   | Jellyfin (transcode)           | Workers `ffmpeg`: HLS em tempo real (controlado por `SIGSTOP`/`SIGCONT`) e jobs em background (conversão de legendas, thumbnails, capítulos, intros) | Pós-MVP |
+| `metadata`     | Jellyfin (providers)           | Provedores externos de metadados, artes e segmentos de abertura/encerramento (plugins: TVDB, TMDB, AniDB, AniSkip, IntroDB, ...)                     | Pós-MVP |
+| `indexer`      | Prowlarr                       | Indexers e busca assíncrona de releases (plugins: Torznab, Newznab, Cardigann)                                                                       | Pós-MVP |
+| `downloader`   | (parte dos \*arr)              | Integração com clientes de download externos (plugins) e escrita/hardlink dos arquivos concluídos no `storage`                                       | Pós-MVP |
+| `acquisition`  | Sonarr + Radarr                | Monitoramento do catálogo, perfis de qualidade, motor de decisão e coordenação assíncrona com `indexer` e `downloader`                               | Pós-MVP |
+| `translation`  | Lingarr                        | Tradução assíncrona de legendas (plugins)                                                                                                            | Pós-MVP |
+| `notification` | —                              | Notificações e webhooks (plugins) reagindo aos eventos de todos os módulos                                                                           | Pós-MVP |
 
 Observações:
 
+- **Contas (`Account`) vs. Perfis (`Profile`) e Migração de Perfil (`identity` + `watchstate`):**
+  - O `identity` separa **Conta (`AccountID`)** de **Perfil (`ProfileID`)** desde o dia 1, no modelo da Netflix:
+    - **Conta (`Account`):** guarda credenciais e dados administrativos (`username`, `email`, senha, flag `is_admin` e, no futuro, vínculo SSO OIDC).
+    - **Perfil (`Profile`):** pertence a uma conta e guarda os dados de apresentação e consumo (nome, identificador/handle curto e, no futuro, imagem/avatar). Uma conta pode ter vários perfis.
+  - Todas as sessões no `playback` (e, no pós-MVP, todo o histórico e estado no `watchstate`) são vinculadas exclusivamente ao **`ProfileID`**, nunca ao `AccountID`.
+  - **Migração de perfil entre contas em `O(1)` (Pós-MVP):** como o `watchstate` indexa tudo por `ProfileID`, transferir um perfil de uma conta para outra exige apenas atualizar o `account_id` do perfil no `identity` (emitindo `ProfileTransferred`), levando todo o histórico e favoritos automaticamente sem alterar nenhuma linha no banco do `watchstate`.
+- **Separação entre Catálogo (`library`), Sessão de Reprodução (`playback`) e Estado do Perfil (`watchstate` — Pós-MVP):**
+  - A `library` não conhece contas, perfis nem conceitos do Jellyfin: seu banco e seu cache são 100% globais e alimentados de forma reativa pelos eventos do `storage` e `subtitles` (e, no pós-MVP, `transcoder` e `metadata`).
+  - O `playback` gerencia a decisão de reprodução e o estado efêmero das sessões ativas, emitindo eventos de sessão (`PlaybackStarted`, `PlaybackProgressed`, `PlaybackPaused`, `PlaybackResumed`, `PlaybackStopped`).
+  - No MVP, como o módulo `watchstate` fica para o segundo momento, o plugin `plugins/api/jellyfin` devolve `UserData` com valores padrão zerados e listas vazias para `Resume` e `NextUp`. Quando o `watchstate` entrar no pós-MVP, ele passará a consumir os eventos da `library` e do `playback` sem alterar esses módulos.
+- **Salas de reprodução compartilhada (Pós-MVP):**
+  - Entrarão no módulo `playback` no pós-MVP suportando código de acesso. Qualquer adaptação para o protocolo `SyncPlay` do Jellyfin fica isolada em `plugins/api/jellyfin`.
+- **Controle eficiente do `transcoder` (`SIGSTOP`/`SIGCONT` — Pós-MVP):**
+  - Entrará no pós-MVP para transcode de áudio HLS (`-c:v copy`), conversão de legendas (`.srt`/`.ass` → `.vtt`) e extração de imagens/segmentos em background.
+- **Capítulos (`Chapters`) e Pular Abertura/Créditos (`MediaSegments` — Pós-MVP):**
+  - Ficam fora do MVP e entrarão no segundo momento (extraídos via `ffprobe`, provedores externos no `metadata` e detecção automática no `transcoder`).
 - Sonarr e Radarr serão unificados em `acquisition`, com "tipos de mídia",
   pois compartilham parser de releases, perfis de qualidade e motor de
-  decisão.
-- `transcoder` é separado de `streamer`: o `streamer` orquestra (sessões,
-  decisão de reprodução) e o `transcoder` executa o `ffmpeg`. O
-  `transcoder` é o módulo que será escalado horizontalmente.
-- O wrapper de baixo nível da suíte FFmpeg (execução, montagem de
-  argumentos, parsing do JSON do `ffprobe`) fica em `internal/infra/ffmpeg`
-  e é usado pela `library` (probe) e pelo `transcoder` (transcode e
-  conversão de legendas). Ele recebe caminhos/URLs já resolvidos pelo
-  `storage`.
+  decisão, comunicando-se por eventos com `indexer` e `downloader`.
+- O wrapper de baixo nível do `ffprobe` (e futuramente `ffmpeg`) fica em
+  `internal/infra/ffmpeg` e é usado pelo analisador `ffprobe` do `storage`.
+  Ele recebe caminhos/URLs já resolvidos pelo `storage`.
 - **Dependências obrigatórias:** cada módulo valida, no `Init`, as
-  dependências externas de que precisa (ex.: `library` e `transcoder`
-  verificam se `ffmpeg` e `ffprobe` existem e executam). Se a validação
-  falhar, o módulo não inicializa. Qualquer falha de `Init` aborta o
-  startup do processo; portanto, no monolito, a ausência do FFmpeg impede
-  o servidor de iniciar, com uma mensagem de erro clara.
+  dependências externas de que precisa (no MVP, o `storage` valida `ffprobe`).
+  Se a validação falhar, o módulo não inicializa e o startup do processo é
+  abortado com uma mensagem de erro clara.
 - Quando o módulo `metadata` existir, a identificação por nome de arquivo
-  (seção 8) continua na `library` como **fallback** para itens sem
-  metadados encontrados.
+  (seção 8) continua na `library` como identificação inicial e **fallback**
+  para itens sem metadados externos encontrados.
 
 ### 6.1 Surfaces: API do projeto e API Jellyfin
 
-- A **API do projeto** (administração via curl/Bruno e, no futuro, base
-  da UI web) faz parte do núcleo e fica em `internal/server`.
-- O **plugin `api/jellyfin`** é opcional (pode ser desligado quando
-  houver clientes próprios).
-- As duas são **adaptadores paralelos sobre os mesmos contratos** (`api/`
-  dos módulos). O plugin Jellyfin **não** consome a API do projeto via
-  HTTP, pois isso acoplaria a compatibilidade com os apps Jellyfin ao
-  formato da API do projeto e dobraria o custo de serialização.
-- Surfaces apenas traduzem protocolo (rotas, DTOs, autenticação, códigos
-  de erro). Se as duas precisarem da mesma lógica, ela pertence a um
-  módulo e deve virar uma operação do contrato dele.
+- **Regra inegociável de isolamento:**
+  - **Todas as regras de negócio, modelos de dados, rotas e adaptações referentes ao Jellyfin devem estar estritamente isoladas dentro do plugin `plugins/api/jellyfin`.**
+  - **Nenhum conceito que não tenha sido discutido deve existir fora de `plugins/api/jellyfin`.** Tudo o que for preciso adicionar fora do plugin do Jellyfin (nos módulos de domínio, na infraestrutura ou na API própria `internal/server`) **deve ser discutido antes**.
+- A **API do projeto** (`internal/server`) faz parte do núcleo e, no MVP, é
+  voltada à administração do servidor (gerenciamento de contas, perfis,
+  localizações do `storage`, bibliotecas da `library` e acionamento de
+  operações administrativas). Seus endpoints e fluxos específicos devem ser
+  discutidos antes da implementação.
+- O **plugin `api/jellyfin`** (`plugins/api/jellyfin`) concentra **100% das
+  rotas e regras de compatibilidade com a API do Jellyfin 12.4.0** (descoberta,
+  login, parse de `<username ou email>#<profile>`, `QuickConnect`, tradução de
+  catálogo para `BaseItemDto`/`MediaSources`/`MediaStreams`/`DeliveryUrl`,
+  avaliação de `DeviceProfile` em `PlaybackInfo`, conversão de unidades para
+  `Ticks`, sessões de reprodução e streaming). Nenhuma rota ou regra do
+  Jellyfin existe em `internal/server` ou nos demais módulos.
+- **Streaming de vídeo e legendas via Proxy no plugin Jellyfin:** o módulo
+  `storage` expõe apenas sua rota HTTP interna de dados
+  (`GET /locations/{LocationID}/files/{FileID}`, com suporte a `Range`). Nas
+  rotas de streaming do Jellyfin (`GET /Videos/{itemId}/stream*` e
+  `GET /Videos/.../Subtitles/.../Stream.srt`), o plugin `api/jellyfin` atua
+  como **proxy reverso em streaming** para o `storage` (repassando `Range`,
+  `Content-Range`, `Content-Length` e status `200`/`206`).
+- Surfaces apenas traduzem protocolo e compõem DTOs (rotas, autenticação,
+  códigos de erro). Se duas surfaces precisarem da mesma regra de negócio do
+  domínio do `mserver`, ela deve ser discutida antes de entrar no contrato de
+  um módulo.
 - No modo distribuído, surfaces são "módulos sem banco" que podem rodar
   em qualquer instância, falando com os demais módulos via gRPC.
 
 ```mermaid
 flowchart TD
-    REST[API do projeto] --> ID[identity]
-    REST --> LIB
+    REST[API do projeto - Admin] --> ID[identity]
+    REST --> STO[storage]
+    REST --> LIB[library]
     JF[plugin api/jellyfin] --> ID
-    JF --> LIB[library]
-    JF --> STR[streamer]
-    LIB --> STO[storage]
-    LIB --> SUB[subtitles]
-    SUB --> STO
-    STR --> LIB
-    STR --> SUB
-    STR --> TR[transcoder]
-    TR -->|HTTP Range / PUT ou caminho local| STO
-    STO -.->|eventos com FileID| LIB
+    JF --> LIB
+    JF --> PB[playback]
+    JF -->|Proxy HTTP Range GET| STO
+    PB --> LIB
+    STO -.->|FileIndexed / FileAnalyzed / File*| LIB
+    STO -.->|FileIndexed / File*| SUB[subtitles]
+    LIB -.->|Movie* / Episode*| SUB
+    SUB -.->|SubtitleAdded / Removed| LIB
 ```
 
 ## 7. Módulo de storage (VFS)
@@ -348,8 +431,8 @@ absolutos.
   **Localizações não podem se sobrepor:** cadastrar um diretório que
   está dentro de outra localização, ou que contém outra, é recusado.
   Assim, todo arquivo pertence a exatamente uma localização.
-- **Classe da localização (planejado, entra com o transcode, etapa 6):**
-  hoje só existem localizações cadastradas pelo operador. Classes e
+- **Classe da localização (planejado, entra no pós-MVP com o `transcoder`):**
+  no MVP só existem localizações cadastradas pelo operador (`media`). Classes e
   localizações de sistema serão implementadas quando houver um módulo
   que grave artefatos. A classe define como o storage trata os arquivos
   dela. **Todo arquivo, de qualquer classe, é indexado e tem `FileID`.**
@@ -357,10 +440,10 @@ absolutos.
 
 | Classe       | Criada por                            | Analisadores (seção 7.3) | TTL | Uso                                                   |
 | ------------ | ------------------------------------- | ------------------------ | --- | ----------------------------------------------------- |
-| `media`      | Operador, via API do projeto          | Sim (pós-MVP)            | Não | Diretórios de bibliotecas (mídia e legendas externas) |
+| `media`      | Operador, via API do projeto          | Sim (`ffprobe` no MVP)   | Não | Diretórios de bibliotecas (mídia e legendas externas) |
 | `cache`      | Storage, automaticamente (de sistema) | Não                      | Sim | Artefatos temporários (ex.: legendas convertidas)     |
 | `transcodes` | Storage, automaticamente (de sistema) | Não                      | Sim | Segmentos e playlists HLS gerados pelo `ffmpeg`       |
-| `images`     | Storage, automaticamente (de sistema) | Não                      | Sim | Imagens (pós-MVP)                                     |
+| `images`     | Storage, automaticamente (de sistema) | Não                      | Sim | Imagens, frames de capítulos e _trickplay_ (pós-MVP)  |
 
 - **Localizações de sistema** (todas as classes exceto `media`):
   - São criadas pelo storage no `Init`. O driver e o destino de cada uma
@@ -411,95 +494,104 @@ absolutos.
 ### 7.2 Indexação
 
 A indexação acontece em duas etapas, para que um arquivo apareça no
-sistema sem esperar a leitura completa do conteúdo:
+sistema sem esperar a leitura ou inspeção completa do conteúdo:
 
 1. **Registro (rápido):** varredura da localização; grava `FileID`,
    localização, caminho relativo, tamanho, mtime e `inode` (quando
    suportado). Emite `FileIndexed`.
-2. **Análise (pós-MVP):** executa os analisadores (seção 7.3) de forma
-   assíncrona e emite `FileAnalyzed`.
+2. **Análise:** executa os analisadores habilitados (seção 7.3) de forma
+   assíncrona — no MVP, o analisador `ffprobe` para arquivos de mídia; no
+   pós-MVP, também os analisadores de hash — e emite `FileAnalyzed`.
 
 Regras:
 
 - **Quando varrer:** todas as localizações são varridas ao iniciar o
-  módulo e periodicamente (`MSERVER_STORAGE_SCAN_INTERVAL`). A varredura
-  de uma localização também pode ser pedida pelo contrato (ex.: a
-  `library` pede logo após cadastrar uma biblioteca). Observação em
-  tempo real (`fsnotify`) fica para depois do MVP.
+  módulo e periodicamente (`MSERVER_STORAGE_SCAN_INTERVAL`). O `storage`
+  também expõe `Resync(ctx, LocationID)` para republicar os eventos
+  `FileIndexed` e `FileAnalyzed` de todos os arquivos já conhecidos de uma
+  localização (ex.: chamado quando a `library` cadastra uma nova
+  biblioteca sobre uma localização já indexada). Observação em tempo real
+  (`fsnotify`) fica para depois do MVP.
 - Arquivos em escrita (cópia ou download em andamento) só serão
   analisados quando o `mtime` for mais antigo que uma janela de
   estabilidade; os mais recentes ficam para a próxima passada.
-- Localizações de sistema só passam pela etapa de **registro**. Como
-  todas as escritas nelas passam pelo storage, o registro acontece no
-  momento da escrita (sem depender de varredura), e o `FileID` é
-  devolvido a quem gravou. Uma varredura no `Init` reconcilia o índice
-  com o disco.
+- **Escrita síncrona por outros módulos (Push):** toda criação de arquivo
+  por qualquer módulo (`transcoder`, `subtitles`, `metadata`,
+  `downloader`) é feita de forma síncrona no `storage` (via contrato/HTTP
+  `PUT`). O `storage` nunca puxa arquivos de outros módulos. Nas
+  localizações de sistema, o registro acontece no momento da escrita e o
+  `FileID` é devolvido imediatamente; nas localizações `media`, a escrita
+  também registra o arquivo e dispara o pipeline normal de eventos
+  (`FileIndexed` → `FileAnalyzed`).
 - Se a raiz de uma localização, ou qualquer diretório dela, ficar
   inacessível (ex.: disco desmontado), a varredura **falha sem alterar o
   índice** e não gera `FileRemoved` em massa. Isso evita apagar itens e
-  `UserData` por uma falha temporária.
+  dados derivados por uma falha temporária.
 
 ### 7.3 Analisadores de arquivos (plugins)
 
-- Hashes e outros metadados de arquivo são calculados por **analisadores**,
-  plugins do tipo provider do `storage` (`plugins/storage/<nome>`).
-- **Pós-MVP:** `sha256` e `ed2k` serão os primeiros (nenhum analisador
-  é implementado no MVP). Exemplos futuros: hash do OpenSubtitles,
-  BLAKE3.
-- **Leitura única:** o storage lê o arquivo **uma única vez** e alimenta
-  todos os analisadores em paralelo, em vez de ler um arquivo de 50 GB uma
-  vez por algoritmo.
-- Cada resultado é gravado como `(FileID, analisador, versão, valor)`.
-  Mudar a versão de um analisador dispara a reanálise dos arquivos.
+- Informações técnicas de mídia e hashes são
+  calculados por **analisadores**, plugins do tipo provider do `storage`
+  (`plugins/storage/<nome>`).
+- **MVP:** analisador `ffprobe` (`plugins/storage/ffprobe`), que inspeciona
+  arquivos de mídia e extrai container, duração, bitrate e faixas de vídeo,
+  áudio e legendas embutidas (`MediaStreams`).
+- **Pós-MVP:** extração de capítulos embutidos (`Chapters`) no `ffprobe` e
+  analisadores de hash (`sha256`, `ed2k` e, futuramente, hash do OpenSubtitles,
+  BLAKE3).
+- **Leitura única para hashes:** para analisadores baseados em stream de
+  bytes, o storage lê o arquivo **uma única vez** e alimenta todos em
+  paralelo, em vez de ler um arquivo de 50 GB uma vez por algoritmo.
+- Cada resultado é gravado como `(FileID, analisador, versão, valor)` e
+  publicado via `FileAnalyzed`. Mudar a versão de um analisador dispara a
+  reanálise dos arquivos.
 - Os analisadores rodam apenas sobre arquivos de localizações da classe
-  `media` (incluindo legendas externas). Arquivos de localizações de
-  sistema (`cache`, `transcodes`, `images`) são indexados, mas não
-  passam pelos analisadores (SHA-256, ED2K, ...).
+  `media`. Arquivos de localizações de sistema (`cache`, `transcodes`,
+  `images`) são indexados, mas não passam pelos analisadores.
 - Exceção às regras da seção 4.2: o contrato de analisador recebe os
-  bytes em blocos (streaming), pois existe apenas dentro do processo do
-  `storage`. A forma de suportar analisadores externos (stream gRPC ou
-  leitura via `Resolve`) será definida junto com o suporte a plugins
-  externos.
+  bytes em blocos (streaming) ou o caminho/URL resolvido (no caso do
+  `ffprobe`), pois existe apenas dentro do processo do `storage`.
 
 ### 7.4 Metadados de um arquivo
 
-| Campo              | Origem                         |
-| ------------------ | ------------------------------ |
-| `FileID` (UUIDv7)  | Storage, na primeira indexação |
-| `LocationID`       | Localização cadastrada         |
-| Caminho relativo   | Relativo à localização         |
-| Tamanho, mtime     | Driver                         |
-| `inode`            | Driver (quando suportado)      |
-| SHA-256, ED2K, ... | Analisadores (pós-MVP)         |
-| Indexado em        | Storage                        |
+| Campo                             | Origem                         |
+| --------------------------------- | ------------------------------ |
+| `FileID` (UUIDv7)                 | Storage, na primeira indexação |
+| `LocationID`                      | Localização cadastrada         |
+| Caminho relativo                  | Relativo à localização         |
+| Tamanho, mtime                    | Driver                         |
+| `inode`                           | Driver (quando suportado)      |
+| Container, duração, streams, caps | Analisador `ffprobe` (MVP)     |
+| SHA-256, ED2K, ...                | Analisadores de hash (pós-MVP) |
+| Indexado em                       | Storage                        |
 
 ### 7.5 Acesso aos dados
 
-- **Leitura de nomes ≠ acesso:** a `library` usa o caminho relativo para
-  aplicar as regex, mas nenhum módulo usa caminhos para acessar, mover ou
-  apagar arquivos: toda operação recebe `FileID`.
-- **Arquivos vizinhos:** para encontrar legendas externas, o storage
-  expõe a listagem dos arquivos do mesmo diretório de um `FileID`. Cada
-  vizinho é retornado com seu **`FileID`** e seu **caminho relativo à
-  localização**. A listagem vem do índice (não do disco), então tudo o
-  que é retornado já está indexado.
+- **Leitura de nomes ≠ acesso:** a `library` e o `subtitles` usam o
+  caminho relativo recebido nos eventos `FileIndexed`/`FileMoved` para
+  aplicar regex e fazer o match, mas nenhum módulo usa caminhos para
+  acessar, mover ou apagar arquivos: toda operação recebe `FileID`.
 - **Legendas externas são arquivos como quaisquer outros:** são
-  indexadas, têm `FileID` e passam pelos analisadores. O `subtitles`
-  guarda o `FileID` da legenda, e o `streamer`/`transcoder` acessam-na
-  via `Resolve`, como fazem com a mídia.
-- **Escrita por outros módulos** (ex.: futuro `acquisition`): informa
-  `LocationID` + caminho relativo à localização.
+  indexadas pelo `storage` e geram `FileIndexed`. O módulo `subtitles`
+  escuta esses eventos, faz o match com os itens da `library` e emite
+  `SubtitleAdded` contendo o `FileID`. O `playback`/`transcoder` acessam a
+  legenda via `Resolve`, como fazem com a mídia.
+- **Escrita síncrona por outros módulos:** qualquer módulo que crie
+  arquivos informa `LocationID` + caminho relativo (ou classe de sistema)
+  e envia os dados de forma síncrona ao `storage`.
 - **Artefatos gerados:** legendas convertidas, segmentos HLS e, no futuro,
-  imagens são gravados via storage nas localizações de sistema
-  (`cache`, `transcodes`, `images`), e não ao lado da mídia. Cada
-  artefato recebe um `FileID`.
-- **API HTTP de dados:**
-  - Leitura com suporte a `Range` (obrigatório para seek do `ffmpeg` e dos
-    clientes). Implementada na etapa 4 (streamer).
-  - Escrita via `PUT` (saída do `ffmpeg`, ex.: segmentos e playlists HLS).
-    Implementada na etapa 6 (transcode).
-  - Autenticação por URLs assinadas de curta duração ou headers
-    (`ffmpeg -headers`). Implementada na etapa 6 (transcode).
+  imagens, frames de capítulos e _trickplay_ são gravados de forma síncrona
+  no `storage` nas localizações de sistema (`cache`, `transcodes`,
+  `images`), e não ao lado da mídia. Cada artefato recebe um `FileID`.
+- **API HTTP de dados (`storage`):**
+  - Expõe `GET /locations/{LocationID}/files/{FileID}` (e `HEAD`) com suporte a
+    `Range` (`206 Partial Content`, `Accept-Ranges: bytes`, `Content-Length`,
+    `Content-Type`). Implementada na Entrega 4 (`playback`). O `storage` não
+    expõe nenhuma rota do Jellyfin; o plugin `api/jellyfin` faz proxy em
+    streaming para essa rota.
+  - Escrita via `PUT` (saída do `ffmpeg`, legendas convertidas, imagens) e
+    autenticação por URLs assinadas de curta duração entram no pós-MVP com o
+    `transcoder`.
 - **Resolução por consumidor:** `Resolve(FileID, consumer) → URL`.
   - Consumidor local e driver local → caminho direto no disco (sem
     overhead).
@@ -509,7 +601,7 @@ Regras:
 
 ### 7.6 Drivers e capacidades
 
-- **Drivers:** disco local (`drivers/local`) no início; S3 e outros no
+- **Drivers:** disco local (`driver/local`) no início; S3 e outros no
   futuro. Cada localização fica confinada ao seu diretório (ex.:
   `os.Root` no driver local), sem permitir path traversal.
 - **Capacidades por driver (planejado):** quando houver consumidor, o
@@ -528,22 +620,24 @@ Regras:
 
 ### 7.7 Eventos
 
-| Evento (tópico)           | Quando                                                |
-| ------------------------- | ----------------------------------------------------- |
-| `storage.file.indexed.v1` | Arquivo novo indexado                                 |
-| `storage.file.changed.v1` | Tamanho, mtime ou inode mudou no mesmo caminho        |
-| `storage.file.moved.v1`   | Arquivo renomeado dentro da localização (mesmo inode) |
-| `storage.file.removed.v1` | Arquivo sumiu do disco ou a localização foi removida  |
+| Evento (tópico)            | Quando                                                          |
+| -------------------------- | --------------------------------------------------------------- |
+| `storage.file.indexed.v1`  | Arquivo novo indexado (ou republicado via `Resync`)             |
+| `storage.file.changed.v1`  | Tamanho, mtime ou inode mudou no mesmo caminho                  |
+| `storage.file.moved.v1`    | Arquivo renomeado dentro da localização (mesmo inode)           |
+| `storage.file.removed.v1`  | Arquivo sumiu do disco ou a localização foi removida            |
+| `storage.file.analyzed.v1` | Analisador concluiu inspeção do arquivo (`ffprobe`, hashes, ..) |
 
 - Todos usam o envelope CloudEvents (seção 4.3) com `source` = `storage`
-  e `subject` = `FileID`. O `data` é o mesmo para todos
-  (`api.FileEvent`): `file_id`, `location_id` e `path` (relativo à
-  localização; no `removed`, o último caminho conhecido).
-- São gravados na outbox na mesma transação do scan ou da remoção da
-  localização e publicados pelo relay (seção 4.3).
-- Por enquanto, as mudanças são detectadas apenas pelo scan (no `Start`,
-  periódico ou explícito). `fsnotify` e `FileAnalyzed` ficam para depois
-  do MVP, junto com os analisadores.
+  e `subject` = `FileID`.
+- Os eventos de ciclo de vida (`indexed`, `changed`, `moved`, `removed`)
+  usam `api.FileEvent`: `file_id`, `location_id`, `path` (relativo à
+  localização; no `removed`, o último caminho conhecido), `size` e `mtime`.
+- O evento `storage.file.analyzed.v1` traz `file_id`, `location_id`,
+  `analyzer` (ex.: `ffprobe`, `sha256`), `version` e o resultado tipado da
+  análise (streams técnicos, duração, capítulos embutidos ou hashes).
+- São gravados na outbox na mesma transação do scan, da análise ou da
+  remoção da localização e publicados pelo relay (seção 4.3).
 - Consumidos pela `library` e pelo `subtitles`.
 
 ## 8. Library: bibliotecas e identificação pelo path
@@ -572,15 +666,20 @@ metadados encontrar o item.
 - Funciona como no Jellyfin: um endpoint cadastra a biblioteca, informando
   nome, **tipo** e **um ou mais diretórios** (`LocationID`s já cadastrados
   no `storage`).
-- **Caminhos relativos ao diretório.** A `library` recebe os arquivos
-  como `FileID` + caminho relativo ao diretório de origem (ex.:
-  `Serie/Season 01/Serie S01E02.mkv`) e usa esse caminho **apenas como
-  entrada para a identificação** (regex).
+- **Construção reativa por eventos:** a `library` **não** varre o disco nem
+  consulta arquivos de forma síncrona. Ela reage aos eventos do `storage`
+  (`FileIndexed`, `FileMoved`, `FileChanged`, `FileRemoved`,
+  `FileAnalyzed`), que trazem `FileID` + caminho relativo ao diretório de
+  origem (ex.: `Serie/Season 01/Serie S01E02.mkv`), e usa esse caminho
+  **apenas como entrada para a identificação** (regex).
 - **Tipos no MVP:** filmes e séries. O tipo define as regras de
-  identificação aplicadas no scan.
-- O cadastro dispara um scan inicial (job durável via outbox). Depois
-  disso, a biblioteca é mantida atualizada pelos eventos de arquivo do
-  `storage`.
+  identificação aplicadas quando chega um evento de arquivo daquela
+  localização.
+- O cadastro de uma nova biblioteca aciona `storage.Resync(ctx, LocationID)`
+  para que o `storage` republique os eventos dos arquivos já indexados
+  naquela localização. A partir daí, a biblioteca é mantida atualizada
+  continuamente pelos eventos do `storage` e enriquecida pelos eventos de
+  `subtitles`, `transcoder` e `metadata`.
 
 ### 8.2 Filmes
 
@@ -660,156 +759,244 @@ Estrutura de pastas reconhecida pela identificação:
   do path. Como o `FileID` sobrevive a renomeações, movimentações e
   mudanças de conteúdo (seção 7.1), o item também sobrevive.
 - Assim, mudanças na identificação (ex.: ajuste em uma regex que passa a
-  reconhecer o número de um episódio) não fazem o usuário perder
-  `UserData` (assistido, posição, favoritos).
+  reconhecer o número de um episódio) não fazem o usuário perder seu estado
+  no módulo `watchstate` (assistido, posição, favoritos e histórico).
 - **Séries e temporadas** têm IDs próprios (UUIDv7) gerados pela
   `library` na criação, sem relação com pastas. Renomear ou mover uma
   pasta não muda a série, desde que a identificação continue chegando ao
   mesmo título/ano. Se o título identificado mudar, os episódios passam a
   outra série e a antiga, vazia, é removida.
 - A identificação é refeita a cada `FileIndexed`, `FileChanged` e
-  `FileMoved`, atualizando os vínculos do episódio.
+  `FileMoved`, atualizando os vínculos do episódio e emitindo os eventos
+  correspondentes da `library`.
 
-### 8.5 Informações técnicas
+### 8.5 Informações técnicas, legendas externas, capítulos e segmentos
 
-- `MediaSources`/`MediaStreams` (container, duração, faixas de vídeo,
-  áudio e legendas embutidas) são obtidos via `ffprobe`.
+- **Informações técnicas (MVP):** container, duração, bitrate e faixas
+  de vídeo, áudio e legendas embutidas chegam à `library` pelo evento
+  `storage.file.analyzed.v1` gerado pelo analisador `ffprobe` do `storage`. A
+  `library` armazena esses dados em seu modelo de domínio próprio (sem conhecer
+  `MediaSources` ou `MediaStreams` do Jellyfin).
+- **Legendas externas (MVP — `.srt`):** chegam à `library` pelos eventos
+  `subtitles.subtitle.added.v1` e `subtitles.subtitle.removed.v1`. No MVP são
+  mantidas apenas legendas `.srt` servidas diretamente; a conversão de legendas
+  para outros formatos (`transcoder.subtitle.converted.v1`) fica para o
+  pós-MVP. A tradução para `DeliveryMethod` e `DeliveryUrl` do Jellyfin ocorre
+  exclusivamente em `plugins/api/jellyfin`.
+- **Capítulos e segmentos de mídia (Pós-MVP):** capítulos embutidos e intervalos
+  de abertura/encerramento (para pular abertura/créditos) entrarão no pós-MVP
+  a partir de três origens: (1) capítulos do `ffprobe`, (2) provedores externos
+  no `metadata` (AniSkip, IntroDB) e (3) detecção automática por áudio/vídeo no
+  `transcoder`.
 
-### 8.6 Imagens
+### 8.6 Imagens, imagens de capítulos e _trickplay_
 
 - **Fora do MVP.** Os clientes exibem seus placeholders padrão.
-- No futuro, as imagens virão dos provedores de metadados, de arquivos
-  locais e, para episódios, de um frame extraído pelo `ffmpeg`.
+- No futuro, todas as imagens serão arquivos no `storage` (classe `images`)
+  cujos `FileID`s são consolidados na `library` por eventos:
+  - Pôsteres, banners e logos vindos do `metadata`
+    (`metadata.images.updated.v1`);
+  - Frames de episódios (`transcoder.thumbnail.extracted.v1`), imagens de
+    capítulos (`transcoder.chapter_images.extracted.v1`) e sprites de
+    _trickplay_ (`transcoder.trickplay.generated.v1`) extraídos em
+    background pelo `transcoder` ao reagir a `MovieAdded`/`EpisodeAdded`.
 
 ## 9. Compatibilidade com Jellyfin
 
-- **Versão alvo:** Jellyfin 12.
-- **Clientes alvo do MVP:** `jellyfin-web`, `jellyfin-android` e
-  `jellyfin-tizen`. Eles formam a matriz de testes de compatibilidade.
-- **Implementação:** surface plugin em `plugins/api/jellyfin`. DTOs e rotas
-  podem ser gerados a partir da spec OpenAPI oficial (ex.: `oapi-codegen`),
-  mantendo todo o mapeamento isolado no plugin.
-- Enquanto não houver UI própria, os clientes Jellyfin são a interface de
-  reprodução e a administração é feita via API (curl/Bruno). A coleção do
-  Bruno deve ser versionada no repositório (`bruno/`).
+- **Versão alvo:** Jellyfin 12.4.0 (`docs/jellyfin-openapi-stable.json`).
+- **Cliente alvo do MVP:** **`jellyfin-web`** (`jellyfin-android` e
+  `jellyfin-tizen` entram no pós-MVP).
+- **Isolamento total em `plugins/api/jellyfin`:**
+  - **Todas as rotas, DTOs, unidades (`Ticks`) e regras de negócio referentes ao
+    Jellyfin vivem exclusivamente dentro de `plugins/api/jellyfin`.**
+  - **Nenhum conceito que não foi discutido deve existir fora do plugin do
+    Jellyfin. Tudo o que for preciso adicionar fora de `plugins/api/jellyfin`
+    deve ser discutido antes.**
+- Enquanto não houver UI própria, o `jellyfin-web` é a interface de reprodução
+  e a administração é feita via API (`internal/server`, via curl/Bruno).
 
-### 9.1 Decisões impostas pela compatibilidade
+### 9.1 Regras de negócio isoladas em `plugins/api/jellyfin`
 
-1. **IDs:** usar **UUID** como identificador em `identity`, `library` e
-   `streamer`, evitando tabelas de mapeamento.
-2. **Autenticação:** o header
-   `Authorization: MediaBrowser Client="...", Device="...", DeviceId="...", Version="...", Token="..."`
-   exige `User`, `Device`, `Session` e `AccessToken` como conceitos de
-   primeira classe no `identity`.
-3. **Modelo de itens:** a `library` deve suportar a hierarquia
-   `Library → Series → Season → Episode` e `Movie`, `UserData` (assistido,
-   favorito, posição) e `MediaSources`/`MediaStreams` (faixas de vídeo,
-   áudio e legenda, obtidas via `ffprobe`).
+1. **IDs:** usar **UUID** como identificador nos módulos, evitando tabelas de
+   mapeamento na surface.
+2. **Mapeamento `Profile` ↔ `User` do Jellyfin e Autenticação (exclusivo do plugin):**
+   - Como o Jellyfin não possui o conceito nativo de contas com múltiplos
+     perfis, o plugin `plugins/api/jellyfin` mapeia cada **`User` exposto na
+     API Jellyfin 1:1 para um `Profile` (`ProfileID`)** do `identity`.
+   - O middleware do plugin extrai o token e os dados do cliente do header
+     `Authorization` / `X-Emby-Authorization`
+     (`MediaBrowser Client="...", Device="...", DeviceId="...", Version="...", Token="..."`)
+     ou do query parameter `api_key` / `ApiKey` (usado pelo `<video>` nas rotas
+     de stream de vídeo e legenda).
+   - **Login por senha no MVP (`POST /Users/AuthenticateByName`):** o cliente
+     envia `<username ou email>#<profile>` no campo `Username` e a senha da
+     conta em `Pw`. **O parse de `<username ou email>#<profile>` é feito
+     exclusivamente pelo plugin `plugins/api/jellyfin`**, que separa a
+     credencial da conta e o identificador do perfil antes de chamar o
+     `identity`. `GET /Users/Public` retorna `[]` para forçar a exibição do
+     formulário manual no `jellyfin-web`, e `GET /QuickConnect/Enabled` retorna
+     `false` no MVP.
+   - **QuickConnect e SSO (Pós-MVP):** o protocolo `QuickConnect` é específico
+     do Jellyfin e sua lógica deve ficar isolada no `plugins/api/jellyfin`
+     (qualquer necessidade no `identity` para suportar SSO/autorização deve ser
+     discutida antes).
+3. **Tradução do Catálogo na Surface (exclusiva do plugin):** a `library` mantém
+   apenas o modelo de domínio próprio do `mserver`. É o plugin
+   `plugins/api/jellyfin` que traduz bibliotecas, filmes, séries, temporadas,
+   episódios, faixas técnicas e legendas para `BaseItemDto`, `CollectionFolder`,
+   `MediaSources`, `MediaStreams`, `DeliveryMethod`, `DeliveryUrl` e converte
+   durações para `Ticks`. No MVP (sem `watchstate`), o plugin preenche
+   `UserData` (`UserItemDataDto`) com valores padrão zerados e retorna listas
+   vazias (`Items: []`, `TotalRecordCount: 0`) em `GET /UserItems/Resume` e
+   `GET /Shows/NextUp`.
 
-### 9.2 Fluxo de reprodução (mesmo caminho do Jellyfin)
+### 9.2 Fluxo de reprodução no MVP e evolução para o `transcoder`
 
-1. O cliente chama `POST /Items/{id}/PlaybackInfo` enviando seu
-   `DeviceProfile` (containers, codecs e formatos de legenda suportados).
-2. O `streamer` compara o `DeviceProfile` com os `MediaStreams` do item e
-   as legendas externas encontradas pelo `subtitles`, e decide:
-   - **Direct play:** o cliente reproduz o arquivo original via
-     `/Videos/{id}/stream`.
-   - **Transcode de áudio:** quando o container/vídeo são suportados, mas o
-     codec de áudio não. Segue o mesmo caminho do Jellyfin: a resposta
-     traz um `TranscodingUrl` apontando para
-     `/Videos/{id}/master.m3u8`, com vídeo copiado (`-c:v copy`) e áudio
-     transcodificado para um codec suportado pelo `DeviceProfile`,
-     entregue via HLS.
-3. **Conversão de legendas:** se o cliente não suportar o formato da
-   legenda externa (ex.: `.srt` ou `.ass` em um cliente que só aceita
-   `.vtt`), a conversão é feita pelo `transcoder` (via `ffmpeg`) e servida
-   pelo endpoint de legendas. Burn-in (legenda gravada no vídeo) fica fora
-   do MVP, pois exige transcode de vídeo.
-4. Transcode de vídeo fica fora do MVP; itens que exigirem transcode de
-   vídeo são reportados como não reproduzíveis.
+1. O cliente chama `POST /Items/{itemId}/PlaybackInfo` enviando seu
+   `DeviceProfile` (estrutura específica do Jellyfin).
+2. O plugin `plugins/api/jellyfin` traduz a requisição sem vazar `DeviceProfile`
+   nem DTOs do Jellyfin para fora do plugin:
+   - **Direct Play (MVP):** quando o container e os codecs são compatíveis, o
+     cliente reproduz o arquivo original via
+     `GET /Videos/{itemId}/stream` (ou `/Videos/{itemId}/stream.{container}`),
+     onde o plugin `api/jellyfin` faz proxy reverso em streaming (repassando
+     `Range`) para `GET /locations/{LocationID}/files/{FileID}` no `storage`.
+   - Caso não seja compatível com Direct Play no MVP, o plugin retorna
+     `ErrorCode: "NoCompatibleStream"`.
+3. **Sessões de reprodução (`/Sessions/Playing/*`):**
+   - O cliente reporta início (`POST /Sessions/Playing`), progresso
+     (`POST /Sessions/Playing/Progress`), ping (`POST /Sessions/Playing/Ping`)
+     e parada (`POST /Sessions/Playing/Stopped`).
+   - O plugin `plugins/api/jellyfin` converte os payloads e `PositionTicks` do
+     Jellyfin para o contrato de domínio do `playback`.
+4. **Legendas externas `.srt` (MVP):**
+   - O plugin `plugins/api/jellyfin` monta os `MediaStreams` de legenda com
+     `DeliveryMethod: "External"` e
+     `DeliveryUrl: "/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.srt"`,
+     e atende essa rota fazendo proxy para o arquivo `.srt` no `storage`.
+5. **Transcode de áudio HLS e conversão de legendas (Pós-MVP):**
+   - No pós-MVP, itens cujo áudio ou formato de legenda não sejam suportados
+     nativamente acionarão o módulo `transcoder` (HLS com `-c:v copy`
+     controlado via `SIGSTOP`/`SIGCONT`/`SIGTERM` e conversão de legendas).
 
-### 9.3 Endpoints mínimos
+### 9.3 Endpoints do MVP validados em `docs/jellyfin-openapi-stable.json`
 
-| Área         | Endpoints                                                                                                                                   |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Descoberta   | `GET /System/Info/Public`, `/System/Info`, `/Branding/Configuration`                                                                        |
-| Autenticação | `POST /Users/AuthenticateByName`, `/Users/Me`, `/Users/{id}`, `/Sessions/Capabilities/Full`                                                 |
-| Navegação    | `/UserViews`, `/Items`, `/Items/{id}`, `/Shows/{id}/Seasons`, `/Shows/{id}/Episodes`, `/Items/Latest`, `/Shows/NextUp`, `/UserItems/Resume` |
-| Imagens      | `/Items/{id}/Images/{type}`                                                                                                                 |
-| Reprodução   | `POST /Items/{id}/PlaybackInfo`, `/Videos/{id}/stream`, `/Videos/{id}/master.m3u8` + playlists/segmentos HLS                                |
-| Progresso    | `/Sessions/Playing`, `/Sessions/Playing/Progress`, `/Sessions/Playing/Stopped`, `/UserPlayedItems/{id}`                                     |
-| Legendas     | `/Videos/{id}/{mediaSourceId}/Subtitles/{index}/Stream.{format}`                                                                            |
+| Entrega | Área             | Endpoints no `plugins/api/jellyfin`                                                                                                                                                                                            |
+| ------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1       | Sistema/Branding | `GET /System/Info/Public`, `GET/POST /System/Ping`, `GET /System/Info`, `GET /Branding/Configuration`, `GET /Branding/Css`, `GET /Branding/Css.css`, `GET /QuickConnect/Enabled` (`false`)                                     |
+| 1       | Autenticação     | `GET /Users/Public` (`[]`), `POST /Users/AuthenticateByName` (`<user/email>#<profile>`), `GET /Users/Me`, `GET /Users/{userId}`, `POST /Sessions/Capabilities/Full`, `POST /Sessions/Logout`, `GET/POST /DisplayPreferences/*` |
+| 2       | Filmes           | `GET /UserViews`, `GET /Items`, `GET /Items/Latest`, `GET /Items/{itemId}`, `GET /Items/{itemId}/Intros` (vazio), `GET /UserItems/Resume` (vazio)                                                                              |
+| 3       | Séries           | `GET /Shows/{seriesId}/Seasons`, `GET /Shows/{seriesId}/Episodes`, `GET /Shows/NextUp` (vazio) + suporte a `Series`/`Season`/`Episode` em `/UserViews`, `/Items`, `/Items/Latest`, `/Items/{itemId}`                           |
+| 4       | Reprodução       | `POST/GET /Items/{itemId}/PlaybackInfo`, `GET/HEAD /Videos/{itemId}/stream`, `GET/HEAD /Videos/{itemId}/stream.{container}`, `POST /Sessions/Playing`, `POST /Sessions/Playing/Progress`, `Ping`, `Stopped`, `GET /GetUtcTime` |
+| 5       | Legendas `.srt`  | `GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/Stream.{routeFormat}` e `GET /Videos/{routeItemId}/{routeMediaSourceId}/Subtitles/{routeIndex}/{routeStartPositionTicks}/Stream.{routeFormat}`          |
 
-> A lista acima é uma referência inicial e deve ser validada contra a API
-> do Jellyfin 12 e o comportamento real dos clientes alvo.
+> O detalhamento completo de cada endpoint (`operationId`, parâmetros, schemas
+> e critérios de aceite por entrega) está em [`docs/roadmap.md`](roadmap.md).
 
 ## 10. Estrutura de pastas
+
+### 10.1 Árvore do repositório (MVP)
 
 ```
 mserver/
 ├── cmd/
-│   └── server/                    # ponto de entrada
+│   └── server/                          # ponto de entrada
 ├── internal/
-│   ├── app/                       # bootstrap, registro de módulos, ciclo de vida, wiring
-│   ├── server/                    # API do projeto (surface do núcleo)
+│   ├── app/                             # bootstrap, registro de módulos, ciclo de vida, wiring
+│   ├── server/                          # API do projeto (administração e setup inicial único)
 │   ├── infra/
 │   │   ├── config/
 │   │   ├── logging/
-│   │   ├── database/              # transação no contexto (WithTx/ConnFrom)
-│   │   │   └── sqlite/            # abertura do SQLite e runner de migrations
+│   │   ├── database/                    # transação no contexto (WithTx/ConnFrom)
+│   │   │   └── sqlite/                  # abertura do SQLite e runner de migrations
 │   │   ├── cache/memory/
-│   │   ├── queue/                 # interfaces Publisher/Subscriber
-│   │   │   └── memory/            # barramento em memória
-│   │   ├── outbox/                # outbox transacional reutilizável (tabela + relay)
-│   │   ├── registry/              # Registry[T] genérico para plugins
-│   │   ├── ffmpeg/                # wrapper de ffprobe/ffmpeg
-│   │   └── httpserver/            # listener HTTP e middlewares compartilhados pelas surfaces
+│   │   ├── queue/                       # interfaces Publisher/Subscriber e Envelope CloudEvents
+│   │   │   └── memory/                  # barramento em memória
+│   │   ├── outbox/                      # outbox transacional reutilizável (tabela + relay)
+│   │   ├── registry/                    # Registry[T] genérico para plugins
+│   │   ├── ffmpeg/                      # wrapper de ffprobe (e ffmpeg no pós-MVP)
+│   │   └── httpserver/                  # listener HTTP e middlewares compartilhados pelas surfaces
 │   └── modules/
-│       ├── storage/
-│       │   └── drivers/local/     # drivers do VFS
-│       ├── identity/
-│       ├── library/
-│       ├── streamer/
-│       ├── subtitles/
-│       └── transcoder/
+│       ├── storage/                     # VFS, localizações, FileID, analisadores, HTTP Range GET
+│       │   └── driver/
+│       │       └── local/               # driver de disco local
+│       ├── identity/                    # contas, perfis, setup inicial, dispositivos, sessões e tokens
+│       ├── library/                     # catálogo materializado global (filmes, séries, streams, legendas)
+│       ├── playback/                    # PlaybackInfo (Direct Play), sessões ativas e eventos
+│       └── subtitles/                   # match bidirecional de legendas locais .srt
 ├── plugins/
-│   ├── all.go                     # registro explícito dos plugins
+│   ├── all.go                           # registro explícito dos plugins
 │   ├── storage/
-│   │   ├── sha256/                # analisador SHA-256
-│   │   └── ed2k/                  # analisador ED2K
+│   │   └── ffprobe/                     # analisador ffprobe (streams técnicos)
 │   └── api/
-│       └── jellyfin/              # surface plugin de compatibilidade
-├── bruno/                         # coleção de requisições da API
+│       └── jellyfin/                    # surface plugin de compatibilidade Jellyfin 12.4.0
+├── bruno/                               # coleção de requisições da API
 └── docs/
     ├── planejamento.md
-    └── adr/
+    ├── roadmap.md
+    ├── modulos-e-eventos.md
+    └── jellyfin-openapi-stable.json
+```
+
+Módulos e plugins adicionados no segundo momento (não criar pastas
+antecipadamente):
+
+```
+├── internal/modules/
+│   ├── watchstate/                      # estado por perfil (ProfileID): UserData, Resume, NextUp e histórico
+│   ├── transcoder/                      # workers ffmpeg: HLS em tempo real, conversão de legendas e jobs em background
+│   ├── metadata/                        # enriquecimento de metadados, imagens e MediaSegments externos
+│   ├── indexer/                         # busca assíncrona em indexers
+│   ├── downloader/                      # integração com clientes de download e import no storage
+│   ├── acquisition/                     # monitoramento, perfis de qualidade e decisão (Sonarr + Radarr)
+│   ├── translation/                     # tradução assíncrona de legendas
+│   └── notification/                    # consumidor de eventos para alertas e webhooks
+└── plugins/
+    ├── storage/
+    │   ├── sha256/                      # analisador SHA-256
+    │   └── ed2k/                        # analisador ED2K
+    ├── metadata/                        # tmdb, tvdb, anidb, aniskip, introdb, ...
+    ├── watchstate/                      # trakt, anilist, simkl, ...
+    ├── subtitles/                       # opensubtitles, subdl, ...
+    ├── indexer/                         # torznab, newznab, cardigann, ...
+    ├── downloader/                      # qbittorrent, transmission, sabnzbd, ...
+    ├── translation/                     # openai, deepl, libretranslate, ...
+    └── notification/                    # webhook, discord, telegram, ...
 ```
 
 Itens adicionados na migração para gRPC (não criar antecipadamente):
 
 ```
-├── proto/mserver/<módulo>/v1/     # contratos .proto
-├── internal/gen/                  # código gerado pelo buf
-├── internal/infra/grpcserver/     # bufconn + TCP
-└── internal/modules/<módulo>/grpc/  # adaptadores servidor/cliente
+├── proto/mserver/<módulo>/v1/           # contratos .proto
+├── internal/gen/                        # código gerado pelo buf
+├── internal/infra/grpcserver/           # bufconn + TCP
+└── internal/modules/<módulo>/grpc/      # adaptadores servidor/cliente
 ```
 
-Plugins seguem a convenção `plugins/<módulo-que-estende>/<nome>`
-(ex.: `plugins/metadata/tvdb`, `plugins/downloader/qbittorrent`).
+Plugins seguem sempre a convenção `plugins/<módulo-que-estende>/<nome>`.
 
-### 10.1 Estrutura interna de um módulo
+### 10.2 Estrutura interna de um módulo
 
 ```
 internal/modules/<módulo>/
-├── api/             # CONTRATO PÚBLICO: interfaces, DTOs, erros, eventos
-│   └── provider.go  # contrato de plugins (apenas se o módulo for extensível)
-├── module.go        # implementa app.Module (Init/Start/Stop)
-├── service.go       # implementação local das interfaces de api/
-├── registry.go      # instância de Registry[T] (apenas se o módulo for extensível)
-├── contract_test.go # testes de contrato contra a interface de api/
-└── store/           # interface de persistência do módulo (store.Store)
-    └── sqlite/      # implementação SQLite, um arquivo por contexto
-        └── migrations/  # migrations embutidas (go:embed)
+├── api/                   # CONTRATO PÚBLICO: interfaces, DTOs, erros, IDs e eventos
+│   ├── service.go         # interface principal do módulo (inclui Resync quando produtor)
+│   ├── events.go          # tópicos e payloads dos eventos emitidos pelo módulo
+│   ├── ids.go             # tipos de IDs fortemente tipados
+│   ├── errors.go          # erros de domínio mapeáveis para gRPC
+│   └── provider.go        # contrato de plugins (apenas se o módulo for extensível)
+├── config.go              # configuração específica do módulo
+├── module.go              # implementa o ciclo de vida (Init/Start/Stop), DB, outbox e subscriptions
+├── service.go             # implementação local de api.Service
+├── events.go              # publicação na outbox e handlers de eventos consumidos (ECST)
+├── resync.go              # republicação idempotente do estado atual na outbox
+├── registry.go            # instância de Registry[T] (apenas se o módulo for extensível)
+├── <módulo>_test.go       # testes contra o contrato api/
+└── store/                 # interface de persistência do módulo (store.Store)
+    ├── store.go
+    └── sqlite/            # implementação SQLite, um arquivo por contexto
+        ├── sqlite.go
+        └── migrations/    # migrations embutidas (go:embed)
 ```
 
 O módulo depende apenas da interface `store.Store`; só o `module.go`
@@ -822,7 +1009,7 @@ Cada pacote é dividido em arquivos pequenos por contexto (ex.:
 `locations.go`, `files.go`, `scan.go`), em vez de um arquivo grande
 separado por comentários.
 
-### 10.2 Regras de fronteira
+### 10.3 Regras de fronteira
 
 Aplicadas via lint (`depguard` no golangci-lint ou `go-arch-lint`):
 
@@ -836,7 +1023,7 @@ Aplicadas via lint (`depguard` no golangci-lint ou `go-arch-lint`):
 - `internal/infra/...` não importa módulos nem plugins.
 - Apenas `internal/app` importa implementações concretas de módulos.
 
-### 10.3 Contrato de módulo (esboço)
+### 10.4 Contrato de módulo (esboço)
 
 ```go
 type Module interface {
@@ -848,22 +1035,23 @@ type Module interface {
 }
 ```
 
-### 10.4 Configuração por variáveis de ambiente (proposta)
+### 10.5 Configuração por variáveis de ambiente (proposta)
 
 Convenção: toda variável segue `MSERVER_<MÓDULO>_<OPÇÃO>`. Opções
 globais, que não pertencem a nenhum módulo, usam `MSERVER_<OPÇÃO>`.
 
 ```sh
-MSERVER_MODULES=all                          # ou: library,streamer,...
+MSERVER_MODULES=all                          # ou: storage,identity,library,watchstate,playback,subtitles,transcoder
 MSERVER_DATA_DIR=/var/lib/mserver            # SQLite por módulo: <data>/<módulo>.db
 MSERVER_<MÓDULO>_ADDR=host:porta             # futuro: endereço de módulo remoto
 
 # Storage
 MSERVER_STORAGE_SCAN_INTERVAL=6h             # varredura periódica (0 desativa)
 
-# Storage, planejado (localizações de sistema, etapa 6; padrão: <data>/<classe>)
+# Storage, planejado (localizações de sistema, etapa 7; padrão: <data>/<classe>)
 MSERVER_STORAGE_DRIVER_LOCAL_CACHE_DIR=/mnt/ssd/cache
 MSERVER_STORAGE_DRIVER_LOCAL_TRANSCODES_DIR=/mnt/ssd/transcodes
+MSERVER_STORAGE_DRIVER_LOCAL_IMAGES_DIR=/mnt/ssd/images
 MSERVER_STORAGE_CACHE_TTL=24h                # TTL padrão por classe
 MSERVER_STORAGE_TRANSCODES_TTL=1h
 ```
@@ -873,44 +1061,68 @@ Variáveis desconhecidas com o prefixo de um módulo são rejeitadas no
 
 ## 11. Roadmap
 
-### 11.1 MVP
+> O detalhamento completo de cada entrega, endpoints da API administrativa,
+> endpoints validados contra `docs/jellyfin-openapi-stable.json` e critérios de
+> aceite estão em [`docs/roadmap.md`](roadmap.md).
 
-Objetivo: **reproduzir a biblioteca local nos clientes `jellyfin-web`,
-`jellyfin-android` e `jellyfin-tizen`, sem provedores de metadados.**
+### 11.1 MVP (5 Entregas Verticais)
 
-| #   | Etapa     | Escopo                                                                                                                                                                                                                                                                                                   | Entrega na API Jellyfin                       |
-| --- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| 0   | Fundação  | CLI, config via env, logging, `app.Module`, wiring de interfaces, SQLite por módulo, barramento de eventos em memória, `Registry[T]`, wrapper FFmpeg, lint de fronteiras, CI                                                                                                                             | Esqueleto do plugin e `/System/Info/Public`   |
-| 1   | Storage   | Driver local, cadastro de localizações (sem sobreposição) via API do projeto, indexação com `FileID` (UUIDv7) e detecção de renomeação por inode, listagem de vizinhos com `FileID`, `Resolve` para caminho local, eventos de arquivo via outbox, persistência atrás da interface `store.Store` (SQLite) | —                                             |
-| 2   | Identity  | Usuários, dispositivos, sessões, tokens                                                                                                                                                                                                                                                                  | Login nos clientes                            |
-| 3   | Library   | Cadastro de bibliotecas (tipo + um ou mais `LocationID`s do `storage`), identificação pelo caminho relativo via regex (seção 8), IDs estáveis, probe via `ffprobe`, `UserData`                                                                                                                           | Navegação nos clientes                        |
-| 4   | Streamer  | Sessões de playback, `PlaybackInfo` com `DeviceProfile`, **apenas direct play**. No `storage`: leitura HTTP com `Range`                                                                                                                                                                                  | Primeiro vídeo tocando; progresso/resume      |
-| 5   | Legendas  | Descoberta de **legendas externas locais** (`.srt`, `.vtt`, `.ass`, ... ao lado da mídia), referenciadas pelo `FileID` via listagem de vizinhos                                                                                                                                                          | Seleção de legendas nos clientes              |
-| 6   | Transcode | **Áudio** seguindo o fluxo do Jellyfin (HLS, vídeo copiado) e **conversão de legendas**, `ffmpeg` local. No `storage`: localizações de sistema (`cache`, `transcodes`) com escrita (`PUT`) e TTL, URLs assinadas                                                                                         | Reprodução de áudio e legendas não suportados |
+Objetivo: **permitir que o `jellyfin-web` conecte ao `mserver`, autentique com
+`<username ou email>#<profile>`, navegue pelo catálogo local de Filmes e Séries
+e reproduza mídia via Direct Play com legendas externas `.srt`, operando 100%
+na arquitetura ECST desde o primeiro dia.**
 
-### 11.2 Segundo momento
+| Entrega | Nome                                        | Módulo(s)                                            | Escopo Principal                                                                                                                                                                                                                          | Resultado no `jellyfin-web`                                                |
+| ------- | ------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 1       | Fundação + `identity` + Login               | `infra`, `app`, `server`, `identity`, `api/jellyfin` | Fundação ECST (`sqlite`, `WithTx`, `outbox` UUIDv7, `queue/memory` CloudEvents 1.0, `Registry[T]`), `identity` (`Account` + `Profile`, sessões/tokens, `Resync`) e rotas base + login `<user/email>#<profile>` isolados em `api/jellyfin` | Conecta ao servidor, faz login e carrega a tela inicial (Home vazia)       |
+| 2       | `storage` + `library` (Filmes)              | `storage`, `plugins/storage/ffprobe`, `library`      | Driver `local` (`os.Root`), localizações sem sobreposição, indexação (`FileID` UUIDv7 + `inode`) + `ffprobe` (`FileAnalyzed`), `Resync`, bibliotecas de filmes, parser regex de filmes, IDs UUIDv5 do `FileID`                            | Bibliotecas de filmes visíveis na Home, listagem e página de detalhes      |
+| 3       | `library` (Séries)                          | `library`, `api/jellyfin`                            | Parser regex completo de séries (temporadas, `Season 00`, múltiplos episódios `S01E01-E02`, numeração absoluta de anime e episódios sem número), hierarquia `Series → Season → Episode` e rotas `/Shows/*` em `api/jellyfin`              | Navegação completa por Séries → Temporadas → Episódios                     |
+| 4       | `playback` (Direct Play) + Stream `storage` | `storage`, `playback`, `api/jellyfin`                | Rota HTTP `GET /locations/{LocationID}/files/{FileID}` (com `Range`) no `storage`, sessões ativas no `playback` emitindo eventos `Playback*`, e `PlaybackInfo` (`DeviceProfile`) + proxy de streaming isolados em `api/jellyfin`          | Reprodução de filmes e episódios com seek (HTTP `206`) e eventos de sessão |
+| 5       | `subtitles` (Legendas `.srt`)               | `subtitles`, `library`, `playback`, `api/jellyfin`   | Match bidirecional por regex de legendas locais `.srt` via eventos do `storage` e da `library`, emissão de `SubtitleAdded`/`SubtitleRemoved`, consolidação na `library` e `DeliveryUrl` + proxy de legenda isolados em `api/jellyfin`     | Seleção e exibição de legendas externas `.srt` durante a reprodução        |
+
+### 11.2 Segundo momento (Pós-MVP)
 
 Sem ordem definida:
 
+- **Módulo `watchstate`:** persistência de estado e progresso por `ProfileID`
+  (assistido, favorito, posição, contagem de reproduções), filas de continuar
+  assistindo / próximos episódios, contadores de itens não assistidos e _watch
+  history_.
+- **Módulo `transcoder` e localizações de sistema no `storage`:** transcode de
+  áudio HLS (`-c:v copy`) controlado por `SIGSTOP`/`SIGCONT`/`SIGTERM`,
+  conversão de legendas (`.srt`/`.ass` → `.vtt`) e localizações `cache`,
+  `transcodes` e `images` com `PUT`, TTL e URLs assinadas.
+- **Compatibilidade adicional Jellyfin (`plugins/api/jellyfin`):** validação e
+  suporte aos clientes `jellyfin-android` e `jellyfin-tizen`, fluxo
+  `QuickConnect`, protocolo `SyncPlay` + WebSocket (`/socket`), e exposição de
+  `Chapters` / `MediaSegments` (`GET /MediaSegments/{itemId}`).
 - Migração dos contratos para gRPC (`bufconn`/TCP) e descoberta via
   variáveis de ambiente.
-- Analisadores de arquivos no `storage` (SHA-256, ED2K), com detecção
-  de arquivos movidos entre localizações pelo SHA-256, e observação em
+- Analisadores de hash no `storage` (SHA-256, ED2K), com detecção de
+  arquivos movidos entre localizações pelo SHA-256, e observação em
   tempo real (`fsnotify`).
-- Módulo `metadata` com plugins (TVDB, TMDB, AniDB, ...), mantendo a
-  identificação pelo path como fallback.
-- Imagens: provedores de metadados, arquivos locais e frames extraídos
-  pelo `ffmpeg` para episódios.
+- Módulo `metadata` com plugins (TVDB, TMDB, AniDB, AniSkip, IntroDB, ...),
+  mantendo a identificação pelo path como fallback.
+- Jobs em background no `transcoder`: extração de frames de episódios,
+  imagens de capítulos, geração de _trickplay_, extração de legendas
+  embutidas e detecção de abertura/créditos por áudio (`chromaprint`) e
+  vídeo.
+- Imagens na `library` vindas dos eventos do `metadata`, do `transcoder` e
+  de arquivos locais.
 - Transcode de vídeo, burn-in de legendas, aceleração por hardware e
   workers remotos via VFS HTTP.
-- Legendas embutidas no container.
 - Filmes: múltiplas versões do mesmo filme e extras (trailers,
   featurettes).
+- SSO via OIDC no `identity` (com login nos clientes Jellyfin exclusivo via
+  `QuickConnect`), avatares de perfil e migração de perfis entre contas
+  (mantendo todo o histórico do `watchstate`).
+- Plugins de sincronização externa no `watchstate` (Trakt, AniList, Simkl).
 - `indexer` (Torznab, Newznab, Cardigann).
 - `downloader` com plugins para Transmission, qBittorrent e SABnzbd.
-- `acquisition` (filmes e depois séries), com fluxo de hardlink
-  configurável pelo operador.
-- Provedores de legendas externos e `translation`.
+- `acquisition` (filmes e depois séries), orquestrando `indexer` e
+  `downloader` por eventos, com fluxo de hardlink configurável pelo
+  operador.
+- Provedores de legendas externos no `subtitles` e módulo `translation`.
 - `notification`.
 - Interface web própria.
 - Backends adicionais (S3 no VFS, Postgres/MariaDB, Valkey/Redis, NATS/RabbitMQ).

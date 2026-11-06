@@ -1,0 +1,331 @@
+# mserver — Arquitetura de Módulos, Comunicação e Catálogo de Eventos
+
+Este documento detalha a divisão interna dos módulos do **mserver**, o contexto (responsabilidade, dados próprios e projeções locais) de cada um, os padrões de comunicação (síncrona vs. assíncrona via ECST) e o catálogo completo de eventos que garantem o funcionamento do sistema sem acoplamento de banco de dados.
+
+---
+
+## 1. Visão Geral da Arquitetura (Estilo Microserviços / Netflix)
+
+Mesmo quando executado como um único binário (monolito) em uma única máquina, o **mserver** opera internamente como um sistema de microserviços orientados a eventos:
+
+1. **Isolamento Total de Dados:** Cada módulo possui seu próprio banco de dados (`<módulo>.db` no SQLite), cache e outbox. Não há `JOIN` nem compartilhamento de tabelas entre módulos.
+2. **Event-Carried State Transfer (ECST) e Enriquecimento Assíncrono:**
+   - Módulos produtores publicam eventos contendo todo o estado necessário para que os módulos consumidores atualizem suas próprias projeções locais.
+   - A `library` atua como o **Catálogo Materializado**: ela descobre itens a partir dos eventos do `storage` e é enriquecida de forma 100% assíncrona pelos eventos de `subtitles`, `transcoder` e `metadata`.
+   - O `watchstate` isola toda a escrita e leitura associada aos **perfis de visualização (`ProfileID`)** (`Resume`, `NextUp`, assistidos, favoritos e histórico de visualizações), mantendo a `library` 100% global e cacheável e permitindo migrar perfis entre contas sem movimentar dados de histórico.
+3. **Apenas o `storage` Manipula Dados Físicos (Push Síncrono):**
+   - Nenhum outro módulo acessa o sistema de arquivos diretamente.
+   - Sempre que um módulo produz um novo arquivo (`transcoder`, `subtitles`, `metadata`, `downloader`), ele o grava de forma **síncrona** no `storage` (via contrato/HTTP `PUT`), recebendo o `FileID`. O `storage` jamais busca dados nos outros módulos.
+4. **Consistência Eventual Garantida com `Resync` Universal:**
+   - Todo módulo produtor de estado expõe um método `Resync(ctx, escopo)` em seu contrato `api/`.
+   - O `Resync` lê os registros atuais do banco do módulo e republica os eventos correspondentes na `outbox`.
+   - Como todos os handlers de eventos são **idempotentes** (upsert baseado em ID e timestamp/versão), o `Resync` permite inicializar módulos novos (_cold start_), cadastrar bibliotecas sobre localizações já existentes e reconstruir o banco de qualquer módulo derivado do zero.
+5. **Isolamento Total do Jellyfin e Governança de Conceitos (Regra Inegociável):**
+   - **Todas as regras de negócio, conceitos, DTOs, unidades (como `.NET Ticks`), fluxos (`QuickConnect`, parse de `<user>#<profile>`, `DeviceProfile`/`PlaybackInfo`, `MediaSources`/`MediaStreams`/`DeliveryUrl`, `UserData`, protocolo `SyncPlay`) referentes ao Jellyfin devem estar 100% isolados no plugin `plugins/api/jellyfin`.**
+   - **Nenhum conceito que não foi discutido deve estar fora do plugin do Jellyfin.**
+   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos contratos `api/`, bancos, eventos ou módulos internos) deve ser discutido antes.**
+
+---
+
+## 2. Planos Arquiteturais e Mapa de Comunicação
+
+Os 13 módulos do sistema dividem-se em **4 planos**:
+
+```mermaid
+flowchart TD
+    subgraph Surfaces [Surfaces - API Composition / BFF]
+        REST[API do Projeto]
+        JF[Plugin API Jellyfin]
+    end
+
+    subgraph HotPath [1. Hot Path - Tempo Real e Baixa Latência]
+        ID[identity]
+        LIB[library]
+        WS[watchstate]
+        PB[playback]
+    end
+
+    subgraph MediaPlane [2. Media & Data Plane - I/O e CPU]
+        STO[storage]
+        TR[transcoder]
+    end
+
+    subgraph ColdPath [3. Cold Path - Enriquecimento e Aquisição Async]
+        SUB[subtitles]
+        META[metadata]
+        ACQ[acquisition]
+        IDX[indexer]
+        DL[downloader]
+        TRL[translation]
+    end
+
+    subgraph Hooks [4. Observabilidade e Efeitos Colaterais]
+        NOTIF[notification]
+    end
+
+    %% Chamadas Síncronas (Sólidas)
+    REST & JF -->|RPC Leitura/Comando| ID & LIB & WS & PB
+    JF -->|Proxy HTTP Range GET| STO
+    PB -->|RPC Leitura| LIB
+    PB -->|RPC StartTranscode| TR
+    TR & SUB & META & DL -->|Push Síncrono PUT / Range GET| STO
+
+    %% Fluxos Assíncronos por Eventos (Pontilhadas)
+    STO -.->|File*| LIB & SUB
+    LIB -.->|Movie* / Series* / Season* / Episode*| SUB & META & WS & TR & ACQ & NOTIF
+    SUB -.->|Subtitle*| LIB & TR & TRL
+    TRL -.->|SubtitleTranslated| SUB
+    META -.->|Metadata* / MediaSegments*| LIB & ACQ
+    TR -.->|SubtitleConverted / Thumbnail* / ChapterImages* / Trickplay* / MediaSegments*| LIB
+    ID -.->|Account* / Profile* / Session*| WS & PB & NOTIF
+    PB -.->|Playback*| WS & TR & NOTIF & Surfaces
+    ACQ -.->|SearchRequested| IDX
+    IDX -.->|ReleasesFound| ACQ
+    ACQ -.->|DownloadRequested| DL
+    DL -.->|Download*| ACQ & NOTIF
+```
+
+### Resumo de Comunicação Síncrona vs. Assíncrona
+
+| Origem → Destino                                                | Tipo                                | Quando e Por Quê                                                                                                                                                        |
+| :-------------------------------------------------------------- | :---------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Surfaces` → `identity`, `library`, `watchstate`, `playback`    | **Síncrona (RPC)**                  | Responder às requisições HTTP dos clientes compondo dados globais (`library`) com dados do perfil (`watchstate` — Pós-MVP).                                             |
+| `plugins/api/jellyfin` → `storage`                              | **Síncrona (HTTP Range Proxy)**     | Proxy reverso em streaming de vídeo e legendas externas (`.srt`) para `GET /locations/{LocationID}/files/{FileID}` no `storage`.                                        |
+| `library` → `storage.Resync`                                    | **Síncrona (RPC)**                  | Disparar a republicação dos eventos `FileIndexed`/`FileAnalyzed` de uma `LocationID` quando uma biblioteca nova é cadastrada.                                           |
+| `playback` → `library`                                          | **Síncrona (RPC)**                  | Obter as informações técnicas consolidadas do item para validar ou iniciar uma sessão de reprodução.                                                                    |
+| `playback` → `transcoder.StartTranscode`                        | **Síncrona (RPC)**                  | Iniciar imediatamente o processo `ffmpeg` para entregar a playlist HLS ao player sem latência de fila.                                                                  |
+| `transcoder`, `subtitles`, `metadata`, `downloader` → `storage` | **Síncrona (RPC / HTTP)**           | Gravar novos arquivos ou ler bytes (`Range`) no VFS.                                                                                                                    |
+| **Todas as demais interações entre módulos**                    | **Assíncrona (Eventos via Outbox)** | Indexação, `ffprobe`, catálogo, legendas, metadados, tradução, imagens, _trickplay_, controle `SIGSTOP`/`SIGCONT` do transcode, `watchstate`, aquisição e notificações. |
+
+---
+
+## 3. Contexto Detalhado de Cada Módulo
+
+### 3.1 `storage` (Plano de Dados e Análise Física — MVP)
+
+- **Responsabilidade:** Único dono do sistema de arquivos (VFS), gerenciando localizações (`media` no MVP; `cache`, `transcodes`, `images` no pós-MVP), atribuindo `FileID` (UUIDv7) estável (com detecção de move por `inode` e, no futuro, por hash), servindo bytes via HTTP (`GET /locations/{LocationID}/files/{FileID}` com `Range` no MVP; `PUT` no pós-MVP) e executando analisadores físicos sobre os arquivos (`ffprobe` no MVP; `sha256` e `ed2k` no pós-MVP).
+- **Dados próprios (SQLite):** `locations`, `files` (`file_id`, `location_id`, `path`, `size`, `mtime`, `inode`, `expires_at`), `file_analyses` (`file_id`, `analyzer`, `version`, `payload_json`).
+- **Projeções de outros módulos:** Nenhuma (`Requires() = []`).
+- **Comunicação:**
+  - Recebe chamadas síncronas de escrita/leitura (`Resolve`, HTTP `GET`/`PUT`) e `Resync(LocationID)`.
+  - Emite eventos `storage.file.*` sempre que arquivos são indexados, alterados, movidos, removidos ou analisados.
+
+### 3.2 `identity` (Contas, Perfis e Autenticação — MVP)
+
+- **Responsabilidade:** Gerenciar a separação estilo Netflix entre **Contas (`Account`)** e **Perfis (`Profile`)**, dispositivos registrados, sessões de autenticação e tokens de acesso (com suporte a SSO OIDC no pós-MVP):
+  - **Conta (`AccountID`):** detém credenciais de autenticação (`username`, `email`, `password_hash`, `is_admin`, `disabled` e, no futuro, vínculo SSO OIDC).
+  - **Perfil (`ProfileID`):** pertence a uma conta (`account_id`), mas possui identidade própria (`profile_id`), identificador curto único dentro da conta (`handle`), nome de exibição (`display_name`) e imagem restrita ao perfil (`avatar_file_id` no futuro). No futuro, um perfil pode ser migrado para outra conta (`TransferProfile`) apenas alterando seu `account_id`, levando todo o histórico junto.
+  - **Isolamento das regras do Jellyfin em `plugins/api/jellyfin`:** O módulo `identity` não conhece sintaxes ou protocolos do Jellyfin. O mapeamento `User` (Jellyfin) ↔ `Profile` (`ProfileID`), o parse da string concatenada `<username ou email>#<profile>` enviada no `POST /Users/AuthenticateByName` e a máquina de estados do fluxo **QuickConnect** (`/QuickConnect/Initiate`, `/QuickConnect/Connect`, `/Users/AuthenticateWithQuickConnect`) ficam isolados em `plugins/api/jellyfin` (qualquer operação necessária no contrato do `identity` para suportar autorização deve ser discutida antes).
+- **Dados próprios (SQLite):**
+  - `accounts`, `profiles`, `devices`, `auth_sessions` e `access_tokens` (esquema exato a ser definido junto ao contrato do módulo).
+- **Projeções de outros módulos:** Nenhuma.
+- **Comunicação:**
+  - Consultado pelas Surfaces para autenticação e validação de tokens.
+  - Emite eventos de ciclo de vida de contas, perfis e sessões (`Account*`, `ProfileCreated`, `ProfileUpdated`, `ProfileTransferred`, `ProfileDeleted`, `SessionRevoked`) para que `watchstate`, `playback` e `notification` reajam sem acoplamento.
+
+### 3.3 `library` (Catálogo Materializado Global)
+
+- **Responsabilidade:** Manter o catálogo global de mídia (`Library`, `Movie`, `Series`, `Season`, `Episode`), 100% independente de usuários (altamente cacheável em memória) e livre de conceitos do Jellyfin. Identifica itens aplicando regex sobre os caminhos relativos vindos do `storage` e agrega as informações técnicas e enriquecimentos vindos dos demais módulos em seu modelo de domínio próprio (a tradução para `BaseItemDto`, `MediaSources`, `MediaStreams`, `DeliveryMethod` e `DeliveryUrl` pertence exclusivamente ao `plugins/api/jellyfin`).
+- **Dados próprios (SQLite):**
+  - `libraries` e `library_locations` (`library_id`, `location_id`, `media_type`).
+  - `movies`, `series`, `seasons`, `episodes`.
+- **Dados consolidados via Eventos (ECST):**
+  - Informações técnicas de streams e capítulos (recebidos de `storage.file.analyzed.v1` via analisador `ffprobe`).
+  - Legendas externas (recebidas de `subtitles.subtitle.added.v1` e `transcoder.subtitle.converted.v1`).
+  - Segmentos de mídia — intervalos de abertura/encerramento (derivados inicialmente dos títulos dos capítulos do `ffprobe`, e enriquecidos por `metadata.media_segments.updated.v1` e `transcoder.media_segments.detected.v1`).
+  - Imagens e _trickplay_ (recebidos de `metadata.images.updated.v1`, `transcoder.thumbnail.extracted.v1`, `transcoder.chapter_images.extracted.v1` e `transcoder.trickplay.generated.v1`).
+- **Comunicação:**
+  - Não chama nenhum módulo no caminho crítico de leitura.
+  - Ao cadastrar uma biblioteca, sincroniza os arquivos da localização com o `storage`.
+  - Emite eventos de catálogo (`Movie*`, `Series*`, `Season*`, `Episode*`) a cada mudança na estrutura dos itens.
+
+### 3.4 `watchstate` (Estado de Consumo por Perfil e Histórico — Pós-MVP)
+
+- **Responsabilidade:** Gerenciar tudo o que relaciona um **`ProfileID`** a um **`ItemID`**: progresso atual, estado de assistido, favoritos, filas de continuar assistindo e próximos episódios, contadores de não assistidos e o histórico cronológico completo de sessões assistidas (_Watch History_). Como tudo é indexado exclusivamente pelo `ProfileID` (e nunca pelo `AccountID`), migrar um perfil entre contas no `identity` preserva 100% do histórico automaticamente em `O(1)`. No futuro, hospeda plugins de sincronização externa por perfil (Trakt, AniList, Simkl). A tradução para os DTOs `UserItemDataDto` (`UserData`), `Resume` e `NextUp` do Jellyfin fica isolada em `plugins/api/jellyfin`.
+- **Projeções locais (via ECST):**
+  - Topologia do catálogo (`Series → Season → Episode`) alimentada pelos eventos da `library`.
+- **Comunicação:**
+  - Escuta eventos da `library`, do `playback` e do `identity`.
+  - Consultado pelas Surfaces e recebe comandos quando o perfil marca/desmarca manualmente um item como assistido ou favorito.
+
+### 3.5 `playback` (Sessões de Reprodução em Tempo Real e Salas Compartilhadas — MVP)
+
+- **Responsabilidade:** Manter o estado em memória das sessões de reprodução ativas, decidir sobre reprodução direta ou transcode (no pós-MVP), detectar sessões abandonadas por timeout e emitir eventos de ciclo de vida da reprodução. No pós-MVP, coordena também salas de reprodução sincronizada protegidas por código de acesso.
+- **Isolamento das regras do Jellyfin em `plugins/api/jellyfin`:**
+  - A interpretação de `DeviceProfile` e montagem de `PlaybackInfoResponse` (`SupportsDirectPlay`, `SupportsDirectStream`, `Protocol`, `PlaySessionId`, `ErrorCode: "NoCompatibleStream"`) pertencem ao `plugins/api/jellyfin`.
+  - No pós-MVP, a adaptação das salas compartilhadas para o protocolo `SyncPlay` do Jellyfin (`/SyncPlay/*` e WebSocket `/socket`) fica isolada em `plugins/api/jellyfin`.
+- **Dados próprios:** Sessões ativas (e salas compartilhadas no pós-MVP) em memória.
+- **Comunicação:**
+  - Chama `library` e `transcoder.StartTranscode` (no pós-MVP, quando exigir transcode HLS).
+  - Emite eventos duráveis de sessão (`PlaybackStarted`, `PlaybackProgressed`, `PlaybackPaused`, `PlaybackResumed`, `PlaybackStopped`) para `watchstate` e `transcoder`.
+
+### 3.6 `subtitles` (Legendas Locais `.srt` no MVP e Provedores Externos no Pós-MVP)
+
+- **Responsabilidade:** Descobrir e associar legendas externas locais `.srt` aos itens da biblioteca (no MVP) e suportar outros formatos e busca de legendas faltantes em provedores externos como OpenSubtitles/Subdl (no Pós-MVP).
+- **Dados próprios (SQLite):**
+  - `subtitle_files` (`file_id`, `location_id`, `path`, `format`, `language`, `is_forced`, `is_hearing_impaired`) — populada via `storage.file.indexed.v1`.
+  - `matched_subtitles` (`subtitle_id`, `item_id`, `file_id`, `converted_vtt_file_id`, `language`, `format`, `source`).
+- **Projeções locais (via ECST):**
+  - `media_items` (`item_id`, `item_type`, `file_id`, `location_id`, `video_path`, `title`, `year`, `series_title`, `season_number`, `episode_number`) — populada pelos eventos `MovieAdded`/`EpisodeAdded` da `library`.
+- **Comunicação:**
+  - Faz o match bidirecional sempre sobre sua projeção local: tanto quando chega `FileIndexed` de uma legenda quanto quando chega `MovieAdded`/`EpisodeAdded` de um vídeo.
+  - Quando encontra (ou baixa e grava no `storage`) uma legenda, emite `SubtitleAdded` para que a `library` a associe ao item e o `transcoder` possa pré-convertê-la se necessário.
+
+### 3.7 `transcoder` (Execução do FFmpeg em Tempo Real e em Background — Pós-MVP)
+
+- **Responsabilidade:** Executar todos os processos `ffmpeg` do sistema, divididos em duas filas com controle de prioridade via sinais POSIX (`SIGSTOP`, `SIGCONT`, `SIGTERM`):
+  1. **Fila Realtime (HLS):** Iniciada de forma síncrona por `StartTranscode`. Monitora a posição do cliente via eventos do `playback`: se o cliente pausar (`PlaybackPaused`) ou se o buffer de segmentos gerados ultrapassar a janela máxima à frente do cliente (ex.: +90s), envia **`SIGSTOP`** ao `ffmpeg`; quando o cliente retoma (`PlaybackResumed`) ou o buffer cai abaixo do limite mínimo (ex.: +45s), envia **`SIGCONT`**; no `PlaybackStopped`, envia **`SIGTERM`**.
+  2. **Fila Background (Baixa Prioridade):** Reage a eventos da `library` e do `subtitles` para converter legendas (`.srt`/`.ass` → `.vtt`), extrair frames de episódios, gerar imagens de capítulos, gerar _trickplay_ e detectar aberturas/créditos por áudio (`chromaprint`) e vídeo. Se uma sessão Realtime iniciar e precisar de CPU, os processos da fila Background recebem `SIGSTOP` temporário.
+- **Dados próprios (SQLite):** `transcode_jobs` (histórico/estado dos jobs de background já processados por `ItemID`/`FileID` para evitar retrabalho).
+- **Comunicação:**
+  - Lê mídia via `storage.Resolve` (caminho local ou HTTP `Range`) e grava artefatos de forma síncrona no `storage` (`transcodes`, `cache`, `images`).
+  - Emite eventos de conclusão (`SubtitleConverted`, `ThumbnailExtracted`, `ChapterImagesExtracted`, `TrickplayGenerated`, `MediaSegmentsDetected`) para enriquecer a `library` e o `subtitles`.
+
+### 3.8 `metadata` (Provedores de Metadados, Artes e Segmentos — Futuro)
+
+- **Responsabilidade:** Consultar provedores externos (TMDB, TVDB, AniDB, Fanart.tv, AniSkip, IntroDB) para enriquecer sinopses, elenco, notas, títulos oficiais, IDs externos, imagens (pôsteres, backdrops, logos) e segmentos de mídia (timestamps de abertura/encerramento).
+- **Projeções locais (via ECST):** Cópia dos itens da `library` (`Series`, `Season`, `Episode`, `Movie`) e hashes de arquivos (ex.: ED2K do `storage.file.analyzed.v1` para match exato no AniDB).
+- **Comunicação:**
+  - Baixa imagens externas, salva de forma síncrona no `storage` (classe `images`) e emite `MetadataUpdated`, `ImagesUpdated` e `MediaSegmentsUpdated` para a `library` (e `acquisition`).
+
+### 3.9 `acquisition`, `indexer` e `downloader` (Pipeline de Aquisição — Futuro)
+
+- **`acquisition`:** Mantém os itens monitorados, perfis de qualidade e conhece os episódios existentes (via eventos do `metadata`) e os já presentes no catálogo (via eventos da `library`). Emite `ReleaseSearchRequested` quando precisa buscar mídia faltante ou fazer upgrade, avalia os candidatos recebidos em `ReleasesFound` e emite `DownloadRequested` para o melhor release.
+- **`indexer`:** Gerencia plugins de indexers (Torznab, Newznab, Cardigann) com controle próprio de _rate limit_ e concorrência. Escuta `ReleaseSearchRequested` (ou buscas manuais) e emite `ReleasesFound`.
+- **`downloader`:** Gerencia plugins de clientes de download (qBittorrent, Transmission, SABnzbd). Escuta `DownloadRequested`, acompanha o progresso via polling e, ao concluir, copia/move ou cria **hardlink** de forma síncrona no `storage` (na localização `media` de destino), emitindo `DownloadCompleted` com o `FileID` gerado.
+
+### 3.10 `translation` (Tradução de Legendas — Futuro)
+
+- **Responsabilidade:** Traduzir legendas automaticamente usando plugins de tradução (LLMs, DeepL, LibreTranslate) quando o `subtitles` não encontra legenda no idioma nativo, mas encontra em um idioma base.
+- **Comunicação:** Escuta `SubtitleTranslationRequested` (ou `SubtitleAdded` elegível), lê a legenda original via `storage`, grava a legenda traduzida no `storage` e emite `SubtitleTranslated` para o `subtitles`.
+
+### 3.11 `notification` (Notificações e Webhooks — Futuro)
+
+- **Responsabilidade:** Reagir aos eventos relevantes de todos os módulos e disparar alertas externos (Webhooks, Discord, Telegram, Push).
+- **Projeções locais (via ECST):** Projeção mínima de contas/perfis (`identity`) e títulos de itens (`library`) para formatar notificações sem fazer RPC.
+
+---
+
+## 4. Catálogo Completo de Eventos
+
+Todos os eventos trafegam no envelope **CloudEvents 1.0** (`queue.Envelope[T]`):
+
+- `id`: UUIDv7 (monótono, garante ordenação e chave de idempotência/deduplicação nos consumidores)
+- `source`: nome do módulo emissor
+- `type`: nome versionado do evento (também usado como tópico da fila)
+- `time`: timestamp UTC
+- `subject`: ID do recurso principal ao qual o evento se refere
+- `data`: payload JSON tipado definido no `api/` do módulo de origem
+
+> **Importante:** Nenhum conceito ou unidade do Jellyfin (como `Ticks`, `UserData`, `SyncPlay` ou `MediaSources`) deve fazer parte dos payloads de eventos internos. Além disso, os campos exatos de `data` de cada módulo ainda não implementado são uma referência inicial e **devem ser discutidos antes** de serem definidos em código no pacote `api/` do respectivo módulo.
+
+---
+
+### 4.1 Eventos emitidos pelo `storage`
+
+| Tópico (`type`)            | `subject` | Consumidores                         | Quando é disparado                                                        | Campos em `data`                                                                                                                                                                                                                                   |
+| :------------------------- | :-------- | :----------------------------------- | :------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `storage.file.indexed.v1`  | `FileID`  | `library`, `subtitles`               | Novo arquivo registrado no VFS (ou republicado via `Resync`).             | `file_id`, `location_id`, `path` (relativo à localização) — conforme implementado em `storage/api.FileEvent`                                                                                                                                       |
+| `storage.file.changed.v1`  | `FileID`  | `library`, `subtitles`               | Arquivo no mesmo `path` mudou de tamanho, `mtime` ou `inode`.             | `file_id`, `location_id`, `path`                                                                                                                                                                                                                   |
+| `storage.file.moved.v1`    | `FileID`  | `library`, `subtitles`               | Arquivo renomeado/movido mantendo o mesmo `FileID` (via `inode` ou hash). | `file_id`, `location_id`, `path`                                                                                                                                                                                                                   |
+| `storage.file.removed.v1`  | `FileID`  | `library`, `subtitles`, `transcoder` | Arquivo removido do disco, localização apagada ou TTL expirado.           | `file_id`, `location_id`, `path` (último caminho conhecido)                                                                                                                                                                                        |
+| `storage.file.analyzed.v1` | `FileID`  | `library`, `metadata`, `subtitles`   | Conclusão de um analisador (`ffprobe`, `sha256`, `ed2k`).                 | `file_id`, `location_id`, `analyzer` (`ffprobe`, `sha256`, `ed2k`), `version` e resultado tipado da análise (container, duração, bitrate, faixas de vídeo/áudio/legenda, capítulos ou hashes — formato exato a ser discutido antes de implementar) |
+
+---
+
+### 4.2 Eventos emitidos pelo `identity`
+
+| Tópico (`type`)                   | `subject`   | Consumidores                             | Quando é disparado                                                                                                           | Campos de referência em `data` (a discutir antes de implementar)                                |
+| :-------------------------------- | :---------- | :--------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- |
+| `identity.account.created.v1`     | `AccountID` | `notification`                           | Nova conta criada (ou via `Resync`).                                                                                         | `account_id`, `username`, `email`, `is_admin`, `created_at`                                     |
+| `identity.account.updated.v1`     | `AccountID` | `notification`                           | Dados, credenciais ou permissões da conta alterados.                                                                         | `account_id`, `username`, `email`, `is_admin`, `disabled`, `updated_at`                         |
+| `identity.account.deleted.v1`     | `AccountID` | `playback`, `notification`               | Conta removida do sistema (perfis não migrados são removidos junto via `profile.deleted`).                                   | `account_id`                                                                                    |
+| `identity.profile.created.v1`     | `ProfileID` | `watchstate`, `notification`             | Novo perfil criado dentro de uma conta (ou via `Resync`).                                                                    | `profile_id`, `account_id`, `handle`, `display_name`, `avatar_file_id` (opcional), `created_at` |
+| `identity.profile.updated.v1`     | `ProfileID` | `watchstate`, `notification`             | Nome, `handle` ou avatar do perfil alterados.                                                                                | `profile_id`, `account_id`, `handle`, `display_name`, `avatar_file_id` (opcional), `updated_at` |
+| `identity.profile.transferred.v1` | `ProfileID` | `playback`, `notification`               | (Futuro) Perfil migrado de uma conta para outra (histórico no `watchstate` permanece intacto pois é ligado ao `profile_id`). | `profile_id`, `from_account_id`, `to_account_id`, `handle`, `transferred_at`                    |
+| `identity.profile.deleted.v1`     | `ProfileID` | `watchstate`, `playback`, `notification` | Perfil removido permanentemente (`watchstate` apaga o histórico e estado do perfil).                                         | `profile_id`, `account_id`                                                                      |
+| `identity.session.revoked.v1`     | `SessionID` | `playback`, `Surfaces`                   | Logout ou revogação de sessão/token.                                                                                         | `session_id`, `account_id`, `profile_id`, `device_id`, `revoked_at`                             |
+
+---
+
+### 4.3 Eventos emitidos pela `library`
+
+| Tópico (`type`)              | `subject`   | Consumidores                                                                       | Quando é disparado                                                                     | Campos de referência em `data` (a discutir antes de implementar)                                                                                                                                                  |
+| :--------------------------- | :---------- | :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `library.movie.added.v1`     | `MovieID`   | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`, `notification` | Filme identificado (ou via `Resync`).                                                  | `movie_id`, `library_id`, `file_id`, `location_id`, `path`, `title`, `year`, `duration`, `chapters[]`                                                                                                             |
+| `library.movie.updated.v1`   | `MovieID`   | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`                 | Reidentificação do filme, chegada da análise do `ffprobe` ou atualização de vínculo.   | Mesmos campos de `library.movie.added.v1`                                                                                                                                                                         |
+| `library.movie.removed.v1`   | `MovieID`   | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`                 | Arquivo do filme foi removido ou biblioteca apagada.                                   | `movie_id`, `library_id`, `file_id`                                                                                                                                                                               |
+| `library.series.added.v1`    | `SeriesID`  | `watchstate`, `metadata`, `acquisition`, `notification`                            | Nova série lógica criada na biblioteca.                                                | `series_id`, `library_id`, `title`, `year`                                                                                                                                                                        |
+| `library.series.updated.v1`  | `SeriesID`  | `watchstate`, `metadata`, `acquisition`                                            | Série atualizada.                                                                      | `series_id`, `library_id`, `title`, `year`                                                                                                                                                                        |
+| `library.series.removed.v1`  | `SeriesID`  | `watchstate`, `metadata`, `acquisition`                                            | Série ficou sem temporadas/episódios e foi removida.                                   | `series_id`, `library_id`                                                                                                                                                                                         |
+| `library.season.added.v1`    | `SeasonID`  | `watchstate`, `metadata`, `acquisition`                                            | Nova temporada lógica criada em uma série.                                             | `season_id`, `series_id`, `library_id`, `season_number`                                                                                                                                                           |
+| `library.season.removed.v1`  | `SeasonID`  | `watchstate`, `metadata`, `acquisition`                                            | Temporada ficou sem episódios e foi removida.                                          | `season_id`, `series_id`, `library_id`, `season_number`                                                                                                                                                           |
+| `library.episode.added.v1`   | `EpisodeID` | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`, `notification` | Episódio identificado (ou via `Resync`).                                               | `episode_id`, `library_id`, `series_id`, `series_title`, `series_year`, `season_id`, `season_number`, `episode_number`, `episode_end_number`, `title`, `file_id`, `location_id`, `path`, `duration`, `chapters[]` |
+| `library.episode.updated.v1` | `EpisodeID` | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`                 | Episódio mudou de número/temporada/série ou recebeu informações técnicas do `ffprobe`. | Mesmos campos de `library.episode.added.v1`                                                                                                                                                                       |
+| `library.episode.removed.v1` | `EpisodeID` | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`                 | Arquivo do episódio foi removido.                                                      | `episode_id`, `library_id`, `series_id`, `season_id`, `file_id`                                                                                                                                                   |
+
+---
+
+### 4.4 Eventos emitidos pelo `playback`
+
+| Tópico (`type`)                  | `subject`           | Consumidores                               | Quando é disparado                                                                            | Campos de referência em `data` (a discutir antes de implementar)                                                                                                     |
+| :------------------------------- | :------------------ | :----------------------------------------- | :-------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `playback.session.started.v1`    | `PlaybackSessionID` | `watchstate`, `notification`               | Perfil iniciou a reprodução de um item.                                                       | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `file_id`, `play_method`, `transcode_session_id` (opcional), `position`, `started_at`     |
+| `playback.session.progressed.v1` | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Atualização periódica da posição de reprodução.                                               | `playback_session_id`, `profile_id`, `device_id`, `item_id`, `transcode_session_id` (opcional), `position`, `is_paused`, `reported_at`                               |
+| `playback.session.paused.v1`     | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil pausou a reprodução (`transcoder` usa para agendar/aplicar `SIGSTOP`).                 | `playback_session_id`, `profile_id`, `item_id`, `transcode_session_id` (opcional), `position`, `paused_at`                                                           |
+| `playback.session.resumed.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil retomou a reprodução (`transcoder` usa para enviar `SIGCONT`).                         | `playback_session_id`, `profile_id`, `item_id`, `transcode_session_id` (opcional), `position`, `resumed_at`                                                          |
+| `playback.session.stopped.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`, `notification` | Reprodução encerrada pelo usuário ou por timeout de heartbeat (`transcoder` envia `SIGTERM`). | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `transcode_session_id` (opcional), `position`, `watched_duration`, `stopped_at`, `reason` |
+
+---
+
+### 4.5 Eventos emitidos pelo `watchstate` (Pós-MVP)
+
+| Tópico (`type`)               | `subject` | Consumidores                                     | Quando é disparado                                                                           | Campos de referência em `data` (a discutir antes de implementar)                                                                                    |
+| :---------------------------- | :-------- | :----------------------------------------------- | :------------------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `watchstate.state.updated.v1` | `ItemID`  | `notification` (e futuros plugins Trakt/AniList) | Mudança no estado do item para o perfil (posição salva, marcado como assistido ou favorito). | `profile_id`, `item_id`, `played`, `play_count`, `position`, `last_played_at`, `is_favorite`, `updated_at`                                          |
+| `watchstate.item.watched.v1`  | `ItemID`  | `notification` (e plugins de scrobble)           | Perfil concluiu a visualização de um filme ou episódio.                                      | `history_id`, `profile_id`, `item_id`, `item_type`, `series_id` (opcional), `season_number` (opcional), `episode_number` (opcional), `completed_at` |
+
+---
+
+### 4.6 Eventos emitidos pelo `subtitles` e pelo `translation`
+
+| Tópico (`type`)                      | `subject`    | Consumidores                                           | Quando é disparado                                                                               | Campos de referência em `data` (a discutir antes de implementar)                                                                                                                         |
+| :----------------------------------- | :----------- | :----------------------------------------------------- | :----------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `subtitles.subtitle.added.v1`        | `SubtitleID` | `library`, `transcoder`, `translation`, `notification` | Legenda local associada a um item (ou legenda baixada/traduzida gravada no `storage`).           | `subtitle_id`, `item_id`, `item_type`, `file_id`, `format` (`srt`, `vtt`, `ass`, `ssa`, `sub`), `language` (BCP-47, ex.: `pt-BR`), `title`, `is_forced`, `is_hearing_impaired`, `source` |
+| `subtitles.subtitle.removed.v1`      | `SubtitleID` | `library`, `transcoder`                                | Arquivo de legenda removido ou desassociado do item.                                             | `subtitle_id`, `item_id`, `file_id`                                                                                                                                                      |
+| `subtitles.translation.requested.v1` | `SubtitleID` | `translation`                                          | (Futuro) Nenhuma legenda no idioma alvo foi achada, mas há legenda em idioma base para traduzir. | `subtitle_id`, `item_id`, `source_file_id`, `source_language`, `target_language`, `format`                                                                                               |
+| `translation.subtitle.translated.v1` | `SubtitleID` | `subtitles`                                            | (Futuro) `translation` concluiu a tradução e salvou o novo arquivo no `storage`.                 | `source_subtitle_id`, `item_id`, `translated_file_id`, `target_language`, `format`, `provider`                                                                                           |
+
+---
+
+### 4.7 Eventos emitidos pelo `transcoder` (Pós-MVP)
+
+| Tópico (`type`)                          | `subject`    | Consumidores           | Quando é disparado                                                                                         | Campos de referência em `data` (a discutir antes de implementar)                                                                                           |
+| :--------------------------------------- | :----------- | :--------------------- | :--------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `transcoder.subtitle.converted.v1`       | `SubtitleID` | `library`, `subtitles` | Legenda externa (`.srt`/`.ass`) ou embutida foi convertida para `.vtt` e salva no `storage` (`cache`).     | `subtitle_id`, `item_id`, `source_file_id`, `converted_file_id`, `format` (`vtt`)                                                                          |
+| `transcoder.thumbnail.extracted.v1`      | `ItemID`     | `library`              | (Pós-MVP) Frame de prévia de um episódio/filme foi extraído pelo `ffmpeg` e salvo no `storage` (`images`). | `item_id`, `image_file_id`, `width`, `height`, `timestamp`                                                                                                 |
+| `transcoder.chapter_images.extracted.v1` | `ItemID`     | `library`              | (Pós-MVP) Frames de todos os capítulos de um item foram extraídos e salvos no `storage` (`images`).        | `item_id`, `chapters[]` (`chapter_index`, `image_file_id`, `width`, `height`, `timestamp`)                                                                 |
+| `transcoder.trickplay.generated.v1`      | `ItemID`     | `library`              | (Pós-MVP) Sprites de _trickplay_ (prévia na barra de busca) gerados e salvos no `storage` (`images`).      | `item_id`, `width`, `height`, `tile_width`, `tile_height`, `thumbnail_count`, `interval_ms`, `sprite_file_ids[]`                                           |
+| `transcoder.media_segments.detected.v1`  | `ItemID`     | `library`              | (Pós-MVP) Intervalos de abertura/encerramento detectados via análise de áudio (`chromaprint`) ou vídeo.    | `item_id`, `series_id` (opcional), `season_id` (opcional), `segments[]` (`type`: `intro` \| `outro` \| `recap` \| `preview`, `start`, `end`, `confidence`) |
+
+---
+
+### 4.8 Eventos emitidos pelo `metadata` (Futuro)
+
+| Tópico (`type`)                      | `subject` | Consumidores             | Quando é disparado                                                                        | Campos de referência em `data` (a discutir antes de implementar)                                                                                                                                                                                                                                                                                                                                        |
+| :----------------------------------- | :-------- | :----------------------- | :---------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `metadata.item.updated.v1`           | `ItemID`  | `library`, `acquisition` | Metadados textuais e identificadores externos obtidos dos provedores (TMDB, TVDB, AniDB). | `item_id`, `item_type` (`movie`, `series`, `season`, `episode`), `official_title`, `original_title`, `sort_title`, `overview`, `premiere_date`, `year`, `community_rating`, `official_rating`, `genres[]`, `studios[]`, `people[]`, `external_ids` (mapa `tmdb`, `tvdb`, `imdb`, `anidb`), `series_episodes_catalog[]` (quando `series`: lista de temporadas/episódios existentes para o `acquisition`) |
+| `metadata.images.updated.v1`         | `ItemID`  | `library`                | Imagens baixadas dos provedores externos e salvas no `storage` (`images`).                | `item_id`, `item_type`, `images[]` (`image_type`: `primary` \| `backdrop` \| `logo` \| `banner` \| `thumb`, `file_id`, `width`, `height`, `language`)                                                                                                                                                                                                                                                   |
+| `metadata.media_segments.updated.v1` | `ItemID`  | `library`                | Timestamps de abertura/encerramento obtidos de bases externas (ex.: AniSkip, IntroDB).    | `item_id`, `provider`, `segments[]` (`type`: `intro` \| `outro` \| `recap` \| `preview`, `start`, `end`)                                                                                                                                                                                                                                                                                                |
+
+---
+
+### 4.9 Eventos emitidos por `acquisition`, `indexer` e `downloader` (Futuro)
+
+| Tópico (`type`)                     | `subject`  | Emissor → Consumidores                       | Quando é disparado                                                                                         | Campos obrigatórios em `data`                                                                                                                                                                |
+| :---------------------------------- | :--------- | :------------------------------------------- | :--------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `acquisition.search.requested.v1`   | `SearchID` | `acquisition` → `indexer`                    | `acquisition` identificou um filme ou episódio monitorado faltante (ou elegível para upgrade).             | `search_id`, `target_type` (`movie`, `episode`, `season_pack`), `title`, `alternative_titles[]`, `year`, `season_number`, `episode_number`, `external_ids` (`imdb`, `tvdb`, `tmdb`, `anidb`) |
+| `indexer.releases.found.v1`         | `SearchID` | `indexer` → `acquisition`                    | `indexer` concluiu a busca nos plugins Torznab/Newznab configurados.                                       | `search_id`, `releases[]` (`guid`, `indexer_id`, `title`, `size`, `download_url`, `magnet_url`, `info_hash`, `seeders`, `peers`, `publish_date`, `protocol`: `torrent` \| `usenet`)          |
+| `acquisition.download.requested.v1` | `GrabID`   | `acquisition` → `downloader`, `notification` | Motor de decisão do `acquisition` aprovou um release dentro do perfil de qualidade.                        | `grab_id`, `target_item_id`, `library_id`, `destination_location_id`, `destination_relative_dir`, `release_title`, `protocol`, `download_url`, `magnet_url`                                  |
+| `downloader.download.completed.v1`  | `GrabID`   | `downloader` → `acquisition`, `notification` | Cliente de download terminou e o `downloader` importou (hardlink/copy/move) o arquivo para o `storage`.    | `grab_id`, `target_item_id`, `library_id`, `files[]` (`file_id`, `location_id`, `path`, `size`), `completed_at`                                                                              |
+| `downloader.download.failed.v1`     | `GrabID`   | `downloader` → `acquisition`, `notification` | Falha no cliente de download (permite ao `acquisition` colocar o release em blocklist e tentar o próximo). | `grab_id`, `target_item_id`, `release_title`, `error_message`, `failed_at`                                                                                                                   |
