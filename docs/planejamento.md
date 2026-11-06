@@ -49,28 +49,28 @@ módulos, em uma instância diferente), a partir do mesmo binário.
 
 ## 3. Decisões de arquitetura
 
-| Tema                          | Decisão                                                                                                                   |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Linguagem                     | Go 1.27.3                                                                                                                 |
-| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                 |
-| Comunicação entre módulos     | **Agora:** interfaces Go in-process. **Futuro:** gRPC (`bufconn` no monolito, TCP quando distribuído)                     |
-| Contratos entre módulos       | **Agora:** pacote `api/` de cada módulo. **Futuro:** `.proto` gerenciados com `buf`                                       |
-| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` (com `Range`/`PUT`); bytes nunca trafegam pelos contratos                              |
-| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                       |
-| Banco de dados                | SQLite, um arquivo por módulo, migrations embutidas (`go:embed`)                                                          |
-| Cache                         | Em memória                                                                                                                |
-| Filas / eventos               | Em memória (Go channels) para o que é efêmero; **outbox no banco do módulo** para o que é durável                         |
-| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                          |
-| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; hashes são metadados (seção 7)               |
-| API do projeto                | Surface do núcleo em `internal/server` (não é plugin)                                                                     |
-| Processamento multimídia      | `ffprobe`/`ffmpeg` disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas                |
-| FFmpeg ausente                | Módulos que dependem dele não inicializam; no monolito, o servidor falha no startup                                       |
-| Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                     |
-| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins |
-| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                |
-| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                |
-| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12**                                                                                              |
-| Licença                       | Apache 2.0                                                                                                                |
+| Tema                          | Decisão                                                                                                                                                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linguagem                     | Go 1.27.3                                                                                                                                                                                                     |
+| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                     |
+| Comunicação entre módulos     | **Agora:** interfaces Go in-process. **Futuro:** gRPC (`bufconn` no monolito, TCP quando distribuído)                                                                                                         |
+| Contratos entre módulos       | **Agora:** pacote `api/` de cada módulo. **Futuro:** `.proto` gerenciados com `buf`                                                                                                                           |
+| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` (com `Range`/`PUT`); bytes nunca trafegam pelos contratos                                                                                                                  |
+| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                           |
+| Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface |
+| Cache                         | Em memória                                                                                                                                                                                                    |
+| Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                             |
+| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                              |
+| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; hashes são metadados (seção 7)                                                                                                   |
+| API do projeto                | Surface do núcleo em `internal/server` (não é plugin)                                                                                                                                                         |
+| Processamento multimídia      | `ffprobe`/`ffmpeg` disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas                                                                                                    |
+| FFmpeg ausente                | Módulos que dependem dele não inicializam; no monolito, o servidor falha no startup                                                                                                                           |
+| Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                                                                                                         |
+| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                     |
+| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                    |
+| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                    |
+| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12**                                                                                                                                                                                  |
+| Licença                       | Apache 2.0                                                                                                                                                                                                    |
 
 ## 4. Comunicação entre módulos
 
@@ -120,9 +120,9 @@ Toda interface em `api/` (entre módulos **e** de plugins) deve seguir:
 8. **Contexto de chamada explícito:** identidade do usuário/dispositivo e
    correlation ID trafegam pelo `ctx` usando helpers do pacote de
    contrato, mapeáveis para metadata gRPC no futuro.
-9. **Eventos versionados e idempotentes:** eventos são structs com ID,
-   timestamp e nome versionado; consumidores devem tolerar entrega
-   duplicada (at-least-once).
+9. **Eventos versionados e idempotentes:** eventos usam o envelope
+   CloudEvents (seção 4.3) com ID, timestamp e tipo versionado;
+   consumidores devem tolerar entrega duplicada (at-least-once).
 10. **Sem estado global compartilhado** entre módulos; cada módulo acessa
     apenas seu próprio banco e recursos.
 11. **Wiring centralizado:** módulos recebem dependências por interface;
@@ -134,18 +134,73 @@ Toda interface em `api/` (entre módulos **e** de plugins) deve seguir:
 ### 4.3 Filas, eventos e outbox
 
 - **Efêmero** (pode ser perdido em um restart sem prejuízo, ex.:
-  notificações internas de progresso): fila em memória (Go channels).
+  notificações internas de progresso): publicado direto no barramento em
+  memória.
 - **Durável** (não pode ser perdido, ex.: scan de biblioteca, geração de
   imagens, transcode pendente, eventos entre módulos que alteram estado):
-  **padrão outbox** no banco SQLite do próprio módulo.
+  **padrão outbox** no banco do próprio módulo.
   - O registro do job/evento é gravado **na mesma transação** da alteração
-    de estado que o originou.
-  - Um worker do módulo lê a outbox, processa/publica e marca como
-    concluído; falhas são reprocessadas com retry/backoff.
+    de estado que o originou. Quem coordena isso é o **service**: ele abre
+    a transação pelo `store` (`WithTx`), aplica a alteração pelo `store` e
+    publica pelo outbox.
+  - Um relay verifica a outbox periodicamente (a cada 1s), lê os eventos
+    em ordem, publica cada um e o apaga em seguida. Em caso de falha,
+    para no evento que falhou e tenta de novo na próxima rodada, mantendo
+    a ordem.
   - Como a entrega é at-least-once, os consumidores devem ser idempotentes
-    (seção 4.2, regra 9).
-- A interface de fila em `internal/infra/queue` deve abstrair ambos os
-  casos, permitindo trocar por NATS/RabbitMQ no futuro.
+    (seção 4.2, regra 9), usando o ID do evento para descartar
+    duplicados.
+- **Pacote `internal/infra/outbox`:** tudo o que é da outbox fica
+  isolado nele, reutilizável por qualquer módulo.
+  - `outbox.New(ctx, db, publisher, log)` recebe o banco do módulo e cria
+    a própria tabela (`outbox`), sem passar pelas migrations do módulo.
+  - `Publish(ctx, events...)` recebe um ou vários eventos (`queue.Event`,
+    implementado por `queue.Envelope[T]`) e os grava em JSON na transação
+    aberta no `ctx`. Se ela sofrer rollback, os eventos são descartados.
+    Sem transação no `ctx`, o lote é gravado em uma transação própria.
+  - A chave da tabela é o **ID do evento** (UUIDv7), que também define a
+    ordem de publicação. Não há `AUTOINCREMENT`: o ID é portável entre
+    bancos e é o mesmo usado pelos consumidores para deduplicação. A ordem
+    é garantida dentro do processo, porque o gerador de UUIDv7 é monótono.
+  - `Start`/`Stop` controlam o relay.
+  - A atomicidade depende de a outbox e o `store` usarem o **mesmo**
+    `*sql.DB`; quem garante isso é o `module.go`, que abre o banco e o
+    entrega aos dois.
+  - Hoje o SQL do pacote segue o dialeto do SQLite. Quando outro banco
+    entrar, o outbox ganha uma implementação para ele.
+- **Separação de camadas:**
+  - O `store` lida **apenas com o banco**: não conhece eventos nem o
+    outbox.
+  - O **service** concentra a regra de negócio: monta os eventos e
+    publica pelo outbox.
+  - O `module.go` faz o wiring e o ciclo de vida: abre o banco, cria o
+    outbox e o `store` sobre ele e chama `Start`/`Stop` do outbox.
+- **Transação no contexto:** `internal/infra/database` tem `WithTx(ctx,
+db, fn)` e `ConnFrom(ctx, db)`. A transação aberta viaja no `ctx`, e
+  toda consulta feita com esse `ctx` no mesmo banco entra nela (store e
+  outbox). Chamadas aninhadas reaproveitam a transação aberta. O
+  `store.WithTx` expõe isso ao service sem vazar `database/sql`.
+- **Barramento:** `internal/infra/queue` define `Publisher`/`Subscriber`
+  com mensagens `{Topic, Payload}`. A implementação
+  inicial (`queue/memory`) chama os handlers do tópico de forma síncrona;
+  se algum falhar, o evento permanece na outbox e é reentregue a todos.
+  NATS/RabbitMQ entram no futuro como novas implementações.
+- **Envelope:** todo evento é publicado no formato JSON estruturado do
+  **CloudEvents 1.0**, definido manualmente em `queue.Envelope[T]` (sem o
+  SDK, que traz dependências e camadas de transporte desnecessárias
+  aqui).
+
+  | Campo         | Conteúdo                                                           |
+  | ------------- | ------------------------------------------------------------------ |
+  | `id`          | UUIDv7, usado pelos consumidores para descartar duplicados         |
+  | `type`        | Nome versionado, ex.: `storage.file.indexed.v1`; é também o tópico |
+  | `source`      | Módulo de origem, ex.: `storage`                                   |
+  | `specversion` | `1.0`                                                              |
+  | `time`        | Momento do evento (UTC)                                            |
+  | `subject`     | Recurso principal, ex.: o `FileID`                                 |
+  | `data`        | Payload específico, definido no `api/` do módulo de origem         |
+
+  Consumidores decodificam `queue.Envelope[<api do módulo>.<Evento>]`.
 
 ## 5. Plugins vs. backends
 
@@ -290,15 +345,19 @@ absolutos.
   driver, como o diretório), e os demais módulos apenas
   referenciam o `LocationID`. O storage indexa e observa apenas
   localizações conhecidas (cadastradas ou de sistema, ver abaixo).
-  Localizações podem se sobrepor; o mesmo arquivo físico mantém o mesmo
-  `FileID` em todas elas.
-- **Classe da localização:** define como o storage trata os arquivos
+  **Localizações não podem se sobrepor:** cadastrar um diretório que
+  está dentro de outra localização, ou que contém outra, é recusado.
+  Assim, todo arquivo pertence a exatamente uma localização.
+- **Classe da localização (planejado, entra com o transcode, etapa 6):**
+  hoje só existem localizações cadastradas pelo operador. Classes e
+  localizações de sistema serão implementadas quando houver um módulo
+  que grave artefatos. A classe define como o storage trata os arquivos
   dela. **Todo arquivo, de qualquer classe, é indexado e tem `FileID`.**
   O que muda entre as classes é o fluxo aplicado depois da indexação.
 
 | Classe       | Criada por                            | Analisadores (seção 7.3) | TTL | Uso                                                   |
 | ------------ | ------------------------------------- | ------------------------ | --- | ----------------------------------------------------- |
-| `media`      | Operador, via API do projeto          | Sim                      | Não | Diretórios de bibliotecas (mídia e legendas externas) |
+| `media`      | Operador, via API do projeto          | Sim (pós-MVP)            | Não | Diretórios de bibliotecas (mídia e legendas externas) |
 | `cache`      | Storage, automaticamente (de sistema) | Não                      | Sim | Artefatos temporários (ex.: legendas convertidas)     |
 | `transcodes` | Storage, automaticamente (de sistema) | Não                      | Sim | Segmentos e playlists HLS gerados pelo `ffmpeg`       |
 | `images`     | Storage, automaticamente (de sistema) | Não                      | Sim | Imagens (pós-MVP)                                     |
@@ -337,11 +396,14 @@ absolutos.
   de bancos e com as libs de UUID do Go, mantendo a ordenação temporal.
 - **Estabilidade do `FileID`:**
   - **Mudança de conteúdo** no mesmo caminho (tamanho/mtime/inode
-    diferentes): mantém o `FileID`, reanálise e evento `FileChanged`.
-  - **Movido/renomeado** no mesmo sistema de arquivos: detectado pelo par
-    `(device, inode)`; mantém o `FileID` e emite `FileMoved`.
-  - **Movido entre sistemas de arquivos:** reconhecido depois da análise,
-    pelo SHA-256 de um arquivo que acabou de sumir.
+    diferentes): mantém o `FileID` e emite `FileChanged`.
+  - **Movido/renomeado** dentro da mesma localização: um caminho novo com
+    o `inode` de um arquivo que sumiu é o mesmo arquivo; mantém o
+    `FileID` e emite `FileMoved`. Sem suporte a inode no driver, o
+    arquivo é tratado como removido + adicionado (novo `FileID`).
+  - **Movido entre localizações ou sistemas de arquivos (pós-MVP):**
+    reconhecido depois da análise, pelo SHA-256 de um arquivo que acabou
+    de sumir.
 - **Hardlinks e cópias** são caminhos físicos diferentes e, portanto,
   `FileID`s diferentes; o SHA-256 permite identificá-los como conteúdo
   idêntico.
@@ -351,31 +413,38 @@ absolutos.
 A indexação acontece em duas etapas, para que um arquivo apareça no
 sistema sem esperar a leitura completa do conteúdo:
 
-1. **Registro (rápido):** varredura/observação da localização; grava
-   `FileID`, localização, caminho relativo, tamanho, mtime e atributos do
-   driver (ex.: `inode`, `device`). Emite `FileIndexed`.
-2. **Análise (assíncrona e durável, via outbox):** executa os
-   analisadores (seção 7.3) e emite `FileAnalyzed`.
+1. **Registro (rápido):** varredura da localização; grava `FileID`,
+   localização, caminho relativo, tamanho, mtime e `inode` (quando
+   suportado). Emite `FileIndexed`.
+2. **Análise (pós-MVP):** executa os analisadores (seção 7.3) de forma
+   assíncrona e emite `FileAnalyzed`.
 
 Regras:
 
-- Arquivos em escrita (cópia ou download em andamento) só são analisados
-  depois de ficarem estáveis (tamanho/mtime sem mudança por um intervalo).
+- **Quando varrer:** todas as localizações são varridas ao iniciar o
+  módulo e periodicamente (`MSERVER_STORAGE_SCAN_INTERVAL`). A varredura
+  de uma localização também pode ser pedida pelo contrato (ex.: a
+  `library` pede logo após cadastrar uma biblioteca). Observação em
+  tempo real (`fsnotify`) fica para depois do MVP.
+- Arquivos em escrita (cópia ou download em andamento) só serão
+  analisados quando o `mtime` for mais antigo que uma janela de
+  estabilidade; os mais recentes ficam para a próxima passada.
 - Localizações de sistema só passam pela etapa de **registro**. Como
   todas as escritas nelas passam pelo storage, o registro acontece no
   momento da escrita (sem depender de varredura), e o `FileID` é
   devolvido a quem gravou. Uma varredura no `Init` reconcilia o índice
   com o disco.
-- Se a raiz de uma localização ficar inacessível (ex.: disco
-  desmontado), a localização é marcada como **offline** e **não** gera
-  `FileRemoved` em massa. Isso evita apagar itens e `UserData` por uma
-  falha temporária.
+- Se a raiz de uma localização, ou qualquer diretório dela, ficar
+  inacessível (ex.: disco desmontado), a varredura **falha sem alterar o
+  índice** e não gera `FileRemoved` em massa. Isso evita apagar itens e
+  `UserData` por uma falha temporária.
 
 ### 7.3 Analisadores de arquivos (plugins)
 
 - Hashes e outros metadados de arquivo são calculados por **analisadores**,
   plugins do tipo provider do `storage` (`plugins/storage/<nome>`).
-- **MVP:** `sha256` e `ed2k`. Exemplos futuros: hash do OpenSubtitles,
+- **Pós-MVP:** `sha256` e `ed2k` serão os primeiros (nenhum analisador
+  é implementado no MVP). Exemplos futuros: hash do OpenSubtitles,
   BLAKE3.
 - **Leitura única:** o storage lê o arquivo **uma única vez** e alimenta
   todos os analisadores em paralelo, em vez de ler um arquivo de 50 GB uma
@@ -394,15 +463,15 @@ Regras:
 
 ### 7.4 Metadados de um arquivo
 
-| Campo                    | Origem                         |
-| ------------------------ | ------------------------------ |
-| `FileID` (UUIDv7)        | Storage, na primeira indexação |
-| `LocationID`             | Localização cadastrada         |
-| Caminho relativo         | Relativo à localização         |
-| Tamanho, mtime           | Driver                         |
-| `inode`, `device`        | Driver (quando suportado)      |
-| SHA-256, ED2K, ...       | Analisadores (classe `media`)  |
-| Indexado em/analisado em | Storage                        |
+| Campo              | Origem                         |
+| ------------------ | ------------------------------ |
+| `FileID` (UUIDv7)  | Storage, na primeira indexação |
+| `LocationID`       | Localização cadastrada         |
+| Caminho relativo   | Relativo à localização         |
+| Tamanho, mtime     | Driver                         |
+| `inode`            | Driver (quando suportado)      |
+| SHA-256, ED2K, ... | Analisadores (pós-MVP)         |
+| Indexado em        | Storage                        |
 
 ### 7.5 Acesso aos dados
 
@@ -426,10 +495,11 @@ Regras:
   artefato recebe um `FileID`.
 - **API HTTP de dados:**
   - Leitura com suporte a `Range` (obrigatório para seek do `ffmpeg` e dos
-    clientes).
+    clientes). Implementada na etapa 4 (streamer).
   - Escrita via `PUT` (saída do `ffmpeg`, ex.: segmentos e playlists HLS).
+    Implementada na etapa 6 (transcode).
   - Autenticação por URLs assinadas de curta duração ou headers
-    (`ffmpeg -headers`).
+    (`ffmpeg -headers`). Implementada na etapa 6 (transcode).
 - **Resolução por consumidor:** `Resolve(FileID, consumer) → URL`.
   - Consumidor local e driver local → caminho direto no disco (sem
     overhead).
@@ -442,9 +512,9 @@ Regras:
 - **Drivers:** disco local (`drivers/local`) no início; S3 e outros no
   futuro. Cada localização fica confinada ao seu diretório (ex.:
   `os.Root` no driver local), sem permitir path traversal.
-- **Capacidades por driver:** o contrato expõe capacidades (ex.:
-  `Hardlink`, `AtomicRename`, `Watch`, `Inode`), pois nem todo driver
-  suporta todas (ex.: S3 não tem hardlink nem inode).
+- **Capacidades por driver (planejado):** quando houver consumidor, o
+  contrato exporá capacidades (ex.: `Hardlink`, `Inode`), pois nem todo
+  driver suporta todas (ex.: S3 não tem hardlink nem inode).
 - **Hardlinks:** devem ser suportados pelo contrato do VFS. Quando o
   driver tiver a capacidade `Hardlink`, o **operador decide** se o fluxo
   "download → hardlink → continuar semeando" é usado (relevante para o
@@ -458,10 +528,23 @@ Regras:
 
 ### 7.7 Eventos
 
-`FileIndexed`, `FileChanged`, `FileMoved`, `FileRemoved`, `FileAnalyzed`
-e `LocationOffline`/`LocationOnline`, sempre com `FileID`/`LocationID`
-(`fsnotify` no driver local, polling nos demais). Consumidos pela
-`library` e pelo `subtitles`.
+| Evento (tópico)           | Quando                                                |
+| ------------------------- | ----------------------------------------------------- |
+| `storage.file.indexed.v1` | Arquivo novo indexado                                 |
+| `storage.file.changed.v1` | Tamanho, mtime ou inode mudou no mesmo caminho        |
+| `storage.file.moved.v1`   | Arquivo renomeado dentro da localização (mesmo inode) |
+| `storage.file.removed.v1` | Arquivo sumiu do disco ou a localização foi removida  |
+
+- Todos usam o envelope CloudEvents (seção 4.3) com `source` = `storage`
+  e `subject` = `FileID`. O `data` é o mesmo para todos
+  (`api.FileEvent`): `file_id`, `location_id` e `path` (relativo à
+  localização; no `removed`, o último caminho conhecido).
+- São gravados na outbox na mesma transação do scan ou da remoção da
+  localização e publicados pelo relay (seção 4.3).
+- Por enquanto, as mudanças são detectadas apenas pelo scan (no `Start`,
+  periódico ou explícito). `fsnotify` e `FileAnalyzed` ficam para depois
+  do MVP, junto com os analisadores.
+- Consumidos pela `library` e pelo `subtitles`.
 
 ## 8. Library: bibliotecas e identificação pelo path
 
@@ -672,11 +755,12 @@ mserver/
 │   ├── infra/
 │   │   ├── config/
 │   │   ├── logging/
-│   │   ├── database/sqlite/       # 1 arquivo por módulo + migrations
+│   │   ├── database/              # transação no contexto (WithTx/ConnFrom)
+│   │   │   └── sqlite/            # abertura do SQLite e runner de migrations
 │   │   ├── cache/memory/
-│   │   ├── queue/
-│   │   │   ├── channels/          # efêmero
-│   │   │   └── outbox/            # durável, no banco do módulo
+│   │   ├── queue/                 # interfaces Publisher/Subscriber
+│   │   │   └── memory/            # barramento em memória
+│   │   ├── outbox/                # outbox transacional reutilizável (tabela + relay)
 │   │   ├── registry/              # Registry[T] genérico para plugins
 │   │   ├── ffmpeg/                # wrapper de ffprobe/ffmpeg
 │   │   └── httpserver/            # listener HTTP e middlewares compartilhados pelas surfaces
@@ -723,9 +807,20 @@ internal/modules/<módulo>/
 ├── service.go       # implementação local das interfaces de api/
 ├── registry.go      # instância de Registry[T] (apenas se o módulo for extensível)
 ├── contract_test.go # testes de contrato contra a interface de api/
-└── store/           # repositório SQLite (inclui tabela de outbox, se necessário)
-    └── migrations/
+└── store/           # interface de persistência do módulo (store.Store)
+    └── sqlite/      # implementação SQLite, um arquivo por contexto
+        └── migrations/  # migrations embutidas (go:embed)
 ```
+
+O módulo depende apenas da interface `store.Store`; só o `module.go`
+escolhe a implementação. Um novo banco (ex.: Postgres) entra como
+`store/postgres/`, com suas próprias migrations, sem mudar o restante do
+módulo. A interface é de domínio (ex.: `ApplyScan`), e não SQL
+genérico: cada implementação cuida das próprias transações.
+
+Cada pacote é dividido em arquivos pequenos por contexto (ex.:
+`locations.go`, `files.go`, `scan.go`), em vez de um arquivo grande
+separado por comentários.
 
 ### 10.2 Regras de fronteira
 
@@ -763,13 +858,18 @@ MSERVER_MODULES=all                          # ou: library,streamer,...
 MSERVER_DATA_DIR=/var/lib/mserver            # SQLite por módulo: <data>/<módulo>.db
 MSERVER_<MÓDULO>_ADDR=host:porta             # futuro: endereço de módulo remoto
 
-# Storage: localizações de sistema (padrão: <data>/<classe>)
+# Storage
+MSERVER_STORAGE_SCAN_INTERVAL=6h             # varredura periódica (0 desativa)
+
+# Storage, planejado (localizações de sistema, etapa 6; padrão: <data>/<classe>)
 MSERVER_STORAGE_DRIVER_LOCAL_CACHE_DIR=/mnt/ssd/cache
 MSERVER_STORAGE_DRIVER_LOCAL_TRANSCODES_DIR=/mnt/ssd/transcodes
-MSERVER_STORAGE_DRIVER_LOCAL_IMAGES_DIR=/var/lib/mserver/images
 MSERVER_STORAGE_CACHE_TTL=24h                # TTL padrão por classe
 MSERVER_STORAGE_TRANSCODES_TTL=1h
 ```
+
+Variáveis desconhecidas com o prefixo de um módulo são rejeitadas no
+`Init`, para que erros de digitação não passem despercebidos.
 
 ## 11. Roadmap
 
@@ -778,15 +878,15 @@ MSERVER_STORAGE_TRANSCODES_TTL=1h
 Objetivo: **reproduzir a biblioteca local nos clientes `jellyfin-web`,
 `jellyfin-android` e `jellyfin-tizen`, sem provedores de metadados.**
 
-| #   | Etapa     | Escopo                                                                                                                                                                                                                                                                                                                                              | Entrega na API Jellyfin                       |
-| --- | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| 0   | Fundação  | CLI, config via env, logging, `app.Module`, wiring de interfaces, SQLite por módulo, filas (channels + outbox), `Registry[T]`, wrapper FFmpeg, lint de fronteiras, CI                                                                                                                                                                               | Esqueleto do plugin e `/System/Info/Public`   |
-| 1   | Storage   | Driver local, cadastro de localizações via API do projeto, indexação em duas etapas com `FileID` (UUIDv7), analisadores SHA-256 e ED2K, localizações de sistema (`cache`, `transcodes`, `images`) indexadas sem análise e com TTL, listagem de vizinhos com `FileID`, capacidades (incl. hardlink), HTTP com `Range`/`PUT`, URLs assinadas, eventos | —                                             |
-| 2   | Identity  | Usuários, dispositivos, sessões, tokens                                                                                                                                                                                                                                                                                                             | Login nos clientes                            |
-| 3   | Library   | Cadastro de bibliotecas (tipo + um ou mais `LocationID`s do `storage`), identificação pelo caminho relativo via regex (seção 8), IDs estáveis, probe via `ffprobe`, `UserData`                                                                                                                                                                      | Navegação nos clientes                        |
-| 4   | Streamer  | Sessões de playback, `PlaybackInfo` com `DeviceProfile`, **apenas direct play**                                                                                                                                                                                                                                                                     | Primeiro vídeo tocando; progresso/resume      |
-| 5   | Legendas  | Descoberta de **legendas externas locais** (`.srt`, `.vtt`, `.ass`, ... ao lado da mídia), referenciadas pelo `FileID` via listagem de vizinhos                                                                                                                                                                                                     | Seleção de legendas nos clientes              |
-| 6   | Transcode | **Áudio** seguindo o fluxo do Jellyfin (HLS, vídeo copiado) e **conversão de legendas**, `ffmpeg` local                                                                                                                                                                                                                                             | Reprodução de áudio e legendas não suportados |
+| #   | Etapa     | Escopo                                                                                                                                                                                                                                                                                                   | Entrega na API Jellyfin                       |
+| --- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| 0   | Fundação  | CLI, config via env, logging, `app.Module`, wiring de interfaces, SQLite por módulo, barramento de eventos em memória, `Registry[T]`, wrapper FFmpeg, lint de fronteiras, CI                                                                                                                             | Esqueleto do plugin e `/System/Info/Public`   |
+| 1   | Storage   | Driver local, cadastro de localizações (sem sobreposição) via API do projeto, indexação com `FileID` (UUIDv7) e detecção de renomeação por inode, listagem de vizinhos com `FileID`, `Resolve` para caminho local, eventos de arquivo via outbox, persistência atrás da interface `store.Store` (SQLite) | —                                             |
+| 2   | Identity  | Usuários, dispositivos, sessões, tokens                                                                                                                                                                                                                                                                  | Login nos clientes                            |
+| 3   | Library   | Cadastro de bibliotecas (tipo + um ou mais `LocationID`s do `storage`), identificação pelo caminho relativo via regex (seção 8), IDs estáveis, probe via `ffprobe`, `UserData`                                                                                                                           | Navegação nos clientes                        |
+| 4   | Streamer  | Sessões de playback, `PlaybackInfo` com `DeviceProfile`, **apenas direct play**. No `storage`: leitura HTTP com `Range`                                                                                                                                                                                  | Primeiro vídeo tocando; progresso/resume      |
+| 5   | Legendas  | Descoberta de **legendas externas locais** (`.srt`, `.vtt`, `.ass`, ... ao lado da mídia), referenciadas pelo `FileID` via listagem de vizinhos                                                                                                                                                          | Seleção de legendas nos clientes              |
+| 6   | Transcode | **Áudio** seguindo o fluxo do Jellyfin (HLS, vídeo copiado) e **conversão de legendas**, `ffmpeg` local. No `storage`: localizações de sistema (`cache`, `transcodes`) com escrita (`PUT`) e TTL, URLs assinadas                                                                                         | Reprodução de áudio e legendas não suportados |
 
 ### 11.2 Segundo momento
 
@@ -794,6 +894,9 @@ Sem ordem definida:
 
 - Migração dos contratos para gRPC (`bufconn`/TCP) e descoberta via
   variáveis de ambiente.
+- Analisadores de arquivos no `storage` (SHA-256, ED2K), com detecção
+  de arquivos movidos entre localizações pelo SHA-256, e observação em
+  tempo real (`fsnotify`).
 - Módulo `metadata` com plugins (TVDB, TMDB, AniDB, ...), mantendo a
   identificação pelo path como fallback.
 - Imagens: provedores de metadados, arquivos locais e frames extraídos
