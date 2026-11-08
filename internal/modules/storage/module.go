@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"time"
@@ -23,6 +24,7 @@ import (
 	"github.com/lukerops/mserver/internal/modules/storage/router"
 	"github.com/lukerops/mserver/internal/modules/storage/service"
 	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
+	"github.com/lukerops/mserver/plugins/storage/ffprobe"
 )
 
 // defaultScanInterval is used when MSERVER_STORAGE_SCAN_INTERVAL is unset.
@@ -79,11 +81,23 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	return m, nil
 }
 
-// newAnalyzers creates the analyzer plugins
+// newAnalyzers creates the analyzer plugins:
+//
+//   - ffprobe (plugins/storage/ffprobe), with the executable
+//     MSERVER_FFPROBE_PATH (default "ffprobe" from PATH).
+//
 // A missing executable is not fatal: the files wait to be analyzed until
 // it is installed.
 func newAnalyzers(log *slog.Logger) []analyzer.Analyzer {
-	return []analyzer.Analyzer{}
+	ffprobePath := os.Getenv("MSERVER_FFPROBE_PATH")
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+	}
+	if _, err := exec.LookPath(ffprobePath); err != nil {
+		log.Warn("storage: ffprobe not found, video files will not be analyzed",
+			"path", ffprobePath, "error", err)
+	}
+	return []analyzer.Analyzer{ffprobe.New(ffprobePath)}
 }
 
 // scanInterval parses the value of MSERVER_STORAGE_SCAN_INTERVAL. An empty
