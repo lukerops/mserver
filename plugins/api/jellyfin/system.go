@@ -1,7 +1,9 @@
 package jellyfin
 
 import (
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"runtime"
 	"strings"
@@ -36,7 +38,7 @@ func (p *plugin) publicInfo(r *http.Request) PublicSystemInfo {
 		Version:                version,
 		ProductName:            productName,
 		OperatingSystem:        runtime.GOOS,
-		Id:                     p.serverID,
+		Id:                     serverID,
 		StartupWizardCompleted: true,
 	}
 }
@@ -54,6 +56,31 @@ func basePath(r *http.Request) string {
 
 func (p *plugin) ping(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, serverName)
+}
+
+// endpointInfo tells the client whether it connects from this machine or
+// from the local network (loopback, private or link-local address). The
+// address is the one of the connection: behind a reverse proxy, it is the
+// address of the proxy.
+func (p *plugin) endpointInfo(w http.ResponseWriter, r *http.Request) {
+	if _, ok := p.authenticate(w, r); !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, endpoint(r.RemoteAddr))
+}
+
+func endpoint(remoteAddr string) EndPointInfo {
+	var info EndPointInfo
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	if ip, err := netip.ParseAddr(host); err == nil {
+		ip = ip.Unmap()
+		info.IsLocal = ip.IsLoopback()
+		info.IsInNetwork = ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	return info
 }
 
 func (p *plugin) brandingConfiguration(w http.ResponseWriter, _ *http.Request) {

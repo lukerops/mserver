@@ -35,15 +35,7 @@ func (p *plugin) updateDisplayPreferences(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// userViews lists no library until the library module exists.
-func (p *plugin) userViews(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
-		return
-	}
-	writeJSON(w, http.StatusOK, BaseItemDtoQueryResult{Items: []any{}})
-}
-
-// resumeItems lists nothing to resume until the library module exists.
+// resumeItems lists nothing to resume until the watchstate module exists.
 func (p *plugin) resumeItems(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return

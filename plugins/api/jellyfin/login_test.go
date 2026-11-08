@@ -51,11 +51,7 @@ func start(t *testing.T) client {
 		t.Fatal(err)
 	}
 
-	mux, err := jellyfin.New(dir, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(mux)
+	srv := httptest.NewServer(jellyfin.New(c, nil))
 	t.Cleanup(srv.Close)
 	return client{t: t, base: srv.URL}
 }
@@ -144,6 +140,13 @@ func TestLoginAndHome(t *testing.T) {
 		t.Fatalf("auth = %+v", auth)
 	}
 	token := authHeader + `, Token="` + auth.AccessToken + `"`
+
+	c.expect("GET", "/System/Endpoint", "", nil, nil, http.StatusUnauthorized)
+	var endpoint struct{ IsLocal, IsInNetwork bool }
+	c.expect("GET", "/System/Endpoint", token, nil, &endpoint, http.StatusOK)
+	if !endpoint.IsLocal || !endpoint.IsInNetwork {
+		t.Errorf("endpoint = %+v", endpoint)
+	}
 
 	c.expect("GET", "/Users/Me", "", nil, nil, http.StatusUnauthorized)
 	var me struct{ Id string }

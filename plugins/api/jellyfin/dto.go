@@ -43,6 +43,11 @@ type BrandingOptionsDto struct {
 	SplashscreenEnabled bool
 }
 
+type EndPointInfo struct {
+	IsLocal     bool
+	IsInNetwork bool
+}
+
 type AuthenticateUserByName struct {
 	Username string
 	Pw       string
@@ -173,12 +178,181 @@ type BaseItemDtoQueryResult struct {
 	StartIndex       int
 }
 
+// ThemeMediaResult lists the theme songs or videos of an item.
+type ThemeMediaResult struct {
+	Items            []BaseItemDto
+	TotalRecordCount int
+	StartIndex       int
+	OwnerId          string
+}
+
+type AllThemeMediaResult struct {
+	ThemeVideosResult     ThemeMediaResult
+	ThemeSongsResult      ThemeMediaResult
+	SoundtrackSongsResult ThemeMediaResult
+}
+
+// QueryFiltersLegacy lists the values the items of a query can be
+// filtered by (/Items/Filters).
+type QueryFiltersLegacy struct {
+	Genres          []string
+	Tags            []string
+	OfficialRatings []string
+	Years           []int
+}
+
+// QueryFilters is the newer QueryFiltersLegacy (/Items/Filters2).
+type QueryFilters struct {
+	Genres            []NameGuidPair
+	Tags              []string
+	AudioLanguages    []NameValuePair
+	SubtitleLanguages []NameValuePair
+}
+
+type NameGuidPair struct {
+	Name string
+	Id   string
+}
+
+type NameValuePair struct {
+	Name  string
+	Value string
+}
+
+// BaseItemDto describes a library (Type "CollectionFolder") or a movie
+// (Type "Movie"). Optional fields are omitted when unknown.
+type BaseItemDto struct {
+	Name                     string
+	ServerId                 string
+	Id                       string
+	DateCreated              *time.Time `json:",omitempty"`
+	CanDelete                bool
+	CanDownload              bool
+	HasSubtitles             bool   `json:",omitempty"`
+	Container                string `json:",omitempty"`
+	SortName                 string
+	ExternalUrls             []any
+	MediaSources             []MediaSourceInfo `json:",omitempty"`
+	Path                     string            `json:",omitempty"`
+	EnableMediaSourceDisplay bool
+	Taglines                 []string
+	Genres                   []string
+	RunTimeTicks             int64 `json:",omitempty"`
+	PlayAccess               string
+	ProductionYear           int `json:",omitempty"`
+	RemoteTrailers           []any
+	ProviderIds              map[string]string
+	IsHD                     bool `json:",omitempty"`
+	IsFolder                 bool
+	ParentId                 string `json:",omitempty"`
+	Type                     string
+	People                   []any
+	Studios                  []any
+	GenreItems               []any
+	LocalTrailerCount        int
+	UserData                 UserItemDataDto
+	SpecialFeatureCount      int
+	DisplayPreferencesId     string
+	Tags                     []string
+	CollectionType           string        `json:",omitempty"`
+	MediaStreams             []MediaStream `json:",omitempty"`
+	VideoType                string        `json:",omitempty"`
+	ImageTags                map[string]string
+	BackdropImageTags        []string
+	ImageBlurHashes          map[string]map[string]string
+	LocationType             string
+	MediaType                string
+	LockedFields             []string
+	LockData                 bool
+	Width                    int `json:",omitempty"`
+	Height                   int `json:",omitempty"`
+	Chapters                 []any
+}
+
+// UserItemDataDto is the state of an item for the user. It is always
+// empty until the watchstate module exists.
+type UserItemDataDto struct {
+	PlaybackPositionTicks int64
+	PlayCount             int
+	IsFavorite            bool
+	Played                bool
+	Key                   string
+	ItemId                string
+}
+
+type MediaSourceInfo struct {
+	Protocol                   string
+	Id                         string
+	Path                       string `json:",omitempty"`
+	Type                       string
+	Container                  string
+	Size                       int64 `json:",omitempty"`
+	Name                       string
+	IsRemote                   bool
+	RunTimeTicks               int64 `json:",omitempty"`
+	ReadAtNativeFramerate      bool
+	IgnoreDts                  bool
+	IgnoreIndex                bool
+	GenPtsInput                bool
+	SupportsTranscoding        bool
+	SupportsDirectStream       bool
+	SupportsDirectPlay         bool
+	IsInfiniteStream           bool
+	RequiresOpening            bool
+	RequiresClosing            bool
+	RequiresLooping            bool
+	SupportsProbing            bool
+	VideoType                  string
+	MediaStreams               []MediaStream
+	MediaAttachments           []any
+	Formats                    []string
+	Bitrate                    int64 `json:",omitempty"`
+	DefaultAudioStreamIndex    *int  `json:",omitempty"`
+	DefaultSubtitleStreamIndex *int  `json:",omitempty"`
+	HasSegments                bool
+}
+
+type MediaStream struct {
+	Codec                  string
+	Language               string `json:",omitempty"`
+	ColorTransfer          string `json:",omitempty"`
+	ColorPrimaries         string `json:",omitempty"`
+	ColorSpace             string `json:",omitempty"`
+	VideoRange             string `json:",omitempty"`
+	VideoRangeType         string `json:",omitempty"`
+	AudioSpatialFormat     string
+	DisplayTitle           string
+	Title                  string `json:",omitempty"`
+	IsInterlaced           bool
+	BitRate                int64  `json:",omitempty"`
+	BitDepth               int    `json:",omitempty"`
+	ChannelLayout          string `json:",omitempty"`
+	Channels               int    `json:",omitempty"`
+	SampleRate             int    `json:",omitempty"`
+	IsDefault              bool
+	IsForced               bool
+	IsHearingImpaired      bool
+	Height                 int     `json:",omitempty"`
+	Width                  int     `json:",omitempty"`
+	AverageFrameRate       float64 `json:",omitempty"`
+	RealFrameRate          float64 `json:",omitempty"`
+	Profile                string  `json:",omitempty"`
+	Type                   string
+	AspectRatio            string `json:",omitempty"`
+	Index                  int
+	IsExternal             bool
+	IsTextSubtitleStream   bool
+	SupportsExternalStream bool
+	PixelFormat            string `json:",omitempty"`
+	Level                  int
+}
+
 // userDto maps a profile to a Jellyfin user: a Jellyfin user is a profile,
 // and its id is the profile id.
 func (p *plugin) userDto(account identityrouter.AccountV1, profile identityrouter.ProfileV1) UserDto {
 	return UserDto{
 		Name:                  profile.DisplayName,
-		ServerId:              p.serverID,
+		ServerId:              serverID,
 		ServerName:            serverName,
 		Id:                    jellyfinID(profile.ID.String()),
 		HasPassword:           true,
@@ -239,7 +413,7 @@ func (p *plugin) sessionInfoDto(session identityrouter.SessionV1, profile identi
 		DeviceId:           a.DeviceID,
 		ApplicationVersion: a.Version,
 		IsActive:           true,
-		ServerId:           p.serverID,
+		ServerId:           serverID,
 		AdditionalUsers:    []any{},
 		PlayableMediaTypes: []string{},
 		SupportedCommands:  []string{},

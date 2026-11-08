@@ -3,8 +3,6 @@ package jellyfin
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,37 +54,38 @@ func TestSplitUsername(t *testing.T) {
 	}
 }
 
-func TestServerIDIsKept(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "data")
-	path := filepath.Join(dir, "jellyfin-server-id")
-	if _, err := New(dir, clients.Clients{}, nil); err != nil {
-		t.Fatal(err)
-	}
-	first, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	id := strings.TrimSpace(string(first))
-	if len(id) != 32 || strings.Contains(id, "-") {
-		t.Fatalf("server id = %q", id)
-	}
-
-	mux, err := New(dir, clients.Clients{}, nil)
-	if err != nil {
-		t.Fatal(err)
+func TestServerIDIsFixed(t *testing.T) {
+	if len(serverID) != 32 || strings.Trim(serverID, "0123456789abcdef") != "" {
+		t.Fatalf("server id = %q", serverID)
 	}
 	rec := httptest.NewRecorder()
-	mux.ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
-	if !strings.Contains(rec.Body.String(), `"Id":"`+id+`"`) {
-		t.Fatalf("server id changed: %s", rec.Body)
+	New(clients.Clients{}, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
+	if !strings.Contains(rec.Body.String(), `"Id":"`+serverID+`"`) {
+		t.Fatalf("body = %s", rec.Body)
+	}
+}
+
+func TestEndpoint(t *testing.T) {
+	for addr, want := range map[string]EndPointInfo{
+		"127.0.0.1:5000":         {IsLocal: true, IsInNetwork: true},
+		"[::1]:5000":             {IsLocal: true, IsInNetwork: true},
+		"[::ffff:10.0.0.2]:5000": {IsInNetwork: true},
+		"192.168.1.10:5000":      {IsInNetwork: true},
+		"172.16.0.1:5000":        {IsInNetwork: true},
+		"[fd00::1]:5000":         {IsInNetwork: true},
+		"169.254.1.1:5000":       {IsInNetwork: true},
+		"8.8.8.8:5000":           {},
+		"[2001:db8::1]:5000":     {},
+		"garbage":                {},
+	} {
+		if got := endpoint(addr); got != want {
+			t.Errorf("endpoint(%q) = %+v, want %+v", addr, got, want)
+		}
 	}
 }
 
 func TestLocalAddressHasMountPath(t *testing.T) {
-	mux, err := New(t.TempDir(), clients.Clients{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	mux := New(clients.Clients{}, nil)
 	root := http.NewServeMux()
 	root.Handle("/plugins/jellyfin/", http.StripPrefix("/plugins/jellyfin", mux))
 

@@ -78,7 +78,7 @@ func (p *plugin) authenticateByName(w http.ResponseWriter, r *http.Request) {
 		User:        p.userDto(c.account, c.profile),
 		SessionInfo: p.sessionInfoDto(c.session, c.profile, a),
 		AccessToken: res.Token,
-		ServerId:    p.serverID,
+		ServerId:    serverID,
 	})
 }
 

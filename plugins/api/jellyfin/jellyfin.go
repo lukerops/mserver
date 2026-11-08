@@ -5,59 +5,44 @@ package jellyfin
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io/fs"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
-
-	"github.com/google/uuid"
 
 	"github.com/lukerops/mserver/internal/clients"
 	identity "github.com/lukerops/mserver/internal/modules/identity/client"
+	library "github.com/lukerops/mserver/internal/modules/library/client"
 )
 
 const (
 	serverName  = "mserver"
 	version     = "12.4.0"
 	productName = "Jellyfin Server"
+	// serverID identifies the server to the clients. It never changes, so
+	// that they keep recognizing the server.
+	serverID = "8f3c2a1e5b7d4c6a9e0f1b2c3d4e5f60"
 )
 
 type plugin struct {
 	identity *identity.Client
-	log      *slog.Logger
-	serverID string
+	// library is nil when the library module is not available: there are
+	// no items then.
+	library *library.Client
+	log     *slog.Logger
 }
 
 // New returns the routes of the Jellyfin API. It talks to the modules only
 // through their clients.
-//
-// The server id is kept in <dataDir>/jellyfin-server-id, created on the
-// first run, so that clients keep recognizing the server.
-func New(dataDir string, c clients.Clients, log *slog.Logger) (*http.ServeMux, error) {
+func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
 	if log == nil {
 		log = slog.Default()
 	}
-	path := filepath.Join(dataDir, "jellyfin-server-id")
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		b = []byte(strings.ReplaceAll(uuid.NewString(), "-", ""))
-		if err := os.MkdirAll(dataDir, 0o755); err != nil {
-			return nil, fmt.Errorf("jellyfin: server id: %w", err)
-		}
-		err = os.WriteFile(path, append(b, '\n'), 0o644)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("jellyfin: server id: %w", err)
-	}
-	p := &plugin{identity: c.Identity, log: log, serverID: strings.TrimSpace(string(b))}
+	p := &plugin{identity: c.Identity, library: c.Library, log: log}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /system/info/public", p.publicSystemInfo)
 	mux.HandleFunc("GET /system/info", p.systemInfo)
+	mux.HandleFunc("GET /system/endpoint", p.endpointInfo)
 	mux.HandleFunc("GET /system/ping", p.ping)
 	mux.HandleFunc("POST /system/ping", p.ping)
 
@@ -80,6 +65,24 @@ func New(dataDir string, c clients.Clients, log *slog.Logger) (*http.ServeMux, e
 	mux.HandleFunc("GET /userviews", p.userViews)
 	mux.HandleFunc("GET /useritems/resume", p.resumeItems)
 
+	mux.HandleFunc("GET /items", p.items)
+	mux.HandleFunc("GET /items/latest", p.latestItems)
+	mux.HandleFunc("GET /items/filters", p.queryFiltersLegacy)
+	mux.HandleFunc("GET /items/filters2", p.queryFilters)
+	mux.HandleFunc("GET /items/{itemId}", p.item)
+	mux.HandleFunc("GET /items/{itemId}/ancestors", p.ancestors)
+	mux.HandleFunc("GET /items/{itemId}/thememedia", p.themeMedia)
+	mux.HandleFunc("GET /items/{itemId}/intros", p.emptyItems)
+	mux.HandleFunc("GET /items/{itemId}/similar", p.emptyItems)
+	mux.HandleFunc("GET /items/{itemId}/specialfeatures", p.emptyItemList)
+	mux.HandleFunc("GET /items/{itemId}/localtrailers", p.emptyItemList)
+	mux.HandleFunc("GET /items/{itemId}/collections", p.collections)
+	// No studios until metadata.
+	mux.HandleFunc("GET /studios", p.emptyItems)
+	// Not in the OpenAPI anymore, but jellyfin-web still loads the item
+	// page from it.
+	mux.HandleFunc("GET /users/{userId}/items/{itemId}", p.item)
+
 	// Every response allows any origin: jellyfin-web is often served from
 	// another origin.
 	cors := http.NewServeMux()
@@ -101,7 +104,7 @@ func New(dataDir string, c clients.Clients, log *slog.Logger) (*http.ServeMux, e
 		log.Debug(r.URL.String())
 		mux.ServeHTTP(w, r)
 	})
-	return cors, nil
+	return cors
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
