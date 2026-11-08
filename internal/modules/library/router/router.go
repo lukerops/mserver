@@ -33,6 +33,13 @@ func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 
 	mux.HandleFunc("GET /v1/movies", rt.listMovies)
 	mux.HandleFunc("GET /v1/movies/{id}", rt.getMovie)
+
+	mux.HandleFunc("GET /v1/series", rt.listSeries)
+	mux.HandleFunc("GET /v1/series/{series_id}", rt.getSeries)
+	mux.HandleFunc("GET /v1/series/{series_id}/seasons", rt.listSeasons)
+	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}", rt.getSeason)
+	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}/episodes", rt.listEpisodes)
+	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}/episodes/{episode_id}", rt.getEpisode)
 	return mux
 }
 
@@ -49,9 +56,24 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 // pathID parses the {id} of the path. When it fails, the error response
 // is already written.
 func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	id, err := uuid.Parse(r.PathValue("id"))
+	return pathUUID(w, r, "id", false)
+}
+
+// Wildcard is the path segment that stands for any parent, as in
+// /v1/series/-/seasons/-/episodes (all the episodes).
+const Wildcard = "-"
+
+// pathUUID parses the path value name. When wildcard is true, "-" is
+// accepted and returned as uuid.Nil. When it fails, the error response is
+// already written.
+func pathUUID(w http.ResponseWriter, r *http.Request, name string, wildcard bool) (uuid.UUID, bool) {
+	s := r.PathValue(name)
+	if wildcard && s == Wildcard {
+		return uuid.Nil, true
+	}
+	id, err := uuid.Parse(s)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid id " + r.PathValue("id")})
+		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid " + name + " " + s})
 		return uuid.Nil, false
 	}
 	return id, true
