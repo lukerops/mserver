@@ -2,6 +2,8 @@ package local
 
 import (
 	"errors"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,5 +82,45 @@ func TestWalkFailsOnMissingRoot(t *testing.T) {
 	}
 	if err := d.Walk(t.Context(), func(driver.FileInfo) error { return nil }); err == nil {
 		t.Error("Walk succeeded on a missing directory")
+	}
+}
+
+func TestOpen(t *testing.T) {
+	dir := t.TempDir()
+	outside := t.TempDir()
+	writeFile(t, filepath.Join(dir, "Show/ep1.mkv"), "video")
+	writeFile(t, filepath.Join(outside, "secret"), "secret")
+	if err := os.Symlink(filepath.Join(outside, "secret"), filepath.Join(dir, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	d := newDriver(t, dir)
+
+	f, err := d.Open(t.Context(), "Show/ep1.mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Seek(1, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(f)
+	if err != nil || string(b) != "ideo" {
+		t.Fatalf("read %q, %v", b, err)
+	}
+	if info, err := f.Stat(); err != nil || info.Size() != 5 {
+		t.Fatalf("Stat = %v, %v", info, err)
+	}
+
+	for _, p := range []string{"missing.mkv", "Show", "escape", "../" + filepath.Base(outside) + "/secret"} {
+		if f, err := d.Open(t.Context(), p); err == nil {
+			f.Close()
+			t.Errorf("Open(%q) succeeded", p)
+		}
+	}
+	if _, err := d.Open(t.Context(), "Show"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open of a directory: got %v, want fs.ErrNotExist", err)
+	}
+	if _, err := d.Open(t.Context(), "missing.mkv"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Open of a missing file: got %v, want fs.ErrNotExist", err)
 	}
 }

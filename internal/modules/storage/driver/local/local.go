@@ -103,3 +103,27 @@ func (d *Driver) Walk(ctx context.Context, fn func(driver.FileInfo) error) error
 	}
 	return nil
 }
+
+// Open opens a file through the root, so symlinks cannot escape it.
+func (d *Driver) Open(_ context.Context, p string) (driver.File, error) {
+	root, err := d.open()
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+
+	f, err := root.Open(filepath.FromSlash(p))
+	if err != nil {
+		return nil, fmt.Errorf("local: %w", err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("local: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("local: %s is not a regular file: %w", p, fs.ErrNotExist)
+	}
+	return f, nil
+}

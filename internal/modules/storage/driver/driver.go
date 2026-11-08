@@ -8,6 +8,8 @@ package driver
 import (
 	"context"
 	"errors"
+	"io"
+	"io/fs"
 	"time"
 )
 
@@ -24,6 +26,12 @@ type FileInfo struct {
 	Inode uint64
 }
 
+// File is an open regular file.
+type File interface {
+	io.ReadSeekCloser
+	Stat() (fs.FileInfo, error)
+}
+
 // Driver gives access to the files of one location.
 type Driver interface {
 	// Root identifies the location directory (e.g. "local:/mnt/media").
@@ -36,6 +44,9 @@ type Driver interface {
 	Walk(ctx context.Context, fn func(FileInfo) error) error
 	// LocalPath returns the path of a file on the local filesystem.
 	LocalPath(path string) string
+	// Open opens a regular file for reading. A missing file (or one that
+	// is not regular) returns an error matching fs.ErrNotExist.
+	Open(ctx context.Context, path string) (File, error)
 }
 
 // Factory creates a driver from location options. Invalid options return
