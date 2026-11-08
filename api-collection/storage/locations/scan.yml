@@ -1,11 +1,11 @@
 info:
   name: scan
   type: http
-  seq: 1
+  seq: 3
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/locations/{{LocationID}}/scan"
+  url: "{{BaseURL}}/v1/locations/{{TVLocationID}}/scan"
   auth: inherit
 
 settings:

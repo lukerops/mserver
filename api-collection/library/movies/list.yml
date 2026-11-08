@@ -5,7 +5,7 @@ info:
 
 http:
   method: GET
-  url: "{{BaseURL}}/v1/movies?sort_by=added&order=desc"
+  url: "{{BaseURL}}/v1/libraries/{{MovieLibraryID}}/movies?sort_by=added&order=desc"
   params:
     - name: sort_by
       value: added

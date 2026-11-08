@@ -1,0 +1,27 @@
+info:
+  name: list
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}/series/{{SeriesID}}/seasons"
+  auth: inherit
+
+runtime:
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.seasons[0].id
+        method: jsonq
+      variable:
+        name: SeasonID
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

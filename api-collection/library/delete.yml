@@ -5,7 +5,7 @@ info:
 
 http:
   method: DELETE
-  url: "{{BaseURL}}/v1/libraries/{{LibraryID}}"
+  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}"
   auth: inherit
 
 runtime:

@@ -1,0 +1,37 @@
+info:
+  name: create tvshows
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{BaseURL}}/v1/libraries"
+  body:
+    type: json
+    data: |-
+      {
+        "name": "Séries",
+        "media_type": "tvshows",
+        "location_ids": [
+          "{{TVLocationID}}"
+        ]
+      }
+  auth: inherit
+
+runtime:
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.id
+        method: jsonq
+      variable:
+        name: TVLibraryID
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

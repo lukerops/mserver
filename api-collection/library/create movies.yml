@@ -1,19 +1,20 @@
 info:
-  name: create
+  name: create movies
   type: http
   seq: 1
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/locations"
+  url: "{{BaseURL}}/v1/libraries"
   body:
     type: json
     data: |-
       {
-        "driver": "local",
-        "options": {
-          "dir": "/media/movies"
-        }
+        "name": "Filmes",
+        "media_type": "movies",
+        "location_ids": [
+          "{{MovieLocationID}}"
+        ]
       }
   auth: inherit
 
@@ -25,7 +26,7 @@ runtime:
         expression: res.body.id
         method: jsonq
       variable:
-        name: LocationID
+        name: MovieLibraryID
         scope: runtime
 
 settings:

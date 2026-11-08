@@ -1,0 +1,20 @@
+info:
+  name: list
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}/series/{{SeriesID}}/seasons/{{SeasonID}}/episodes?sort_by=number"
+  params:
+    - name: sort_by
+      value: number
+      type: query
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

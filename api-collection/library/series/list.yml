@@ -1,21 +1,15 @@
 info:
-  name: create
+  name: list
   type: http
   seq: 1
 
 http:
-  method: POST
-  url: "{{BaseURL}}/v1/libraries"
-  body:
-    type: json
-    data: |-
-      {
-        "name": "Movies",
-        "media_type": "movies",
-        "location_ids": [
-          "{{LocationID}}"
-        ]
-      }
+  method: GET
+  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}/series?sort_by=title"
+  params:
+    - name: sort_by
+      value: title
+      type: query
   auth: inherit
 
 runtime:
@@ -23,10 +17,10 @@ runtime:
     - type: set-variable
       phase: after-response
       selector:
-        expression: res.body.id
+        expression: res.body.series[0].id
         method: jsonq
       variable:
-        name: LibraryID
+        name: SeriesID
         scope: runtime
 
 settings:
