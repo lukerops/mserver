@@ -41,10 +41,19 @@ type Service interface {
 
 	GetSeries(ctx context.Context, id uuid.UUID) (Series, error)
 	ListSeries(ctx context.Context, q SeriesQuery) (SeriesPage, error)
-	GetSeason(ctx context.Context, id uuid.UUID) (Season, error)
-	// ListSeasons lists seasons ordered by series and number.
+	// GetSeason returns a season of a series. A nil seriesID matches any
+	// series; otherwise the season must belong to it (ErrNotFound if not).
+	GetSeason(ctx context.Context, seriesID, id uuid.UUID) (Season, error)
+	// ListSeasons lists seasons ordered by series and number. When
+	// q.SeriesID is set, the series must exist (ErrNotFound if not).
 	ListSeasons(ctx context.Context, q SeasonQuery) ([]Season, error)
-	GetEpisode(ctx context.Context, id uuid.UUID) (Episode, error)
+	// GetEpisode returns an episode of a season of a series. Nil parents
+	// match any; otherwise the episode must belong to them (ErrNotFound
+	// if not).
+	GetEpisode(ctx context.Context, seriesID, seasonID, id uuid.UUID) (Episode, error)
+	// ListEpisodes returns a page of episodes. When q.SeriesID or
+	// q.SeasonID are set, they must exist and the season must belong to
+	// the series (ErrNotFound if not).
 	ListEpisodes(ctx context.Context, q EpisodeQuery) (EpisodePage, error)
 
 	// HandleStorageEvent updates the catalog with an event of the storage

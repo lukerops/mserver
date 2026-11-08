@@ -190,6 +190,36 @@ func TestCatalogSeries(t *testing.T) {
 		t.Errorf("episodes = %+v", page)
 	}
 
+	// The parents must exist, and the children must belong to them.
+	if got, err := s.GetSeason(t.Context(), series.SeriesID, season.SeasonID); err != nil || got.Number != 1 {
+		t.Errorf("season of its series = %+v, %v", got, err)
+	}
+	if got, err := s.GetEpisode(t.Context(), series.SeriesID, season.SeasonID, episodeID(first)); err != nil || got.FileID != first {
+		t.Errorf("episode of its season = %+v, %v", got, err)
+	}
+	if got, err := s.GetEpisode(t.Context(), uuid.Nil, uuid.Nil, episodeID(first)); err != nil || got.FileID != first {
+		t.Errorf("episode of any season = %+v, %v", got, err)
+	}
+	other := newID()
+	if _, err := s.GetSeason(t.Context(), other, season.SeasonID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("season of another series: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetEpisode(t.Context(), uuid.Nil, specials.SeasonID, episodeID(first)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("episode of another season: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListSeasons(t.Context(), SeasonQuery{SeriesID: other}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("seasons of an unknown series: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListEpisodes(t.Context(), EpisodeQuery{SeriesID: other, SeasonID: season.SeasonID}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("episodes of a season of another series: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListEpisodes(t.Context(), EpisodeQuery{SeasonID: other}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("episodes of an unknown season: got %v, want ErrNotFound", err)
+	}
+	if page := listEpisodes(t, s, EpisodeQuery{SeriesID: series.SeriesID, SeasonID: season.SeasonID}); page.Total != 2 {
+		t.Errorf("episodes of the season = %+v", page)
+	}
+
 	// Duplicates change nothing.
 	fileEvent(t, s, storageevents.FileIndexedV1, loc, first, "Breaking Bad (2008)/Season 01/Breaking Bad - S01E01 - Pilot.mkv")
 	evs.none(t)
@@ -206,7 +236,7 @@ func TestCatalogSeries(t *testing.T) {
 	if got := evs.topics(t, 3); !equalTopics(got, events.SeasonAddedV1, events.EpisodeUpdatedV1, events.SeasonRemovedV1) {
 		t.Errorf("events of the move = %v", got)
 	}
-	if _, err := s.GetSeason(t.Context(), specials.SeasonID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetSeason(t.Context(), uuid.Nil, specials.SeasonID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("empty season: got %v, want ErrNotFound", err)
 	}
 
