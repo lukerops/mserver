@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/lukerops/mserver/internal/modules/identity/events"
 )
 
 func (s *service) Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
@@ -61,8 +63,8 @@ func (s *service) Setup(ctx context.Context, req SetupRequest) (SetupResult, err
 			return err
 		}
 		return s.outbox.Publish(ctx,
-			accountEvent(EventAccountCreated, account),
-			profileEvent(EventProfileCreated, profile),
+			accountEvent(events.AccountCreatedV1, account),
+			profileEvent(events.ProfileCreatedV1, profile),
 		)
 	})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/modules/identity/events"
 )
 
 // ResyncAccounts publishes the created event of every account.
@@ -12,11 +13,11 @@ func (s *service) ResyncAccounts(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	events := make([]queue.Event, 0, len(accounts))
+	evs := make([]queue.Event, 0, len(accounts))
 	for _, a := range accounts {
-		events = append(events, accountEvent(EventAccountCreated, a))
+		evs = append(evs, accountEvent(events.AccountCreatedV1, a))
 	}
-	return s.outbox.Publish(ctx, events...)
+	return s.outbox.Publish(ctx, evs...)
 }
 
 // ResyncProfiles publishes the created event of every profile.
@@ -25,9 +26,9 @@ func (s *service) ResyncProfiles(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	events := make([]queue.Event, 0, len(profiles))
+	evs := make([]queue.Event, 0, len(profiles))
 	for _, p := range profiles {
-		events = append(events, profileEvent(EventProfileCreated, p))
+		evs = append(evs, profileEvent(events.ProfileCreatedV1, p))
 	}
-	return s.outbox.Publish(ctx, events...)
+	return s.outbox.Publish(ctx, evs...)
 }

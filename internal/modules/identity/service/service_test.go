@@ -17,6 +17,7 @@ import (
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
+	"github.com/lukerops/mserver/internal/modules/identity/events"
 	"github.com/lukerops/mserver/internal/modules/identity/store/sqlite"
 )
 
@@ -293,11 +294,11 @@ func TestEvents(t *testing.T) {
 	ob.Start(t.Context())
 
 	want := []string{
-		EventAccountCreated,
-		EventProfileCreated,
-		EventSessionRevoked,
-		EventAccountCreated,
-		EventProfileCreated,
+		events.AccountCreatedV1,
+		events.ProfileCreatedV1,
+		events.SessionRevokedV1,
+		events.AccountCreatedV1,
+		events.ProfileCreatedV1,
 	}
 	if got := rec.wait(t, len(want)); !slices.Equal(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
@@ -314,7 +315,7 @@ func TestEvents(t *testing.T) {
 			t.Errorf("account event has %q", field)
 		}
 	}
-	var revoked SessionRevokedEvent
+	var revoked events.SessionRevokedEventV1
 	if err := json.Unmarshal(rec.data[2], &revoked); err != nil {
 		t.Fatal(err)
 	}
