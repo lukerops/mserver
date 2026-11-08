@@ -23,33 +23,8 @@ import (
 )
 
 func TestRoundTrip(t *testing.T) {
-	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
-	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
 	ctx := t.Context()
-
-	// Both modules on the same server, as in cmd/server.
-	mux := http.NewServeMux()
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
-	c := clients.Clients{
-		Storage: storageclient.New(srv.Client(), srv.URL),
-		Library: client.New(srv.Client(), srv.URL),
-	}
-	bus := memory.New()
-	lib, err := library.New(ctx, t.TempDir(), bus, bus, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lib.Close()
-	stor, err := storage.New(ctx, t.TempDir(), bus, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer stor.Close()
-	for _, p := range []string{"/v1/libraries", "/v1/libraries/", "/v1/movies", "/v1/movies/"} {
-		mux.Handle(p, lib.Mux)
-	}
-	mux.Handle("/", stor.Mux)
+	c := newServer(t)
 
 	dir := t.TempDir()
 	old := time.Now().Add(-time.Hour) // stable: analyzed right away
@@ -159,6 +134,142 @@ func TestRoundTrip(t *testing.T) {
 	if err := l.DeleteLibrary(ctx, created.ID); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("deleted twice: got %v, want ErrNotFound", err)
 	}
+}
+
+func TestSeriesRoundTrip(t *testing.T) {
+	ctx := t.Context()
+	c := newServer(t)
+
+	dir := t.TempDir()
+	old := time.Now().Add(-time.Hour) // stable: analyzed right away
+	for _, name := range []string{
+		"Firefly (2002)/Season 1/Firefly - S01E01 - Serenity.mkv",
+		"Firefly (2002)/Season 1/Firefly - S01E02 - The Train Job.mkv",
+		"Firefly (2002)/Specials/Firefly - S00E01 - Done the Impossible.mkv",
+	} {
+		p := filepath.Join(dir, name)
+		writeMedia(t, p)
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loc, err := c.Storage.CreateLocation(ctx, storagerouter.CreateLocationRequestV1{
+		Driver: "local", Options: map[string]string{"dir": dir},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Storage.ScanLocation(ctx, loc.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	l := c.Library
+	created, err := l.CreateLibrary(ctx, router.CreateLibraryRequestV1{
+		Name: "Shows", MediaType: "tvshows", LocationIDs: []uuid.UUID{loc.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The episodes arrive from the storage events, then their analysis.
+	var episodes router.EpisodeListV1
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		episodes, err = l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{LibraryID: created.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		analyzed := 0
+		for _, e := range episodes.Episodes {
+			if e.MediaInfo != nil {
+				analyzed++
+			}
+		}
+		if analyzed == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("episodes = %+v", episodes)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	special, pilot := episodes.Episodes[0], episodes.Episodes[1]
+	if special.SeasonNumber != 0 || pilot.SeasonNumber != 1 || pilot.Number == nil || *pilot.Number != 1 ||
+		pilot.Title != "Serenity" || pilot.SeriesTitle != "Firefly" || pilot.SeriesYear != 2002 {
+		t.Errorf("episodes = %+v, %+v", special, pilot)
+	}
+
+	series, err := l.ListSeries(ctx, router.SeriesQueryV1{LibraryID: created.ID, AudioLanguages: []string{"eng"}})
+	if err != nil || series.Total != 1 || series.Series[0].SeasonCount != 2 || series.Series[0].EpisodeCount != 3 {
+		t.Fatalf("ListSeries = %+v, %v", series, err)
+	}
+	if got, err := l.GetSeries(ctx, pilot.SeriesID); err != nil || got.Title != "Firefly" {
+		t.Errorf("GetSeries = %+v, %v", got, err)
+	}
+	seasons, err := l.ListSeasons(ctx, pilot.SeriesID, router.SeasonQueryV1{})
+	if err != nil || len(seasons) != 2 || seasons[1].ID != pilot.SeasonID || seasons[1].EpisodeCount != 2 {
+		t.Errorf("ListSeasons = %+v, %v", seasons, err)
+	}
+	if got, err := l.GetSeason(ctx, pilot.SeriesID, pilot.SeasonID); err != nil || got.Number != 1 {
+		t.Errorf("GetSeason = %+v, %v", got, err)
+	}
+	if _, err := l.GetSeason(ctx, uuid.New(), pilot.SeasonID); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("season of another series: got %v, want ErrNotFound", err)
+	}
+	page, err := l.ListEpisodes(ctx, uuid.Nil, pilot.SeasonID, router.EpisodeQueryV1{Descending: true, Limit: 1})
+	if err != nil || page.Total != 2 || page.Episodes[0].Title != "The Train Job" {
+		t.Errorf("ListEpisodes of season = %+v, %v", page, err)
+	}
+	if got, err := l.GetEpisode(ctx, pilot.SeriesID, pilot.SeasonID, pilot.ID); err != nil || got.FileID != pilot.FileID {
+		t.Errorf("GetEpisode = %+v, %v", got, err)
+	}
+	if _, err := l.GetEpisode(ctx, uuid.Nil, uuid.Nil, uuid.New()); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("unknown episode: got %v, want ErrNotFound", err)
+	}
+	if _, err := l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{SortBy: "title"}); !errors.Is(err, client.ErrInvalidArgument) {
+		t.Errorf("unknown sort: got %v, want ErrInvalidArgument", err)
+	}
+
+	if err := l.DeleteLibrary(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteLibrary: %v", err)
+	}
+	if _, err := l.GetSeries(ctx, pilot.SeriesID); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("series of deleted library: got %v, want ErrNotFound", err)
+	}
+}
+
+// newServer serves the storage and the library on the same server, as in
+// cmd/server, and returns their clients.
+func newServer(t *testing.T) clients.Clients {
+	t.Helper()
+	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
+	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
+	ctx := t.Context()
+
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := clients.Clients{
+		Storage: storageclient.New(srv.Client(), srv.URL),
+		Library: client.New(srv.Client(), srv.URL),
+	}
+	bus := memory.New()
+	lib, err := library.New(ctx, t.TempDir(), bus, bus, c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { lib.Close() })
+	stor, err := storage.New(ctx, t.TempDir(), bus, c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { stor.Close() })
+	for _, p := range []string{"libraries", "movies", "series"} {
+		mux.Handle("/v1/"+p, lib.Mux)
+		mux.Handle("/v1/"+p+"/", lib.Mux)
+	}
+	mux.Handle("/", stor.Mux)
+	return c
 }
 
 // writeMedia writes at p a real movie (.mkv) or subtitle (.srt).

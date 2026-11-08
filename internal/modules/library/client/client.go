@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -71,13 +72,14 @@ func (c *Client) GetLibrary(ctx context.Context, id uuid.UUID) (router.LibraryV1
 	return resp, err
 }
 
-// DeleteLibrary removes a library and its movies.
+// DeleteLibrary removes a library with its movies, series, seasons and
+// episodes.
 func (c *Client) DeleteLibrary(ctx context.Context, id uuid.UUID) error {
 	return c.do(ctx, http.MethodDelete, "/v1/libraries/"+id.String(), nil, nil)
 }
 
-// ResyncLibrary publishes again the added event of every movie of the
-// library.
+// ResyncLibrary publishes again the added event of every movie, series,
+// season and episode of the library.
 func (c *Client) ResyncLibrary(ctx context.Context, id uuid.UUID) error {
 	return c.do(ctx, http.MethodPost, "/v1/libraries/"+id.String()+"/resync", nil, nil)
 }
@@ -97,6 +99,73 @@ func (c *Client) GetMovie(ctx context.Context, id uuid.UUID) (router.MovieV1, er
 	var resp router.MovieV1
 	err := c.do(ctx, http.MethodGet, "/v1/movies/"+id.String(), nil, &resp)
 	return resp, err
+}
+
+// ListSeries returns a page of series.
+func (c *Client) ListSeries(ctx context.Context, q router.SeriesQueryV1) (router.SeriesListV1, error) {
+	var resp router.SeriesListV1
+	err := c.do(ctx, http.MethodGet, withQuery("/v1/series", q.Values()), nil, &resp)
+	return resp, err
+}
+
+func (c *Client) GetSeries(ctx context.Context, id uuid.UUID) (router.SeriesV1, error) {
+	var resp router.SeriesV1
+	err := c.do(ctx, http.MethodGet, "/v1/series/"+id.String(), nil, &resp)
+	return resp, err
+}
+
+// ListSeasons lists the seasons of a series (uuid.Nil: of all the series),
+// ordered by series and number.
+func (c *Client) ListSeasons(ctx context.Context, seriesID uuid.UUID, q router.SeasonQueryV1) ([]router.SeasonV1, error) {
+	var resp router.SeasonListV1
+	err := c.do(ctx, http.MethodGet, withQuery(seasonsPath(seriesID), q.Values()), nil, &resp)
+	return resp.Seasons, err
+}
+
+// GetSeason returns a season of a series (uuid.Nil: of any series).
+func (c *Client) GetSeason(ctx context.Context, seriesID, id uuid.UUID) (router.SeasonV1, error) {
+	var resp router.SeasonV1
+	err := c.do(ctx, http.MethodGet, seasonsPath(seriesID)+"/"+id.String(), nil, &resp)
+	return resp, err
+}
+
+// ListEpisodes returns a page of the episodes of a season of a series.
+// uuid.Nil parents match any.
+func (c *Client) ListEpisodes(ctx context.Context, seriesID, seasonID uuid.UUID, q router.EpisodeQueryV1) (router.EpisodeListV1, error) {
+	var resp router.EpisodeListV1
+	err := c.do(ctx, http.MethodGet, withQuery(episodesPath(seriesID, seasonID), q.Values()), nil, &resp)
+	return resp, err
+}
+
+// GetEpisode returns an episode of a season of a series. uuid.Nil parents
+// match any.
+func (c *Client) GetEpisode(ctx context.Context, seriesID, seasonID, id uuid.UUID) (router.EpisodeV1, error) {
+	var resp router.EpisodeV1
+	err := c.do(ctx, http.MethodGet, episodesPath(seriesID, seasonID)+"/"+id.String(), nil, &resp)
+	return resp, err
+}
+
+func seasonsPath(seriesID uuid.UUID) string {
+	return "/v1/series/" + pathSegment(seriesID) + "/seasons"
+}
+
+func episodesPath(seriesID, seasonID uuid.UUID) string {
+	return seasonsPath(seriesID) + "/" + pathSegment(seasonID) + "/episodes"
+}
+
+// pathSegment encodes a parent ID, uuid.Nil being the wildcard.
+func pathSegment(id uuid.UUID) string {
+	if id == uuid.Nil {
+		return router.Wildcard
+	}
+	return id.String()
+}
+
+func withQuery(path string, v url.Values) string {
+	if len(v) == 0 {
+		return path
+	}
+	return path + "?" + v.Encode()
 }
 
 // do sends in as the JSON body (if not nil) and decodes the response into
