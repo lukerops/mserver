@@ -33,6 +33,24 @@ import (
 // the client, the authorization of a logged in user and the library.
 func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	t.Helper()
+	return startWithLibrary(t, "Filmes", "movies",
+		[]string{"Heat (1995).mkv", "Heat (1995).en.srt", "Alien (1979)/Alien.mkv"},
+		func(c clients.Clients) (bool, any) {
+			page, err := c.Library.ListMovies(t.Context(), libraryrouter.MovieQueryV1{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return len(page.Movies) == 2 && page.Movies[0].MediaInfo != nil && page.Movies[1].MediaInfo != nil, page
+		})
+}
+
+// startWithLibrary serves the plugin on identity, storage and library
+// modules, with a library of a media type holding files (real videos for
+// .mkv, subtitles otherwise). It waits until ready reports that the files
+// are cataloged (and returns what to report otherwise). It returns the
+// client, the authorization of a logged in user and the library.
+func startWithLibrary(t *testing.T, name, mediaType string, files []string, ready func(clients.Clients) (bool, any)) (client, string, libraryrouter.LibraryV1) {
+	t.Helper()
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
 	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
 	ctx := t.Context()
@@ -84,8 +102,8 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 
 	media := t.TempDir()
 	old := time.Now().Add(-time.Hour)
-	for _, name := range []string{"Heat (1995).mkv", "Heat (1995).en.srt", "Alien (1979)/Alien.mkv"} {
-		p := filepath.Join(media, name)
+	for _, f := range files {
+		p := filepath.Join(media, f)
 		if filepath.Ext(p) == ".mkv" {
 			ffmpegtest.WriteMovie(t, p)
 		} else if err := os.WriteFile(p, []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n"), 0o644); err != nil {
@@ -104,22 +122,19 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	if _, err := c.Storage.ScanLocation(ctx, loc.ID); err != nil {
 		t.Fatal(err)
 	}
-	movies, err := c.Library.CreateLibrary(ctx, libraryrouter.CreateLibraryRequestV1{
-		Name: "Filmes", MediaType: "movies", LocationIDs: []uuid.UUID{loc.ID},
+	created, err := c.Library.CreateLibrary(ctx, libraryrouter.CreateLibraryRequestV1{
+		Name: name, MediaType: mediaType, LocationIDs: []uuid.UUID{loc.ID},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for deadline := time.Now().Add(10 * time.Second); ; {
-		page, err := c.Library.ListMovies(ctx, libraryrouter.MovieQueryV1{})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(page.Movies) == 2 && page.Movies[0].MediaInfo != nil && page.Movies[1].MediaInfo != nil {
+	for deadline := time.Now().Add(20 * time.Second); ; {
+		ok, state := ready(c)
+		if ok {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("movies not cataloged: %+v", page)
+			t.Fatalf("files not cataloged: %+v", state)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -131,7 +146,7 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	var auth struct{ AccessToken string }
 	jc.expect("POST", "/Users/AuthenticateByName", authHeader,
 		map[string]string{"Username": "admin#lucas", "Pw": password}, &auth, http.StatusOK)
-	return jc, authHeader + `, Token="` + auth.AccessToken + `"`, movies
+	return jc, authHeader + `, Token="` + auth.AccessToken + `"`, created
 }
 
 type mediaStream struct {

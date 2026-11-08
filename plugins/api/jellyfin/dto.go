@@ -219,8 +219,9 @@ type NameValuePair struct {
 	Value string
 }
 
-// BaseItemDto describes a library (Type "CollectionFolder") or a movie
-// (Type "Movie"). Optional fields are omitted when unknown.
+// BaseItemDto describes a library (Type "CollectionFolder"), a movie
+// ("Movie"), a series ("Series"), a season ("Season") or an episode
+// ("Episode"). Optional fields are omitted when unknown.
 type BaseItemDto struct {
 	Name                     string
 	ServerId                 string
@@ -240,33 +241,47 @@ type BaseItemDto struct {
 	RunTimeTicks             int64 `json:",omitempty"`
 	PlayAccess               string
 	ProductionYear           int `json:",omitempty"`
-	RemoteTrailers           []any
-	ProviderIds              map[string]string
-	IsHD                     bool `json:",omitempty"`
-	IsFolder                 bool
-	ParentId                 string `json:",omitempty"`
-	Type                     string
-	People                   []any
-	Studios                  []any
-	GenreItems               []any
-	LocalTrailerCount        int
-	UserData                 UserItemDataDto
-	SpecialFeatureCount      int
-	DisplayPreferencesId     string
-	Tags                     []string
-	CollectionType           string        `json:",omitempty"`
-	MediaStreams             []MediaStream `json:",omitempty"`
-	VideoType                string        `json:",omitempty"`
-	ImageTags                map[string]string
-	BackdropImageTags        []string
-	ImageBlurHashes          map[string]map[string]string
-	LocationType             string
-	MediaType                string
-	LockedFields             []string
-	LockData                 bool
-	Width                    int `json:",omitempty"`
-	Height                   int `json:",omitempty"`
-	Chapters                 []any
+	// IndexNumber is the number of an episode (or season);
+	// IndexNumberEnd the last episode of a file holding several;
+	// ParentIndexNumber the season of an episode.
+	IndexNumber          *int `json:",omitempty"`
+	IndexNumberEnd       *int `json:",omitempty"`
+	ParentIndexNumber    *int `json:",omitempty"`
+	RemoteTrailers       []any
+	ProviderIds          map[string]string
+	IsHD                 bool `json:",omitempty"`
+	IsFolder             bool
+	ParentId             string `json:",omitempty"`
+	Type                 string
+	People               []any
+	Studios              []any
+	GenreItems           []any
+	LocalTrailerCount    int
+	UserData             UserItemDataDto
+	SpecialFeatureCount  int
+	DisplayPreferencesId string
+	Tags                 []string
+	// ChildCount is the number of seasons of a series, or of episodes of a
+	// season; RecursiveItemCount the number of episodes of a series.
+	ChildCount         *int          `json:",omitempty"`
+	RecursiveItemCount *int          `json:",omitempty"`
+	SeriesName         string        `json:",omitempty"`
+	SeriesId           string        `json:",omitempty"`
+	SeasonId           string        `json:",omitempty"`
+	SeasonName         string        `json:",omitempty"`
+	CollectionType     string        `json:",omitempty"`
+	MediaStreams       []MediaStream `json:",omitempty"`
+	VideoType          string        `json:",omitempty"`
+	ImageTags          map[string]string
+	BackdropImageTags  []string
+	ImageBlurHashes    map[string]map[string]string
+	LocationType       string
+	MediaType          string
+	LockedFields       []string
+	LockData           bool
+	Width              int `json:",omitempty"`
+	Height             int `json:",omitempty"`
+	Chapters           []any
 }
 
 // UserItemDataDto is the state of an item for the user. It is always
@@ -278,6 +293,9 @@ type UserItemDataDto struct {
 	Played                bool
 	Key                   string
 	ItemId                string
+	// UnplayedItemCount is the number of episodes of a series or season
+	// not played yet: all of them until watchstate.
+	UnplayedItemCount *int `json:",omitempty"`
 }
 
 type MediaSourceInfo struct {

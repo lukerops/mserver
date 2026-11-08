@@ -77,6 +77,12 @@ func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
 	mux.HandleFunc("GET /items/{itemId}/specialfeatures", p.emptyItemList)
 	mux.HandleFunc("GET /items/{itemId}/localtrailers", p.emptyItemList)
 	mux.HandleFunc("GET /items/{itemId}/collections", p.collections)
+
+	mux.HandleFunc("GET /shows/{seriesId}/seasons", p.seasons)
+	mux.HandleFunc("GET /shows/{seriesId}/episodes", p.episodes)
+	// Nothing is next up or upcoming until watchstate and metadata.
+	mux.HandleFunc("GET /shows/nextup", p.emptyItems)
+	mux.HandleFunc("GET /shows/upcoming", p.emptyItems)
 	// No studios until metadata.
 	mux.HandleFunc("GET /studios", p.emptyItems)
 	// Not in the OpenAPI anymore, but jellyfin-web still loads the item

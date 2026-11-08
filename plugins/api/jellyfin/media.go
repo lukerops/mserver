@@ -1,9 +1,11 @@
 package jellyfin
 
 import (
+	"fmt"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 
 	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
 )
@@ -48,7 +50,7 @@ func (p *plugin) libraryItem(l libraryrouter.LibraryV1) BaseItemDto {
 	item.DateCreated = &created
 	item.IsFolder = true
 	item.Type = "CollectionFolder"
-	item.CollectionType = l.MediaType // "movies" in both
+	item.CollectionType = l.MediaType // "movies" and "tvshows" in both
 	item.MediaType = "Unknown"
 	return item
 }
@@ -56,26 +58,106 @@ func (p *plugin) libraryItem(l libraryrouter.LibraryV1) BaseItemDto {
 // movieItem maps a movie to a Jellyfin movie. The media sources and
 // streams are included only when full is set.
 func (p *plugin) movieItem(m libraryrouter.MovieV1, full bool) BaseItemDto {
-	id := jellyfinID(m.ID.String())
-	item := p.newItem(id, m.Title)
-	created := m.CreatedAt
-	item.DateCreated = &created
+	item := p.videoItem(m.ID.String(), m.Title, m.Path, m.CreatedAt, m.MediaInfo, full)
 	item.SortName = m.SortTitle
 	item.ProductionYear = m.Year
 	item.ParentId = jellyfinID(m.LibraryID.String())
 	item.Type = "Movie"
+	return item
+}
+
+// seriesItem maps a series to a Jellyfin series: a folder of seasons.
+func (p *plugin) seriesItem(s libraryrouter.SeriesV1) BaseItemDto {
+	item := p.newItem(jellyfinID(s.ID.String()), s.Title)
+	created := s.CreatedAt
+	item.DateCreated = &created
+	item.SortName = s.SortTitle
+	item.ProductionYear = s.Year
+	item.ParentId = jellyfinID(s.LibraryID.String())
+	item.IsFolder = true
+	item.Type = "Series"
+	item.MediaType = "Unknown"
+	item.ChildCount = &s.SeasonCount
+	item.RecursiveItemCount = &s.EpisodeCount
+	item.UserData.UnplayedItemCount = &s.EpisodeCount
+	return item
+}
+
+// seasonItem maps a season to a Jellyfin season: a folder of episodes.
+func (p *plugin) seasonItem(s libraryrouter.SeasonV1) BaseItemDto {
+	name := seasonName(s.Number)
+	item := p.newItem(jellyfinID(s.ID.String()), name)
+	created := s.CreatedAt
+	item.DateCreated = &created
+	// Sorted by number: "Season 10" after "Season 9".
+	item.SortName = fmt.Sprintf("%04d", s.Number)
+	item.ProductionYear = s.SeriesYear
+	item.ParentId = jellyfinID(s.SeriesID.String())
+	item.IsFolder = true
+	item.Type = "Season"
+	item.MediaType = "Unknown"
+	item.IndexNumber = &s.Number
+	item.SeriesId = jellyfinID(s.SeriesID.String())
+	item.SeriesName = s.SeriesTitle
+	item.ChildCount = &s.EpisodeCount
+	item.RecursiveItemCount = &s.EpisodeCount
+	item.UserData.UnplayedItemCount = &s.EpisodeCount
+	return item
+}
+
+// episodeItem maps an episode to a Jellyfin episode. The media sources
+// and streams are included only when full is set.
+func (p *plugin) episodeItem(e libraryrouter.EpisodeV1, full bool) BaseItemDto {
+	item := p.videoItem(e.ID.String(), e.Title, e.Path, e.CreatedAt, e.MediaInfo, full)
+	item.SortName = episodeSortName(e)
+	item.ProductionYear = e.SeriesYear
+	item.ParentId = jellyfinID(e.SeasonID.String())
+	item.Type = "Episode"
+	item.IndexNumber = e.Number
+	item.IndexNumberEnd = e.EndNumber
+	item.ParentIndexNumber = &e.SeasonNumber
+	item.SeriesId = jellyfinID(e.SeriesID.String())
+	item.SeriesName = e.SeriesTitle
+	item.SeasonId = jellyfinID(e.SeasonID.String())
+	item.SeasonName = seasonName(e.SeasonNumber)
+	return item
+}
+
+// seasonName names a season the way Jellyfin does.
+func seasonName(number int) string {
+	if number == 0 {
+		return "Specials"
+	}
+	return "Season " + strconv.Itoa(number)
+}
+
+// episodeSortName sorts the episodes of a season by number, the ones
+// without number last, by name.
+func episodeSortName(e libraryrouter.EpisodeV1) string {
+	if e.Number == nil {
+		return "9999 - " + strings.ToLower(e.Title)
+	}
+	return fmt.Sprintf("%04d - %s", *e.Number, strings.ToLower(e.Title))
+}
+
+// videoItem maps a video file to a Jellyfin video item, without its type.
+// The media sources and streams are included only when full is set.
+func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, info *libraryrouter.MediaInfoV1, full bool) BaseItemDto {
+	id := jellyfinID(rawID)
+	item := p.newItem(id, name)
+	item.DateCreated = &createdAt
 	item.MediaType = "Video"
 	item.VideoType = "VideoFile"
-	item.Container = container(m.Path)
-	item.Path = m.Path
+	item.Container = container(filePath)
+	item.Path = filePath
 
 	source := MediaSourceInfo{
 		Protocol:             "File",
 		Id:                   id,
-		Path:                 m.Path,
+		Path:                 filePath,
 		Type:                 "Default",
 		Container:            item.Container,
-		Name:                 strings.TrimSuffix(path.Base(m.Path), path.Ext(m.Path)),
+		Name:                 strings.TrimSuffix(path.Base(filePath), path.Ext(filePath)),
 		SupportsDirectStream: true,
 		SupportsDirectPlay:   true,
 		SupportsProbing:      true,
@@ -84,7 +166,7 @@ func (p *plugin) movieItem(m libraryrouter.MovieV1, full bool) BaseItemDto {
 		MediaAttachments:     []any{},
 		Formats:              []string{},
 	}
-	if info := m.MediaInfo; info != nil {
+	if info != nil {
 		item.RunTimeTicks = info.DurationMs * ticksPerMs
 		source.RunTimeTicks = item.RunTimeTicks
 		source.Size = info.Size

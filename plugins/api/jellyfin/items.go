@@ -2,11 +2,13 @@ package jellyfin
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -17,6 +19,17 @@ import (
 // defaultLatestLimit is the number of items of /Items/Latest when the
 // client sends no limit, as in Jellyfin.
 const defaultLatestLimit = 20
+
+// latestEpisodesWindow is how many recent episodes /Items/Latest groups
+// by series, per item asked.
+const latestEpisodesWindow = 5
+
+// Media types of the libraries, which are also their Jellyfin collection
+// types.
+const (
+	mediaTypeMovies  = "movies"
+	mediaTypeTVShows = "tvshows"
+)
 
 // userViews lists the libraries ("My Media").
 func (p *plugin) userViews(w http.ResponseWriter, r *http.Request) {
@@ -42,10 +55,116 @@ func (p *plugin) writeViews(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, res)
 }
 
-// items lists the movies of a library, or of every library when the
-// query is recursive. Filters that depend on the user state (favorites,
-// played...) or on metadata the library does not have yet (genres,
-// people...) match nothing.
+// itemRef is an item of the catalog: exactly one field is set, unless the
+// item does not exist.
+type itemRef struct {
+	movie   *libraryrouter.MovieV1
+	episode *libraryrouter.EpisodeV1
+	series  *libraryrouter.SeriesV1
+	season  *libraryrouter.SeasonV1
+	library *libraryrouter.LibraryV1
+}
+
+func (ref itemRef) exists() bool {
+	return ref.movie != nil || ref.episode != nil || ref.series != nil || ref.season != nil || ref.library != nil
+}
+
+// isFolder reports whether the item has children /Items can list.
+func (ref itemRef) isFolder() bool {
+	return ref.library != nil || ref.series != nil || ref.season != nil
+}
+
+// findItem finds the item with an id, which may be of any type. A missing
+// item is not an error: the returned itemRef does not exist.
+func (p *plugin) findItem(ctx context.Context, id uuid.UUID) (itemRef, error) {
+	if m, err := p.library.GetMovie(ctx, id); err == nil {
+		return itemRef{movie: &m}, nil
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return itemRef{}, err
+	}
+	if e, err := p.library.GetEpisode(ctx, uuid.Nil, uuid.Nil, id); err == nil {
+		return itemRef{episode: &e}, nil
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return itemRef{}, err
+	}
+	if s, err := p.library.GetSeries(ctx, id); err == nil {
+		return itemRef{series: &s}, nil
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return itemRef{}, err
+	}
+	if s, err := p.library.GetSeason(ctx, uuid.Nil, id); err == nil {
+		return itemRef{season: &s}, nil
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return itemRef{}, err
+	}
+	if l, err := p.library.GetLibrary(ctx, id); err == nil {
+		return itemRef{library: &l}, nil
+	} else if !errors.Is(err, library.ErrNotFound) {
+		return itemRef{}, err
+	}
+	return itemRef{}, nil
+}
+
+// lookupItem finds the item of the itemId path value. When there is none,
+// it answers 404 and returns false.
+func (p *plugin) lookupItem(w http.ResponseWriter, r *http.Request) (itemRef, bool) {
+	id, err := uuid.Parse(r.PathValue("itemId"))
+	if err != nil || p.library == nil {
+		http.NotFound(w, r)
+		return itemRef{}, false
+	}
+	ref, err := p.findItem(r.Context(), id)
+	if err != nil {
+		p.internalError(w, r, "find item", err)
+		return itemRef{}, false
+	}
+	if !ref.exists() {
+		http.NotFound(w, r)
+		return itemRef{}, false
+	}
+	return ref, true
+}
+
+// parentScope resolves the parentId parameter. It returns false if the
+// parent is not a folder (e.g. a movie, or a missing item): it has no
+// children. On errors, the response is already written and the status is
+// set.
+func (p *plugin) parentScope(w http.ResponseWriter, r *http.Request, parent string) (itemRef, bool, bool) {
+	id, err := uuid.Parse(parent)
+	if err != nil {
+		http.Error(w, "invalid parentId", http.StatusBadRequest)
+		return itemRef{}, false, false
+	}
+	ref, err := p.findItem(r.Context(), id)
+	if err != nil {
+		p.internalError(w, r, "find item", err)
+		return itemRef{}, false, false
+	}
+	return ref, ref.isFolder(), true
+}
+
+// itemQuery holds the filters and the sort of /Items.
+type itemQuery struct {
+	ids                     []uuid.UUID
+	years                   []int
+	audio, subtitle         []string
+	sortBy, episodeSortBy   string
+	descending              bool
+	full                    bool
+	libraryID               uuid.UUID
+	seriesID, seasonID      uuid.UUID
+	hasLanguageOrYearFilter bool
+}
+
+// source lists a page of the items of one type, and the number of items
+// of that type matching the query.
+type source func(ctx context.Context, offset, limit int) ([]any, int, error)
+
+// items lists the children of a folder (a library, a series or a season),
+// or its descendants when the query is recursive, or the items of every
+// library. Filters that depend on the user state (favorites, played...) or
+// on metadata the library does not have yet (genres, people...) match
+// nothing.
 func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
@@ -63,8 +182,7 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mq := libraryrouter.MovieQueryV1{Offset: start, Limit: limit}
-	mq.SortBy, mq.Descending = movieSort(q["sortby"], q["sortorder"])
+	var iq itemQuery
 	if s := q["ids"]; s != "" {
 		for part := range strings.SplitSeq(s, ",") {
 			id, err := uuid.Parse(strings.TrimSpace(part))
@@ -72,7 +190,7 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid ids", http.StatusBadRequest)
 				return
 			}
-			mq.IDs = append(mq.IDs, id)
+			iq.ids = append(iq.ids, id)
 		}
 	}
 	for _, s := range list(q["years"]) {
@@ -81,52 +199,235 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid years", http.StatusBadRequest)
 			return
 		}
-		mq.Years = append(mq.Years, y)
+		iq.years = append(iq.years, y)
 	}
-	mq.AudioLanguages = list(q["audiolanguages"])
-	mq.SubtitleLanguages = list(q["subtitlelanguages"])
+	iq.audio = list(q["audiolanguages"])
+	iq.subtitle = list(q["subtitlelanguages"])
+	iq.hasLanguageOrYearFilter = iq.years != nil || iq.audio != nil || iq.subtitle != nil
+	iq.sortBy, iq.descending = movieSort(q["sortby"], q["sortorder"])
+	iq.episodeSortBy = episodeSort(q["sortby"])
+	iq.full = wantsField(q, "MediaSources") || wantsField(q, "MediaStreams")
+
+	recursive := isTrue(q["recursive"])
+	var kinds []string
 	switch parent := q["parentid"]; {
 	case parent != "":
-		id, err := uuid.Parse(parent)
-		if err != nil {
-			http.Error(w, "invalid parentId", http.StatusBadRequest)
+		scope, folder, ok := p.parentScope(w, r, parent)
+		if !ok {
 			return
 		}
-		_, err = p.library.GetLibrary(r.Context(), id)
-		if errors.Is(err, library.ErrNotFound) {
+		if !folder {
 			writeJSON(w, http.StatusOK, empty) // e.g. a movie: it has no children
 			return
 		}
-		if err != nil {
-			p.internalError(w, r, "get library", err)
-			return
+		switch {
+		case scope.season != nil:
+			iq.seasonID = scope.season.ID
+			kinds = []string{"Episode"}
+		case scope.series != nil:
+			iq.seriesID = scope.series.ID
+			kinds = []string{"Season", "Episode"}
+		case scope.library.MediaType == mediaTypeTVShows:
+			iq.libraryID = scope.library.ID
+			kinds = []string{"Series", "Season", "Episode"}
+		default:
+			iq.libraryID = scope.library.ID
+			kinds = []string{"Movie"}
 		}
-		mq.LibraryID = id
-	case mq.IDs == nil && !isTrue(q["recursive"]):
+	case iq.ids == nil && !recursive:
 		// The children of the root of the user are its views.
 		p.writeViews(w, r)
 		return
+	default:
+		kinds = []string{"Movie", "Series", "Season", "Episode"}
 	}
-	if !includesType(q, "Movie") {
-		writeJSON(w, http.StatusOK, empty)
-		return
+	// Without types to include, a query lists the children of the folder,
+	// unless it is recursive or asks for items by id.
+	if q["includeitemtypes"] == "" && !recursive && iq.ids == nil {
+		kinds = kinds[:1]
 	}
 
-	page, err := p.library.ListMovies(r.Context(), mq)
-	if err != nil {
-		p.internalError(w, r, "list movies", err)
-		return
+	var sources []source
+	for _, kind := range kinds {
+		if !includesType(q, kind) {
+			continue
+		}
+		switch kind {
+		case "Movie":
+			sources = append(sources, p.movieSource(iq))
+		case "Series":
+			sources = append(sources, p.seriesSource(iq))
+		case "Season":
+			// Seasons have no years or streams of their own.
+			if !iq.hasLanguageOrYearFilter {
+				sources = append(sources, p.seasonSource(iq))
+			}
+		case "Episode":
+			// Episodes have no year until metadata.
+			if iq.years == nil {
+				sources = append(sources, p.episodeSource(iq))
+			}
+		}
 	}
-	full := wantsField(q, "MediaSources") || wantsField(q, "MediaStreams")
-	res := BaseItemDtoQueryResult{Items: make([]any, len(page.Movies)), TotalRecordCount: page.Total, StartIndex: start}
-	for i, m := range page.Movies {
-		res.Items[i] = p.movieItem(m, full)
+	res, err := collect(r.Context(), sources, start, limit)
+	if err != nil {
+		p.internalError(w, r, "list items", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, res)
 }
 
-// latestItems lists the movies added last, of a library or of every
-// library. The response is an array, not a query result.
+// collect concatenates the sources, returning the page from start of at
+// most limit items (zero means no limit).
+func collect(ctx context.Context, sources []source, start, limit int) (BaseItemDtoQueryResult, error) {
+	res := BaseItemDtoQueryResult{Items: []any{}, StartIndex: start}
+	offset := start
+	for _, src := range sources {
+		n := 0
+		if limit > 0 {
+			n = limit - len(res.Items)
+			if n <= 0 {
+				// The page is full: only the total of the source is needed.
+				_, total, err := src(ctx, 0, 1)
+				if err != nil {
+					return res, err
+				}
+				res.TotalRecordCount += total
+				continue
+			}
+		}
+		items, total, err := src(ctx, offset, n)
+		if err != nil {
+			return res, err
+		}
+		res.Items = append(res.Items, items...)
+		res.TotalRecordCount += total
+		offset = max(0, offset-total)
+	}
+	return res, nil
+}
+
+func (p *plugin) movieSource(iq itemQuery) source {
+	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
+		page, err := p.library.ListMovies(ctx, libraryrouter.MovieQueryV1{
+			LibraryID:         iq.libraryID,
+			IDs:               iq.ids,
+			Years:             iq.years,
+			AudioLanguages:    iq.audio,
+			SubtitleLanguages: iq.subtitle,
+			SortBy:            iq.sortBy,
+			Descending:        iq.descending,
+			Offset:            offset,
+			Limit:             limit,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		items := make([]any, len(page.Movies))
+		for i, m := range page.Movies {
+			items[i] = p.movieItem(m, iq.full)
+		}
+		return items, page.Total, nil
+	}
+}
+
+func (p *plugin) seriesSource(iq itemQuery) source {
+	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
+		page, err := p.library.ListSeries(ctx, libraryrouter.SeriesQueryV1{
+			LibraryID:         iq.libraryID,
+			IDs:               iq.ids,
+			Years:             iq.years,
+			AudioLanguages:    iq.audio,
+			SubtitleLanguages: iq.subtitle,
+			SortBy:            iq.sortBy,
+			Descending:        iq.descending,
+			Offset:            offset,
+			Limit:             limit,
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		items := make([]any, len(page.Series))
+		for i, s := range page.Series {
+			items[i] = p.seriesItem(s)
+		}
+		return items, page.Total, nil
+	}
+}
+
+// seasonSource lists seasons by series and number.
+func (p *plugin) seasonSource(iq itemQuery) source {
+	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
+		seasons, err := p.library.ListSeasons(ctx, iq.seriesID, libraryrouter.SeasonQueryV1{
+			LibraryID: iq.libraryID,
+			IDs:       iq.ids,
+		})
+		if errors.Is(err, library.ErrNotFound) {
+			// The series was removed meanwhile.
+			return nil, 0, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		page := paginate(seasons, offset, limit)
+		items := make([]any, len(page))
+		for i, s := range page {
+			items[i] = p.seasonItem(s)
+		}
+		return items, len(seasons), nil
+	}
+}
+
+func (p *plugin) episodeSource(iq itemQuery) source {
+	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
+		page, err := p.library.ListEpisodes(ctx, iq.seriesID, iq.seasonID, libraryrouter.EpisodeQueryV1{
+			LibraryID:         iq.libraryID,
+			IDs:               iq.ids,
+			AudioLanguages:    iq.audio,
+			SubtitleLanguages: iq.subtitle,
+			SortBy:            iq.episodeSortBy,
+			Descending:        iq.descending,
+			Offset:            offset,
+			Limit:             limit,
+		})
+		if errors.Is(err, library.ErrNotFound) {
+			// The series or season was removed meanwhile.
+			return nil, 0, nil
+		}
+		if err != nil {
+			return nil, 0, err
+		}
+		items := make([]any, len(page.Episodes))
+		for i, e := range page.Episodes {
+			items[i] = p.episodeItem(e, iq.full)
+		}
+		return items, page.Total, nil
+	}
+}
+
+// paginate returns the page of s from offset of at most limit elements
+// (zero means no limit).
+func paginate[T any](s []T, offset, limit int) []T {
+	if offset >= len(s) {
+		return nil
+	}
+	s = s[offset:]
+	if limit > 0 && limit < len(s) {
+		s = s[:limit]
+	}
+	return s
+}
+
+// latest is an item of /Items/Latest with the time it was added.
+type latest struct {
+	added time.Time
+	item  BaseItemDto
+}
+
+// latestItems lists the items added last, of a library or of every
+// library: movies, and episodes grouped by series (a series with several
+// new episodes is listed instead of them, unless groupItems is false).
+// The response is an array, not a query result.
 func (p *plugin) latestItems(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
@@ -141,74 +442,191 @@ func (p *plugin) latestItems(w http.ResponseWriter, r *http.Request) {
 		limit = defaultLatestLimit
 	}
 	items := []BaseItemDto{}
-	if p.library == nil || isTrue(q["isplayed"]) || !includesType(q, "Movie") {
+	if p.library == nil || isTrue(q["isplayed"]) {
 		writeJSON(w, http.StatusOK, items)
 		return
 	}
 
-	mq := libraryrouter.MovieQueryV1{SortBy: "added", Descending: true, Limit: limit}
+	var lib libraryrouter.LibraryV1
 	if parent := q["parentid"]; parent != "" {
-		id, err := uuid.Parse(parent)
-		if err != nil {
-			http.Error(w, "invalid parentId", http.StatusBadRequest)
+		scope, _, ok := p.parentScope(w, r, parent)
+		if !ok {
 			return
 		}
-		_, err = p.library.GetLibrary(r.Context(), id)
-		if errors.Is(err, library.ErrNotFound) {
+		if scope.library == nil {
 			writeJSON(w, http.StatusOK, items)
 			return
 		}
-		if err != nil {
-			p.internalError(w, r, "get library", err)
-			return
-		}
-		mq.LibraryID = id
-	}
-	page, err := p.library.ListMovies(r.Context(), mq)
-	if err != nil {
-		p.internalError(w, r, "list movies", err)
-		return
+		lib = *scope.library
 	}
 	full := wantsField(q, "MediaSources") || wantsField(q, "MediaStreams")
-	for _, m := range page.Movies {
-		items = append(items, p.movieItem(m, full))
+
+	var all []latest
+	if lib.MediaType != mediaTypeTVShows && includesType(q, "Movie") {
+		page, err := p.library.ListMovies(r.Context(), libraryrouter.MovieQueryV1{
+			LibraryID: lib.ID, SortBy: "added", Descending: true, Limit: limit,
+		})
+		if err != nil {
+			p.internalError(w, r, "list movies", err)
+			return
+		}
+		for _, m := range page.Movies {
+			all = append(all, latest{m.CreatedAt, p.movieItem(m, full)})
+		}
+	}
+	if lib.MediaType != mediaTypeMovies && (includesType(q, "Episode") || contains(q["includeitemtypes"], "Series")) {
+		group := q["groupitems"] == "" || isTrue(q["groupitems"])
+		episodes, err := p.latestEpisodes(r.Context(), lib.ID, limit, group, full)
+		if err != nil {
+			p.internalError(w, r, "list episodes", err)
+			return
+		}
+		all = append(all, episodes...)
+	}
+
+	slices.SortStableFunc(all, func(a, b latest) int { return b.added.Compare(a.added) })
+	for _, l := range paginate(all, 0, limit) {
+		items = append(items, l.item)
 	}
 	writeJSON(w, http.StatusOK, items)
 }
 
-// item returns a movie, with its media sources, or a library.
+// latestEpisodes lists the episodes added last to a library (or to every
+// library), newest first. When group is set, the new episodes of a series
+// are replaced by the series, if there are several.
+func (p *plugin) latestEpisodes(ctx context.Context, lib uuid.UUID, limit int, group, full bool) ([]latest, error) {
+	window := limit
+	if group {
+		window = min(limit*latestEpisodesWindow, 500)
+	}
+	page, err := p.library.ListEpisodes(ctx, uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{
+		LibraryID: lib, SortBy: "added", Descending: true, Limit: window,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !group {
+		out := make([]latest, len(page.Episodes))
+		for i, e := range page.Episodes {
+			out[i] = latest{e.CreatedAt, p.episodeItem(e, full)}
+		}
+		return out, nil
+	}
+
+	var order []uuid.UUID // the series, newest first
+	bySeries := map[uuid.UUID][]libraryrouter.EpisodeV1{}
+	for _, e := range page.Episodes {
+		if _, seen := bySeries[e.SeriesID]; !seen {
+			if len(order) == limit {
+				continue
+			}
+			order = append(order, e.SeriesID)
+		}
+		bySeries[e.SeriesID] = append(bySeries[e.SeriesID], e)
+	}
+	var grouped []uuid.UUID
+	for _, id := range order {
+		if len(bySeries[id]) > 1 {
+			grouped = append(grouped, id)
+		}
+	}
+	series := map[uuid.UUID]libraryrouter.SeriesV1{}
+	if len(grouped) > 0 {
+		page, err := p.library.ListSeries(ctx, libraryrouter.SeriesQueryV1{IDs: grouped})
+		if err != nil {
+			return nil, err
+		}
+		for _, s := range page.Series {
+			series[s.ID] = s
+		}
+	}
+	out := make([]latest, 0, len(order))
+	for _, id := range order {
+		newest := bySeries[id][0]
+		if s, ok := series[id]; ok {
+			out = append(out, latest{newest.CreatedAt, p.seriesItem(s)})
+		} else {
+			// A single episode, or a series removed meanwhile.
+			out = append(out, latest{newest.CreatedAt, p.episodeItem(newest, full)})
+		}
+	}
+	return out, nil
+}
+
+// item returns an item; movies and episodes come with their media sources.
 func (p *plugin) item(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	movie, lib, ok := p.lookupItem(w, r)
+	ref, ok := p.lookupItem(w, r)
 	if !ok {
 		return
 	}
-	if movie != nil {
-		writeJSON(w, http.StatusOK, p.movieItem(*movie, true))
-		return
+	var item BaseItemDto
+	switch {
+	case ref.movie != nil:
+		item = p.movieItem(*ref.movie, true)
+	case ref.episode != nil:
+		item = p.episodeItem(*ref.episode, true)
+	case ref.series != nil:
+		item = p.seriesItem(*ref.series)
+	case ref.season != nil:
+		item = p.seasonItem(*ref.season)
+	default:
+		item = p.libraryItem(*ref.library)
 	}
-	writeJSON(w, http.StatusOK, p.libraryItem(*lib))
+	writeJSON(w, http.StatusOK, item)
 }
 
-// ancestors returns the parents of an item: the library of a movie. A
+// ancestors returns the parents of an item, nearest first: the season,
+// the series and the library of an episode; the library of a movie. A
 // library has no parents visible to the user.
 func (p *plugin) ancestors(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	movie, _, ok := p.lookupItem(w, r)
+	ref, ok := p.lookupItem(w, r)
 	if !ok {
 		return
 	}
+	var seasonID, seriesID, libraryID uuid.UUID
+	switch {
+	case ref.movie != nil:
+		libraryID = ref.movie.LibraryID
+	case ref.episode != nil:
+		seasonID, seriesID, libraryID = ref.episode.SeasonID, ref.episode.SeriesID, ref.episode.LibraryID
+	case ref.season != nil:
+		seriesID, libraryID = ref.season.SeriesID, ref.season.LibraryID
+	case ref.series != nil:
+		libraryID = ref.series.LibraryID
+	}
+
+	// Parents removed meanwhile are skipped.
+	ctx := r.Context()
 	parents := []BaseItemDto{}
-	if movie != nil {
-		l, err := p.library.GetLibrary(r.Context(), movie.LibraryID)
-		switch {
-		case err == nil:
+	if seasonID != uuid.Nil {
+		s, err := p.library.GetSeason(ctx, seriesID, seasonID)
+		if err == nil {
+			parents = append(parents, p.seasonItem(s))
+		} else if !errors.Is(err, library.ErrNotFound) {
+			p.internalError(w, r, "get season", err)
+			return
+		}
+	}
+	if seriesID != uuid.Nil {
+		s, err := p.library.GetSeries(ctx, seriesID)
+		if err == nil {
+			parents = append(parents, p.seriesItem(s))
+		} else if !errors.Is(err, library.ErrNotFound) {
+			p.internalError(w, r, "get series", err)
+			return
+		}
+	}
+	if libraryID != uuid.Nil {
+		l, err := p.library.GetLibrary(ctx, libraryID)
+		if err == nil {
 			parents = append(parents, p.libraryItem(l))
-		case !errors.Is(err, library.ErrNotFound): // removed meanwhile: no parents
+		} else if !errors.Is(err, library.ErrNotFound) {
 			p.internalError(w, r, "get library", err)
 			return
 		}
@@ -221,7 +639,7 @@ func (p *plugin) themeMedia(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	if _, _, ok := p.lookupItem(w, r); !ok {
+	if _, ok := p.lookupItem(w, r); !ok {
 		return
 	}
 	owner := jellyfinID(r.PathValue("itemId"))
@@ -238,102 +656,131 @@ func (p *plugin) collections(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	if _, _, ok := p.lookupItem(w, r); !ok {
+	if _, ok := p.lookupItem(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, BaseItemDtoQueryResult{Items: []any{}})
 }
 
-// queryFiltersLegacy lists the years of the movies of the query, so that
-// the library can be filtered by them. The movies have no genres, tags or
+// queryFiltersLegacy lists the years of the items of the query, so that
+// the library can be filtered by them. The items have no genres, tags or
 // ratings until metadata.
 func (p *plugin) queryFiltersLegacy(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	movies, ok := p.filterMovies(w, r)
+	years, _, ok := p.filterSources(w, r)
 	if !ok {
 		return
-	}
-	years := []int{}
-	for _, m := range movies {
-		if m.Year > 0 && !slices.Contains(years, m.Year) {
-			years = append(years, m.Year)
-		}
 	}
 	slices.Sort(years)
 	writeJSON(w, http.StatusOK, QueryFiltersLegacy{
 		Genres:          []string{},
 		Tags:            []string{},
 		OfficialRatings: []string{},
-		Years:           years,
+		Years:           slices.Compact(years),
 	})
 }
 
-// queryFilters lists the audio and subtitle languages of the movies of
-// the query. The movies have no genres or tags until metadata.
+// queryFilters lists the audio and subtitle languages of the items of the
+// query. The items have no genres or tags until metadata.
 func (p *plugin) queryFilters(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	movies, ok := p.filterMovies(w, r)
+	_, media, ok := p.filterSources(w, r)
 	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, QueryFilters{
 		Genres:            []NameGuidPair{},
 		Tags:              []string{},
-		AudioLanguages:    streamLanguages(movies, "audio"),
-		SubtitleLanguages: streamLanguages(movies, "subtitle"),
+		AudioLanguages:    streamLanguages(media, "audio"),
+		SubtitleLanguages: streamLanguages(media, "subtitle"),
 	})
 }
 
-// filterMovies returns the movies the filters of /Items/Filters and
-// /Items/Filters2 are computed from: the ones of the parentId library,
-// or of every library.
-func (p *plugin) filterMovies(w http.ResponseWriter, r *http.Request) ([]libraryrouter.MovieV1, bool) {
+// filterSources returns what the filters of /Items/Filters and
+// /Items/Filters2 are computed from: the known years and the media info
+// of the items of the parentId folder, or of every library. The streams of
+// a series are the ones of its episodes.
+func (p *plugin) filterSources(w http.ResponseWriter, r *http.Request) ([]int, []*libraryrouter.MediaInfoV1, bool) {
 	q := lowerQuery(r)
-	if p.library == nil || !includesType(q, "Movie") {
-		return nil, true
+	years := []int{}
+	if p.library == nil {
+		return years, nil, true
 	}
 	if mediaTypes := q["mediatypes"]; mediaTypes != "" && !contains(mediaTypes, "Video") {
-		return nil, true
+		return years, nil, true
 	}
-	var mq libraryrouter.MovieQueryV1
+	var (
+		lib      libraryrouter.LibraryV1
+		seriesID uuid.UUID
+		seasonID uuid.UUID
+	)
 	if parent := q["parentid"]; parent != "" {
-		id, err := uuid.Parse(parent)
-		if err != nil {
-			http.Error(w, "invalid parentId", http.StatusBadRequest)
-			return nil, false
+		scope, folder, ok := p.parentScope(w, r, parent)
+		if !ok {
+			return nil, nil, false
 		}
-		_, err = p.library.GetLibrary(r.Context(), id)
+		switch {
+		case !folder:
+			return years, nil, true // e.g. a movie: it has no children
+		case scope.library != nil:
+			lib = *scope.library
+		case scope.series != nil:
+			lib.MediaType, seriesID = mediaTypeTVShows, scope.series.ID
+		default:
+			lib.MediaType, seasonID = mediaTypeTVShows, scope.season.ID
+		}
+	}
+
+	ctx := r.Context()
+	var media []*libraryrouter.MediaInfoV1
+	if lib.MediaType != mediaTypeTVShows && includesType(q, "Movie") {
+		page, err := p.library.ListMovies(ctx, libraryrouter.MovieQueryV1{LibraryID: lib.ID})
+		if err != nil {
+			p.internalError(w, r, "list movies", err)
+			return nil, nil, false
+		}
+		for _, m := range page.Movies {
+			if m.Year > 0 {
+				years = append(years, m.Year)
+			}
+			media = append(media, m.MediaInfo)
+		}
+	}
+	if lib.MediaType != mediaTypeMovies && (includesType(q, "Series") || includesType(q, "Episode")) {
+		page, err := p.library.ListEpisodes(ctx, seriesID, seasonID, libraryrouter.EpisodeQueryV1{
+			LibraryID: lib.ID,
+		})
 		if errors.Is(err, library.ErrNotFound) {
-			return nil, true // e.g. a movie: it has no children
+			return years, media, true // the parent was removed meanwhile
 		}
 		if err != nil {
-			p.internalError(w, r, "get library", err)
-			return nil, false
+			p.internalError(w, r, "list episodes", err)
+			return nil, nil, false
 		}
-		mq.LibraryID = id
+		for _, e := range page.Episodes {
+			if e.SeriesYear > 0 {
+				years = append(years, e.SeriesYear)
+			}
+			media = append(media, e.MediaInfo)
+		}
 	}
-	page, err := p.library.ListMovies(r.Context(), mq)
-	if err != nil {
-		p.internalError(w, r, "list movies", err)
-		return nil, false
-	}
-	return page.Movies, true
+	return years, media, true
 }
 
 // streamLanguages lists the known languages of the streams of type typ,
 // by name. The value is the language code, which /Items filters on.
-func streamLanguages(movies []libraryrouter.MovieV1, typ string) []NameValuePair {
+func streamLanguages(media []*libraryrouter.MediaInfoV1, typ string) []NameValuePair {
 	languages := []NameValuePair{}
 	seen := map[string]bool{}
-	for _, m := range movies {
-		if m.MediaInfo == nil {
+	for _, info := range media {
+		if info == nil {
 			continue
 		}
-		for _, s := range m.MediaInfo.Streams {
+		for _, s := range info.Streams {
 			code := strings.ToLower(s.Language)
 			if s.Type != typ || code == "" || code == "und" || seen[code] {
 				continue
@@ -348,36 +795,8 @@ func streamLanguages(movies []libraryrouter.MovieV1, typ string) []NameValuePair
 	return languages
 }
 
-// lookupItem finds the movie or the library of the itemId path value.
-// When there is none, it answers 404 and returns false.
-func (p *plugin) lookupItem(w http.ResponseWriter, r *http.Request) (*libraryrouter.MovieV1, *libraryrouter.LibraryV1, bool) {
-	id, err := uuid.Parse(r.PathValue("itemId"))
-	if err != nil || p.library == nil {
-		http.NotFound(w, r)
-		return nil, nil, false
-	}
-	m, err := p.library.GetMovie(r.Context(), id)
-	if err == nil {
-		return &m, nil, true
-	}
-	if !errors.Is(err, library.ErrNotFound) {
-		p.internalError(w, r, "get movie", err)
-		return nil, nil, false
-	}
-	l, err := p.library.GetLibrary(r.Context(), id)
-	if errors.Is(err, library.ErrNotFound) {
-		http.NotFound(w, r)
-		return nil, nil, false
-	}
-	if err != nil {
-		p.internalError(w, r, "get library", err)
-		return nil, nil, false
-	}
-	return nil, &l, true
-}
-
 // emptyItems answers the item queries that have no results yet (intros,
-// similar items).
+// similar items, next up).
 func (p *plugin) emptyItems(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
@@ -465,10 +884,10 @@ func wantsField(q map[string]string, field string) bool {
 }
 
 // unsupportedFilter reports whether the query filters on something no
-// movie has yet: user state (until watchstate) or metadata (until
+// item has yet: user state (until watchstate) or metadata (until
 // metadata).
 func unsupportedFilter(q map[string]string) bool {
-	for _, name := range []string{"isfavorite", "isplayed", "isresumable", "islocked", "isplaceholder"} {
+	for _, name := range []string{"isfavorite", "isplayed", "isresumable", "islocked", "isplaceholder", "ismissing"} {
 		if isTrue(q[name]) {
 			return true
 		}
@@ -495,7 +914,7 @@ func unsupportedFilter(q map[string]string) bool {
 }
 
 // movieSort maps the Jellyfin sort (the first of sortBy and sortOrder) to
-// the library sort.
+// the library sort of movies and series.
 func movieSort(sortBy, sortOrder string) (string, bool) {
 	by := "title"
 	if fields := list(sortBy); len(fields) > 0 {
@@ -508,4 +927,13 @@ func movieSort(sortBy, sortOrder string) (string, bool) {
 	}
 	orders := list(sortOrder)
 	return by, len(orders) > 0 && orders[0] == "descending"
+}
+
+// episodeSort maps the Jellyfin sort to the library sort of episodes: by
+// series, season and number, unless sorted by the date added.
+func episodeSort(sortBy string) string {
+	if fields := list(sortBy); len(fields) > 0 && fields[0] == "datecreated" {
+		return "added"
+	}
+	return "number"
 }
