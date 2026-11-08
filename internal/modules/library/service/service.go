@@ -27,15 +27,25 @@ type Service interface {
 	GetLibrary(ctx context.Context, id uuid.UUID) (Library, error)
 	// ListLibraries lists the libraries ordered by name.
 	ListLibraries(ctx context.Context) ([]Library, error)
-	// DeleteLibrary removes a library and its movies, publishing their
-	// removed events. Its locations can then join another library.
+	// DeleteLibrary removes a library with its movies, series, seasons and
+	// episodes, publishing their removed events. Its locations can then
+	// join another library.
 	DeleteLibrary(ctx context.Context, id uuid.UUID) error
-	// ResyncLibrary publishes again the added event of every movie of the
-	// library, so that consumers can rebuild their projections.
+	// ResyncLibrary publishes again the added event of every movie, series,
+	// season and episode of the library, so that consumers can rebuild
+	// their projections.
 	ResyncLibrary(ctx context.Context, id uuid.UUID) error
 
 	GetMovie(ctx context.Context, id uuid.UUID) (Movie, error)
 	ListMovies(ctx context.Context, q MovieQuery) (MoviePage, error)
+
+	GetSeries(ctx context.Context, id uuid.UUID) (Series, error)
+	ListSeries(ctx context.Context, q SeriesQuery) (SeriesPage, error)
+	GetSeason(ctx context.Context, id uuid.UUID) (Season, error)
+	// ListSeasons lists seasons ordered by series and number.
+	ListSeasons(ctx context.Context, q SeasonQuery) ([]Season, error)
+	GetEpisode(ctx context.Context, id uuid.UUID) (Episode, error)
+	ListEpisodes(ctx context.Context, q EpisodeQuery) (EpisodePage, error)
 
 	// HandleStorageEvent updates the catalog with an event of the storage
 	// (one of StorageTopics). It is idempotent.

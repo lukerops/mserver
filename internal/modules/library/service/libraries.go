@@ -26,7 +26,7 @@ func (s *service) CreateLibrary(ctx context.Context, req CreateLibraryRequest) (
 	switch {
 	case lib.Name == "":
 		return Library{}, fmt.Errorf("%w: name is required", ErrInvalidArgument)
-	case lib.MediaType != MediaTypeMovies:
+	case lib.MediaType != MediaTypeMovies && lib.MediaType != MediaTypeTVShows:
 		return Library{}, fmt.Errorf("%w: unsupported media type %q", ErrInvalidArgument, lib.MediaType)
 	case len(lib.LocationIDs) == 0:
 		return Library{}, fmt.Errorf("%w: at least one location is required", ErrInvalidArgument)
@@ -91,12 +91,26 @@ func (s *service) DeleteLibrary(ctx context.Context, id uuid.UUID) error {
 		if err != nil {
 			return err
 		}
+		series, seasons, episodes, err := s.listShows(ctx, id)
+		if err != nil {
+			return err
+		}
 		if err := s.store.DeleteLibrary(ctx, id); err != nil {
 			return err
 		}
-		evs := make([]queue.Event, len(movies))
-		for i, m := range movies {
-			evs[i] = movieRemovedEvent(m)
+		evs := make([]queue.Event, 0, len(movies)+len(episodes)+len(seasons)+len(series))
+		for _, m := range movies {
+			evs = append(evs, movieRemovedEvent(m))
+		}
+		// Removals go from the episodes up to their series.
+		for _, e := range episodes {
+			evs = append(evs, episodeRemovedEvent(e))
+		}
+		for _, sn := range seasons {
+			evs = append(evs, seasonEvent(events.SeasonRemovedV1, sn))
+		}
+		for _, sr := range series {
+			evs = append(evs, seriesRemovedEvent(sr))
 		}
 		return s.outbox.Publish(ctx, evs...)
 	})
@@ -119,10 +133,41 @@ func (s *service) ResyncLibrary(ctx context.Context, id uuid.UUID) error {
 		if err != nil {
 			return err
 		}
-		evs := make([]queue.Event, len(movies))
-		for i, m := range movies {
-			evs[i] = movieEvent(events.MovieAddedV1, m)
+		series, seasons, episodes, err := s.listShows(ctx, id)
+		if err != nil {
+			return err
+		}
+		evs := make([]queue.Event, 0, len(movies)+len(series)+len(seasons)+len(episodes))
+		for _, m := range movies {
+			evs = append(evs, movieEvent(events.MovieAddedV1, m))
+		}
+		// Additions go from the series down to their episodes.
+		for _, sr := range series {
+			evs = append(evs, seriesEvent(events.SeriesAddedV1, sr))
+		}
+		for _, sn := range seasons {
+			evs = append(evs, seasonEvent(events.SeasonAddedV1, sn))
+		}
+		for _, e := range episodes {
+			evs = append(evs, episodeEvent(events.EpisodeAddedV1, e))
 		}
 		return s.outbox.Publish(ctx, evs...)
 	})
+}
+
+// listShows lists the series, seasons and episodes of a library.
+func (s *service) listShows(ctx context.Context, library uuid.UUID) ([]Series, []Season, []Episode, error) {
+	series, _, err := s.store.ListSeries(ctx, SeriesQuery{LibraryID: library})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	seasons, err := s.store.ListSeasons(ctx, SeasonQuery{LibraryID: library})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	episodes, _, err := s.store.ListEpisodes(ctx, EpisodeQuery{LibraryID: library})
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return series, seasons, episodes, nil
 }

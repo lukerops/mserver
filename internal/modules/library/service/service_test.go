@@ -228,7 +228,7 @@ func TestCreateLibrary(t *testing.T) {
 
 	for name, req := range map[string]CreateLibraryRequest{
 		"no name":          {Name: " ", MediaType: MediaTypeMovies, LocationIDs: []uuid.UUID{newID()}},
-		"bad media type":   {Name: "TV", MediaType: "tvshows", LocationIDs: []uuid.UUID{newID()}},
+		"bad media type":   {Name: "Music", MediaType: "music", LocationIDs: []uuid.UUID{newID()}},
 		"no location":      {Name: "Movies", MediaType: MediaTypeMovies},
 		"repeated":         {Name: "Movies", MediaType: MediaTypeMovies, LocationIDs: []uuid.UUID{a, a}},
 		"unknown location": {Name: "Movies", MediaType: MediaTypeMovies, LocationIDs: []uuid.UUID{newID()}},
