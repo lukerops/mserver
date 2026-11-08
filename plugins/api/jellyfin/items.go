@@ -77,22 +77,22 @@ func (ref itemRef) isFolder() bool {
 // findItem finds the item with an id, which may be of any type. A missing
 // item is not an error: the returned itemRef does not exist.
 func (p *plugin) findItem(ctx context.Context, id uuid.UUID) (itemRef, error) {
-	if m, err := p.library.GetMovie(ctx, id); err == nil {
+	if m, err := p.library.GetMovie(ctx, uuid.Nil, id); err == nil {
 		return itemRef{movie: &m}, nil
 	} else if !errors.Is(err, library.ErrNotFound) {
 		return itemRef{}, err
 	}
-	if e, err := p.library.GetEpisode(ctx, uuid.Nil, uuid.Nil, id); err == nil {
+	if e, err := p.library.GetEpisode(ctx, uuid.Nil, uuid.Nil, uuid.Nil, id); err == nil {
 		return itemRef{episode: &e}, nil
 	} else if !errors.Is(err, library.ErrNotFound) {
 		return itemRef{}, err
 	}
-	if s, err := p.library.GetSeries(ctx, id); err == nil {
+	if s, err := p.library.GetSeries(ctx, uuid.Nil, id); err == nil {
 		return itemRef{series: &s}, nil
 	} else if !errors.Is(err, library.ErrNotFound) {
 		return itemRef{}, err
 	}
-	if s, err := p.library.GetSeason(ctx, uuid.Nil, id); err == nil {
+	if s, err := p.library.GetSeason(ctx, uuid.Nil, uuid.Nil, id); err == nil {
 		return itemRef{season: &s}, nil
 	} else if !errors.Is(err, library.ErrNotFound) {
 		return itemRef{}, err
@@ -309,8 +309,7 @@ func collect(ctx context.Context, sources []source, start, limit int) (BaseItemD
 
 func (p *plugin) movieSource(iq itemQuery) source {
 	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
-		page, err := p.library.ListMovies(ctx, libraryrouter.MovieQueryV1{
-			LibraryID:         iq.libraryID,
+		page, err := p.library.ListMovies(ctx, iq.libraryID, libraryrouter.MovieQueryV1{
 			IDs:               iq.ids,
 			Years:             iq.years,
 			AudioLanguages:    iq.audio,
@@ -320,6 +319,10 @@ func (p *plugin) movieSource(iq itemQuery) source {
 			Offset:            offset,
 			Limit:             limit,
 		})
+		if errors.Is(err, library.ErrNotFound) {
+			// The library was removed meanwhile.
+			return nil, 0, nil
+		}
 		if err != nil {
 			return nil, 0, err
 		}
@@ -333,8 +336,7 @@ func (p *plugin) movieSource(iq itemQuery) source {
 
 func (p *plugin) seriesSource(iq itemQuery) source {
 	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
-		page, err := p.library.ListSeries(ctx, libraryrouter.SeriesQueryV1{
-			LibraryID:         iq.libraryID,
+		page, err := p.library.ListSeries(ctx, iq.libraryID, libraryrouter.SeriesQueryV1{
 			IDs:               iq.ids,
 			Years:             iq.years,
 			AudioLanguages:    iq.audio,
@@ -344,6 +346,10 @@ func (p *plugin) seriesSource(iq itemQuery) source {
 			Offset:            offset,
 			Limit:             limit,
 		})
+		if errors.Is(err, library.ErrNotFound) {
+			// The library was removed meanwhile.
+			return nil, 0, nil
+		}
 		if err != nil {
 			return nil, 0, err
 		}
@@ -358,12 +364,11 @@ func (p *plugin) seriesSource(iq itemQuery) source {
 // seasonSource lists seasons by series and number.
 func (p *plugin) seasonSource(iq itemQuery) source {
 	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
-		seasons, err := p.library.ListSeasons(ctx, iq.seriesID, libraryrouter.SeasonQueryV1{
-			LibraryID: iq.libraryID,
-			IDs:       iq.ids,
+		seasons, err := p.library.ListSeasons(ctx, iq.libraryID, iq.seriesID, libraryrouter.SeasonQueryV1{
+			IDs: iq.ids,
 		})
 		if errors.Is(err, library.ErrNotFound) {
-			// The series was removed meanwhile.
+			// The library or series was removed meanwhile.
 			return nil, 0, nil
 		}
 		if err != nil {
@@ -380,8 +385,7 @@ func (p *plugin) seasonSource(iq itemQuery) source {
 
 func (p *plugin) episodeSource(iq itemQuery) source {
 	return func(ctx context.Context, offset, limit int) ([]any, int, error) {
-		page, err := p.library.ListEpisodes(ctx, iq.seriesID, iq.seasonID, libraryrouter.EpisodeQueryV1{
-			LibraryID:         iq.libraryID,
+		page, err := p.library.ListEpisodes(ctx, iq.libraryID, iq.seriesID, iq.seasonID, libraryrouter.EpisodeQueryV1{
 			IDs:               iq.ids,
 			AudioLanguages:    iq.audio,
 			SubtitleLanguages: iq.subtitle,
@@ -391,7 +395,7 @@ func (p *plugin) episodeSource(iq itemQuery) source {
 			Limit:             limit,
 		})
 		if errors.Is(err, library.ErrNotFound) {
-			// The series or season was removed meanwhile.
+			// The library, series or season was removed meanwhile.
 			return nil, 0, nil
 		}
 		if err != nil {
@@ -463,10 +467,10 @@ func (p *plugin) latestItems(w http.ResponseWriter, r *http.Request) {
 
 	var all []latest
 	if lib.MediaType != mediaTypeTVShows && includesType(q, "Movie") {
-		page, err := p.library.ListMovies(r.Context(), libraryrouter.MovieQueryV1{
-			LibraryID: lib.ID, SortBy: "added", Descending: true, Limit: limit,
+		page, err := p.library.ListMovies(r.Context(), lib.ID, libraryrouter.MovieQueryV1{
+			SortBy: "added", Descending: true, Limit: limit,
 		})
-		if err != nil {
+		if err != nil && !errors.Is(err, library.ErrNotFound) {
 			p.internalError(w, r, "list movies", err)
 			return
 		}
@@ -499,9 +503,12 @@ func (p *plugin) latestEpisodes(ctx context.Context, lib uuid.UUID, limit int, g
 	if group {
 		window = min(limit*latestEpisodesWindow, 500)
 	}
-	page, err := p.library.ListEpisodes(ctx, uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{
-		LibraryID: lib, SortBy: "added", Descending: true, Limit: window,
+	page, err := p.library.ListEpisodes(ctx, lib, uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{
+		SortBy: "added", Descending: true, Limit: window,
 	})
+	if errors.Is(err, library.ErrNotFound) {
+		return nil, nil // the library was removed meanwhile
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +539,7 @@ func (p *plugin) latestEpisodes(ctx context.Context, lib uuid.UUID, limit int, g
 	}
 	series := map[uuid.UUID]libraryrouter.SeriesV1{}
 	if len(grouped) > 0 {
-		page, err := p.library.ListSeries(ctx, libraryrouter.SeriesQueryV1{IDs: grouped})
+		page, err := p.library.ListSeries(ctx, uuid.Nil, libraryrouter.SeriesQueryV1{IDs: grouped})
 		if err != nil {
 			return nil, err
 		}
@@ -605,7 +612,7 @@ func (p *plugin) ancestors(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	parents := []BaseItemDto{}
 	if seasonID != uuid.Nil {
-		s, err := p.library.GetSeason(ctx, seriesID, seasonID)
+		s, err := p.library.GetSeason(ctx, libraryID, seriesID, seasonID)
 		if err == nil {
 			parents = append(parents, p.seasonItem(s))
 		} else if !errors.Is(err, library.ErrNotFound) {
@@ -614,7 +621,7 @@ func (p *plugin) ancestors(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if seriesID != uuid.Nil {
-		s, err := p.library.GetSeries(ctx, seriesID)
+		s, err := p.library.GetSeries(ctx, libraryID, seriesID)
 		if err == nil {
 			parents = append(parents, p.seriesItem(s))
 		} else if !errors.Is(err, library.ErrNotFound) {
@@ -738,7 +745,10 @@ func (p *plugin) filterSources(w http.ResponseWriter, r *http.Request) ([]int, [
 	ctx := r.Context()
 	var media []*libraryrouter.MediaInfoV1
 	if lib.MediaType != mediaTypeTVShows && includesType(q, "Movie") {
-		page, err := p.library.ListMovies(ctx, libraryrouter.MovieQueryV1{LibraryID: lib.ID})
+		page, err := p.library.ListMovies(ctx, lib.ID, libraryrouter.MovieQueryV1{})
+		if errors.Is(err, library.ErrNotFound) {
+			return years, media, true // the library was removed meanwhile
+		}
 		if err != nil {
 			p.internalError(w, r, "list movies", err)
 			return nil, nil, false
@@ -751,9 +761,7 @@ func (p *plugin) filterSources(w http.ResponseWriter, r *http.Request) ([]int, [
 		}
 	}
 	if lib.MediaType != mediaTypeMovies && (includesType(q, "Series") || includesType(q, "Episode")) {
-		page, err := p.library.ListEpisodes(ctx, seriesID, seasonID, libraryrouter.EpisodeQueryV1{
-			LibraryID: lib.ID,
-		})
+		page, err := p.library.ListEpisodes(ctx, lib.ID, seriesID, seasonID, libraryrouter.EpisodeQueryV1{})
 		if errors.Is(err, library.ErrNotFound) {
 			return years, media, true // the parent was removed meanwhile
 		}

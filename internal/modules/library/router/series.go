@@ -11,13 +11,17 @@ import (
 )
 
 func (rt *router) listSeries(w http.ResponseWriter, r *http.Request) {
+	parents, ok := pathParents(w, r, "library_id")
+	if !ok {
+		return
+	}
 	q, err := ParseSeriesQueryV1(r.URL.Query())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
 		return
 	}
 	page, err := rt.svc.ListSeries(r.Context(), service.SeriesQuery{
-		LibraryID:         q.LibraryID,
+		LibraryID:         parents[0],
 		IDs:               q.IDs,
 		Years:             q.Years,
 		AudioLanguages:    q.AudioLanguages,
@@ -39,11 +43,15 @@ func (rt *router) listSeries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) getSeries(w http.ResponseWriter, r *http.Request) {
+	parents, ok := pathParents(w, r, "library_id")
+	if !ok {
+		return
+	}
 	id, ok := pathUUID(w, r, "series_id", false)
 	if !ok {
 		return
 	}
-	s, err := rt.svc.GetSeries(r.Context(), id)
+	s, err := rt.svc.GetSeries(r.Context(), parents[0], id)
 	if err != nil {
 		rt.writeError(w, r, err)
 		return
@@ -52,7 +60,7 @@ func (rt *router) getSeries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) listSeasons(w http.ResponseWriter, r *http.Request) {
-	seriesID, ok := pathUUID(w, r, "series_id", true)
+	parents, ok := pathParents(w, r, "library_id", "series_id")
 	if !ok {
 		return
 	}
@@ -62,8 +70,8 @@ func (rt *router) listSeasons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	seasons, err := rt.svc.ListSeasons(r.Context(), service.SeasonQuery{
-		LibraryID: q.LibraryID,
-		SeriesID:  seriesID,
+		LibraryID: parents[0],
+		SeriesID:  parents[1],
 		IDs:       q.IDs,
 	})
 	if err != nil {
@@ -78,7 +86,7 @@ func (rt *router) listSeasons(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) getSeason(w http.ResponseWriter, r *http.Request) {
-	seriesID, ok := pathUUID(w, r, "series_id", true)
+	parents, ok := pathParents(w, r, "library_id", "series_id")
 	if !ok {
 		return
 	}
@@ -86,7 +94,7 @@ func (rt *router) getSeason(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s, err := rt.svc.GetSeason(r.Context(), seriesID, id)
+	s, err := rt.svc.GetSeason(r.Context(), parents[0], parents[1], id)
 	if err != nil {
 		rt.writeError(w, r, err)
 		return
@@ -95,7 +103,7 @@ func (rt *router) getSeason(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) listEpisodes(w http.ResponseWriter, r *http.Request) {
-	seriesID, seasonID, ok := pathParents(w, r)
+	parents, ok := pathParents(w, r, "library_id", "series_id", "season_id")
 	if !ok {
 		return
 	}
@@ -105,9 +113,9 @@ func (rt *router) listEpisodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, err := rt.svc.ListEpisodes(r.Context(), service.EpisodeQuery{
-		LibraryID:         q.LibraryID,
-		SeriesID:          seriesID,
-		SeasonID:          seasonID,
+		LibraryID:         parents[0],
+		SeriesID:          parents[1],
+		SeasonID:          parents[2],
 		IDs:               q.IDs,
 		AudioLanguages:    q.AudioLanguages,
 		SubtitleLanguages: q.SubtitleLanguages,
@@ -128,7 +136,7 @@ func (rt *router) listEpisodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) getEpisode(w http.ResponseWriter, r *http.Request) {
-	seriesID, seasonID, ok := pathParents(w, r)
+	parents, ok := pathParents(w, r, "library_id", "series_id", "season_id")
 	if !ok {
 		return
 	}
@@ -136,23 +144,12 @@ func (rt *router) getEpisode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	e, err := rt.svc.GetEpisode(r.Context(), seriesID, seasonID, id)
+	e, err := rt.svc.GetEpisode(r.Context(), parents[0], parents[1], parents[2], id)
 	if err != nil {
 		rt.writeError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, toEpisodeV1(e))
-}
-
-// pathParents parses the {series_id} and {season_id} of the path, which
-// may be the Wildcard. When it fails, the error response is already
-// written.
-func pathParents(w http.ResponseWriter, r *http.Request) (seriesID, seasonID uuid.UUID, ok bool) {
-	if seriesID, ok = pathUUID(w, r, "series_id", true); !ok {
-		return
-	}
-	seasonID, ok = pathUUID(w, r, "season_id", true)
-	return
 }
 
 // Values encodes q as query parameters.
@@ -161,7 +158,8 @@ func (q SeriesQueryV1) Values() url.Values {
 	return MovieQueryV1(q).Values()
 }
 
-// ParseSeriesQueryV1 decodes the query parameters of GET /v1/series.
+// ParseSeriesQueryV1 decodes the query parameters of
+// GET /v1/libraries/{library_id}/series.
 func ParseSeriesQueryV1(v url.Values) (SeriesQueryV1, error) {
 	q, err := ParseMovieQueryV1(v)
 	return SeriesQueryV1(q), err
@@ -170,29 +168,20 @@ func ParseSeriesQueryV1(v url.Values) (SeriesQueryV1, error) {
 // Values encodes q as query parameters.
 func (q SeasonQueryV1) Values() url.Values {
 	v := url.Values{}
-	setID(v, "library_id", q.LibraryID)
 	setIDs(v, "ids", q.IDs)
 	return v
 }
 
 // ParseSeasonQueryV1 decodes the query parameters of
-// GET /v1/series/{series_id}/seasons.
+// GET /v1/libraries/{library_id}/series/{series_id}/seasons.
 func ParseSeasonQueryV1(v url.Values) (SeasonQueryV1, error) {
-	var (
-		q   SeasonQueryV1
-		err error
-	)
-	if q.LibraryID, err = parseID(v, "library_id"); err != nil {
-		return q, err
-	}
-	q.IDs, err = parseIDs(v, "ids")
-	return q, err
+	ids, err := parseIDs(v, "ids")
+	return SeasonQueryV1{IDs: ids}, err
 }
 
 // Values encodes q as query parameters.
 func (q EpisodeQueryV1) Values() url.Values {
 	return MovieQueryV1{
-		LibraryID:         q.LibraryID,
 		IDs:               q.IDs,
 		AudioLanguages:    q.AudioLanguages,
 		SubtitleLanguages: q.SubtitleLanguages,
@@ -204,14 +193,13 @@ func (q EpisodeQueryV1) Values() url.Values {
 }
 
 // ParseEpisodeQueryV1 decodes the query parameters of
-// GET /v1/series/{series_id}/seasons/{season_id}/episodes.
+// GET /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}/episodes.
 func ParseEpisodeQueryV1(v url.Values) (EpisodeQueryV1, error) {
 	if s := v.Get("years"); s != "" {
 		return EpisodeQueryV1{}, &queryError{"years", s}
 	}
 	m, err := ParseMovieQueryV1(v)
 	return EpisodeQueryV1{
-		LibraryID:         m.LibraryID,
 		IDs:               m.IDs,
 		AudioLanguages:    m.AudioLanguages,
 		SubtitleLanguages: m.SubtitleLanguages,
@@ -220,12 +208,6 @@ func ParseEpisodeQueryV1(v url.Values) (EpisodeQueryV1, error) {
 		Offset:            m.Offset,
 		Limit:             m.Limit,
 	}, err
-}
-
-func setID(v url.Values, name string, id uuid.UUID) {
-	if id != uuid.Nil {
-		v.Set(name, id.String())
-	}
 }
 
 func setIDs(v url.Values, name string, ids []uuid.UUID) {
@@ -237,19 +219,6 @@ func setIDs(v url.Values, name string, ids []uuid.UUID) {
 		s[i] = id.String()
 	}
 	v.Set(name, strings.Join(s, ","))
-}
-
-// parseID parses an optional id parameter.
-func parseID(v url.Values, name string) (uuid.UUID, error) {
-	s := v.Get(name)
-	if s == "" {
-		return uuid.Nil, nil
-	}
-	id, err := uuid.Parse(s)
-	if err != nil {
-		return uuid.Nil, &queryError{name, s}
-	}
-	return id, nil
 }
 
 // parseIDs parses an optional comma-separated list of ids.

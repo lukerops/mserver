@@ -19,7 +19,7 @@ func (p *plugin) lookupSeries(w http.ResponseWriter, r *http.Request) (libraryro
 		http.NotFound(w, r)
 		return libraryrouter.SeriesV1{}, false
 	}
-	s, err := p.library.GetSeries(r.Context(), id)
+	s, err := p.library.GetSeries(r.Context(), uuid.Nil, id)
 	if errors.Is(err, library.ErrNotFound) {
 		http.NotFound(w, r)
 		return libraryrouter.SeriesV1{}, false
@@ -43,7 +43,7 @@ func (p *plugin) seasons(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := lowerQuery(r)
-	seasons, err := p.library.ListSeasons(r.Context(), series.ID, libraryrouter.SeasonQueryV1{})
+	seasons, err := p.library.ListSeasons(r.Context(), series.LibraryID, series.ID, libraryrouter.SeasonQueryV1{})
 	if errors.Is(err, library.ErrNotFound) {
 		seasons = nil // the series was removed meanwhile
 	} else if err != nil {
@@ -101,7 +101,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid season", http.StatusBadRequest)
 			return
 		}
-		seasons, err := p.library.ListSeasons(r.Context(), series.ID, libraryrouter.SeasonQueryV1{})
+		seasons, err := p.library.ListSeasons(r.Context(), series.LibraryID, series.ID, libraryrouter.SeasonQueryV1{})
 		if err != nil && !errors.Is(err, library.ErrNotFound) {
 			p.internalError(w, r, "list seasons", err)
 			return
@@ -116,7 +116,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	page, err := p.library.ListEpisodes(r.Context(), series.ID, seasonID, libraryrouter.EpisodeQueryV1{})
+	page, err := p.library.ListEpisodes(r.Context(), series.LibraryID, series.ID, seasonID, libraryrouter.EpisodeQueryV1{})
 	if errors.Is(err, library.ErrNotFound) {
 		// The season is not of the series, or was removed meanwhile.
 		writeJSON(w, http.StatusOK, empty)

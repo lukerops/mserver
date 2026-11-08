@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
@@ -84,10 +83,15 @@ func (c *Client) ResyncLibrary(ctx context.Context, id uuid.UUID) error {
 	return c.do(ctx, http.MethodPost, "/v1/libraries/"+id.String()+"/resync", nil, nil)
 }
 
-// ListMovies returns a page of movies.
-func (c *Client) ListMovies(ctx context.Context, q router.MovieQueryV1) (router.MovieListV1, error) {
+// The catalog methods take the parents of the items first, in the order of
+// the hierarchy (library, series, season); uuid.Nil parents match any.
+// When a parent is unknown, or an item does not belong to its parents,
+// they return ErrNotFound.
+
+// ListMovies returns a page of the movies of a library.
+func (c *Client) ListMovies(ctx context.Context, libraryID uuid.UUID, q router.MovieQueryV1) (router.MovieListV1, error) {
 	var resp router.MovieListV1
-	path := "/v1/movies"
+	path := "/v1/libraries/" + parentID(libraryID) + "/movies"
 	if v := q.Values(); len(v) > 0 {
 		path += "?" + v.Encode()
 	}
@@ -95,77 +99,75 @@ func (c *Client) ListMovies(ctx context.Context, q router.MovieQueryV1) (router.
 	return resp, err
 }
 
-func (c *Client) GetMovie(ctx context.Context, id uuid.UUID) (router.MovieV1, error) {
+func (c *Client) GetMovie(ctx context.Context, libraryID, id uuid.UUID) (router.MovieV1, error) {
 	var resp router.MovieV1
-	err := c.do(ctx, http.MethodGet, "/v1/movies/"+id.String(), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/movies/" + id.String()
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-// ListSeries returns a page of series.
-func (c *Client) ListSeries(ctx context.Context, q router.SeriesQueryV1) (router.SeriesListV1, error) {
+// ListSeries returns a page of the series of a library.
+func (c *Client) ListSeries(ctx context.Context, libraryID uuid.UUID, q router.SeriesQueryV1) (router.SeriesListV1, error) {
 	var resp router.SeriesListV1
-	err := c.do(ctx, http.MethodGet, withQuery("/v1/series", q.Values()), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series"
+	if v := q.Values(); len(v) > 0 {
+		path += "?" + v.Encode()
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-func (c *Client) GetSeries(ctx context.Context, id uuid.UUID) (router.SeriesV1, error) {
+func (c *Client) GetSeries(ctx context.Context, libraryID, id uuid.UUID) (router.SeriesV1, error) {
 	var resp router.SeriesV1
-	err := c.do(ctx, http.MethodGet, "/v1/series/"+id.String(), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series/" + id.String()
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-// ListSeasons lists the seasons of a series (uuid.Nil: of all the series),
-// ordered by series and number.
-func (c *Client) ListSeasons(ctx context.Context, seriesID uuid.UUID, q router.SeasonQueryV1) ([]router.SeasonV1, error) {
+// ListSeasons lists the seasons of a series, ordered by series and number.
+func (c *Client) ListSeasons(ctx context.Context, libraryID, seriesID uuid.UUID, q router.SeasonQueryV1) ([]router.SeasonV1, error) {
 	var resp router.SeasonListV1
-	err := c.do(ctx, http.MethodGet, withQuery(seasonsPath(seriesID), q.Values()), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series/" + parentID(seriesID) + "/seasons"
+	if v := q.Values(); len(v) > 0 {
+		path += "?" + v.Encode()
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp.Seasons, err
 }
 
-// GetSeason returns a season of a series (uuid.Nil: of any series).
-func (c *Client) GetSeason(ctx context.Context, seriesID, id uuid.UUID) (router.SeasonV1, error) {
+func (c *Client) GetSeason(ctx context.Context, libraryID, seriesID, id uuid.UUID) (router.SeasonV1, error) {
 	var resp router.SeasonV1
-	err := c.do(ctx, http.MethodGet, seasonsPath(seriesID)+"/"+id.String(), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series/" + parentID(seriesID) + "/seasons/" + id.String()
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-// ListEpisodes returns a page of the episodes of a season of a series.
-// uuid.Nil parents match any.
-func (c *Client) ListEpisodes(ctx context.Context, seriesID, seasonID uuid.UUID, q router.EpisodeQueryV1) (router.EpisodeListV1, error) {
+// ListEpisodes returns a page of the episodes of a season.
+func (c *Client) ListEpisodes(ctx context.Context, libraryID, seriesID, seasonID uuid.UUID, q router.EpisodeQueryV1) (router.EpisodeListV1, error) {
 	var resp router.EpisodeListV1
-	err := c.do(ctx, http.MethodGet, withQuery(episodesPath(seriesID, seasonID), q.Values()), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series/" + parentID(seriesID) +
+		"/seasons/" + parentID(seasonID) + "/episodes"
+	if v := q.Values(); len(v) > 0 {
+		path += "?" + v.Encode()
+	}
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-// GetEpisode returns an episode of a season of a series. uuid.Nil parents
-// match any.
-func (c *Client) GetEpisode(ctx context.Context, seriesID, seasonID, id uuid.UUID) (router.EpisodeV1, error) {
+func (c *Client) GetEpisode(ctx context.Context, libraryID, seriesID, seasonID, id uuid.UUID) (router.EpisodeV1, error) {
 	var resp router.EpisodeV1
-	err := c.do(ctx, http.MethodGet, episodesPath(seriesID, seasonID)+"/"+id.String(), nil, &resp)
+	path := "/v1/libraries/" + parentID(libraryID) + "/series/" + parentID(seriesID) +
+		"/seasons/" + parentID(seasonID) + "/episodes/" + id.String()
+	err := c.do(ctx, http.MethodGet, path, nil, &resp)
 	return resp, err
 }
 
-func seasonsPath(seriesID uuid.UUID) string {
-	return "/v1/series/" + pathSegment(seriesID) + "/seasons"
-}
-
-func episodesPath(seriesID, seasonID uuid.UUID) string {
-	return seasonsPath(seriesID) + "/" + pathSegment(seasonID) + "/episodes"
-}
-
-// pathSegment encodes a parent ID, uuid.Nil being the wildcard.
-func pathSegment(id uuid.UUID) string {
+// parentID formats the ID of a parent, uuid.Nil being the wildcard.
+func parentID(id uuid.UUID) string {
 	if id == uuid.Nil {
 		return router.Wildcard
 	}
 	return id.String()
-}
-
-func withQuery(path string, v url.Values) string {
-	if len(v) == 0 {
-		return path
-	}
-	return path + "?" + v.Encode()
 }
 
 // do sends in as the JSON body (if not nil) and decodes the response into

@@ -24,7 +24,7 @@ func startWithShows(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 		"Breaking Bad (2008)/Specials/Breaking Bad - S00E01 - Minisode.mkv",
 		"One Piece/[Group] One Piece - 105 [1080p].mkv",
 	}, func(c clients.Clients) (bool, any) {
-		page, err := c.Library.ListEpisodes(t.Context(), uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{})
+		page, err := c.Library.ListEpisodes(t.Context(), uuid.Nil, uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{})
 		if err != nil {
 			t.Fatal(err)
 		}

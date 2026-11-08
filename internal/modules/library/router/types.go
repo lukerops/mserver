@@ -104,9 +104,10 @@ type MovieListV1 struct {
 	Total int `json:"total"`
 }
 
-// MovieQueryV1 holds the query parameters of GET /v1/movies:
+// MovieQueryV1 holds the query parameters of
+// GET /v1/libraries/{library_id}/movies, where {library_id} may be the
+// Wildcard (the movies of all the libraries):
 //
-//	library_id          only the movies of this library
 //	ids                 only these movies (comma-separated)
 //	years               only the movies of these years (comma-separated)
 //	audio_languages     only the movies with an audio stream in one of these
@@ -117,7 +118,6 @@ type MovieListV1 struct {
 //	offset              movies to skip
 //	limit               maximum number of movies (default: all)
 type MovieQueryV1 struct {
-	LibraryID         uuid.UUID
 	IDs               []uuid.UUID
 	Years             []int
 	AudioLanguages    []string
@@ -151,9 +151,10 @@ type SeriesListV1 struct {
 	Total int `json:"total"`
 }
 
-// SeriesQueryV1 holds the query parameters of GET /v1/series:
+// SeriesQueryV1 holds the query parameters of
+// GET /v1/libraries/{library_id}/series, where {library_id} may be the
+// Wildcard:
 //
-//	library_id          only the series of this library
 //	ids                 only these series (comma-separated)
 //	years               only the series of these years (comma-separated)
 //	audio_languages     only the series with an episode with an audio
@@ -165,7 +166,6 @@ type SeriesListV1 struct {
 //	offset              series to skip
 //	limit               maximum number of series (default: all)
 type SeriesQueryV1 struct {
-	LibraryID         uuid.UUID
 	IDs               []uuid.UUID
 	Years             []int
 	AudioLanguages    []string
@@ -196,14 +196,12 @@ type SeasonListV1 struct {
 }
 
 // SeasonQueryV1 holds the query parameters of
-// GET /v1/series/{series_id}/seasons, where {series_id} may be the
-// Wildcard (the seasons of all the series):
+// GET /v1/libraries/{library_id}/series/{series_id}/seasons, where the
+// parents may be the Wildcard:
 //
-//	library_id  only the seasons of this library
 //	ids         only these seasons (comma-separated)
 type SeasonQueryV1 struct {
-	LibraryID uuid.UUID
-	IDs       []uuid.UUID
+	IDs []uuid.UUID
 }
 
 // EpisodeV1 is an episode, identified from a file. A file may hold several
@@ -243,11 +241,11 @@ type EpisodeListV1 struct {
 }
 
 // EpisodeQueryV1 holds the query parameters of
-// GET /v1/series/{series_id}/seasons/{season_id}/episodes, where both
-// parents may be the Wildcard (e.g. /v1/series/{series_id}/seasons/-/episodes
-// lists the episodes of all the seasons of a series):
+// GET /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}/episodes,
+// where the parents may be the Wildcard (e.g.
+// /v1/libraries/-/series/{series_id}/seasons/-/episodes lists the episodes
+// of all the seasons of a series):
 //
-//	library_id          only the episodes of this library
 //	ids                 only these episodes (comma-separated)
 //	audio_languages     only the episodes with an audio stream in one of
 //	                    these languages (comma-separated, case-insensitive)
@@ -259,7 +257,6 @@ type EpisodeListV1 struct {
 //	offset              episodes to skip
 //	limit               maximum number of episodes (default: all)
 type EpisodeQueryV1 struct {
-	LibraryID         uuid.UUID
 	IDs               []uuid.UUID
 	AudioLanguages    []string
 	SubtitleLanguages []string

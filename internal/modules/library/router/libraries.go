@@ -37,7 +37,7 @@ func (rt *router) listLibraries(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) getLibrary(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	id, ok := pathUUID(w, r, "library_id", false)
 	if !ok {
 		return
 	}
@@ -50,7 +50,7 @@ func (rt *router) getLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) deleteLibrary(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	id, ok := pathUUID(w, r, "library_id", false)
 	if !ok {
 		return
 	}
@@ -62,7 +62,7 @@ func (rt *router) deleteLibrary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) resyncLibrary(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	id, ok := pathUUID(w, r, "library_id", false)
 	if !ok {
 		return
 	}

@@ -363,9 +363,15 @@ func TestCatalogFollowsStorage(t *testing.T) {
 	if updated := evs.next(t, events.MovieUpdatedV1); updated.DurationMs != 7_020_000 {
 		t.Errorf("updated after analysis = %+v", updated)
 	}
-	m, err := s.GetMovie(t.Context(), movieID(file))
+	m, err := s.GetMovie(t.Context(), lib.ID, movieID(file))
 	if err != nil || m.MediaInfo == nil || len(m.MediaInfo.Streams) != 2 || m.MediaInfo.Streams[0].Width != 1920 {
 		t.Fatalf("movie after analysis = %+v, %v", m, err)
+	}
+	if _, err := s.GetMovie(t.Context(), newID(), movieID(file)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("movie of another library: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListMovies(t.Context(), MovieQuery{LibraryID: newID()}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("movies of an unknown library: got %v, want ErrNotFound", err)
 	}
 	analyzedEvent(t, s, loc, file, info)                                                // duplicate
 	analyzedEvent(t, s, loc, newID(), info)                                             // not a movie
@@ -384,7 +390,7 @@ func TestCatalogFollowsStorage(t *testing.T) {
 	// A change drops the analysis of the old content.
 	fileEvent(t, s, storageevents.FileChangedV1, loc, file, "Aliens (1986).mkv")
 	evs.next(t, events.MovieUpdatedV1)
-	if m, _ := s.GetMovie(t.Context(), movieID(file)); m.MediaInfo != nil || !m.CreatedAt.Equal(page.Movies[0].CreatedAt) {
+	if m, _ := s.GetMovie(t.Context(), uuid.Nil, movieID(file)); m.MediaInfo != nil || !m.CreatedAt.Equal(page.Movies[0].CreatedAt) {
 		t.Errorf("movie after change = %+v", m)
 	}
 
@@ -399,7 +405,7 @@ func TestCatalogFollowsStorage(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no removed event")
 	}
-	if _, err := s.GetMovie(t.Context(), movieID(file)); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetMovie(t.Context(), uuid.Nil, movieID(file)); !errors.Is(err, ErrNotFound) {
 		t.Errorf("removed movie: got %v, want ErrNotFound", err)
 	}
 	fileEvent(t, s, storageevents.FileRemovedV1, loc, file, "Aliens (1986).mkv") // duplicate

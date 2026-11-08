@@ -36,7 +36,7 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	return startWithLibrary(t, "Filmes", "movies",
 		[]string{"Heat (1995).mkv", "Heat (1995).en.srt", "Alien (1979)/Alien.mkv"},
 		func(c clients.Clients) (bool, any) {
-			page, err := c.Library.ListMovies(t.Context(), libraryrouter.MovieQueryV1{})
+			page, err := c.Library.ListMovies(t.Context(), uuid.Nil, libraryrouter.MovieQueryV1{})
 			if err != nil {
 				t.Fatal(err)
 			}

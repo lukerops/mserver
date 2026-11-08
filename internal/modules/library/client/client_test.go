@@ -66,7 +66,7 @@ func TestRoundTrip(t *testing.T) {
 	var movie router.MovieV1
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		page, err := l.ListMovies(ctx, router.MovieQueryV1{LibraryID: created.ID, SortBy: "added", Descending: true, Limit: 10})
+		page, err := l.ListMovies(ctx, created.ID, router.MovieQueryV1{SortBy: "added", Descending: true, Limit: 10})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -87,19 +87,19 @@ func TestRoundTrip(t *testing.T) {
 		len(movie.MediaInfo.Streams) != 2 || movie.MediaInfo.Streams[0].Width != ffmpegtest.MovieWidth {
 		t.Errorf("movie = %+v (media %+v)", movie, movie.MediaInfo)
 	}
-	if got, err := l.GetMovie(ctx, movie.ID); err != nil || got.ID != movie.ID || got.MediaInfo == nil {
+	if got, err := l.GetMovie(ctx, created.ID, movie.ID); err != nil || got.ID != movie.ID || got.MediaInfo == nil {
 		t.Errorf("GetMovie = %+v, %v", got, err)
 	}
-	if page, err := l.ListMovies(ctx, router.MovieQueryV1{IDs: []uuid.UUID{movie.ID, uuid.New()}}); err != nil || page.Total != 1 {
+	if page, err := l.ListMovies(ctx, uuid.Nil, router.MovieQueryV1{IDs: []uuid.UUID{movie.ID, uuid.New()}}); err != nil || page.Total != 1 {
 		t.Errorf("ListMovies by IDs = %+v, %v", page, err)
 	}
-	if page, err := l.ListMovies(ctx, router.MovieQueryV1{Years: []int{1979}, AudioLanguages: []string{"ENG"}}); err != nil || page.Total != 1 {
+	if page, err := l.ListMovies(ctx, uuid.Nil, router.MovieQueryV1{Years: []int{1979}, AudioLanguages: []string{"ENG"}}); err != nil || page.Total != 1 {
 		t.Errorf("ListMovies by year and audio language = %+v, %v", page, err)
 	}
-	if page, err := l.ListMovies(ctx, router.MovieQueryV1{Years: []int{1980}}); err != nil || page.Total != 0 {
+	if page, err := l.ListMovies(ctx, uuid.Nil, router.MovieQueryV1{Years: []int{1980}}); err != nil || page.Total != 0 {
 		t.Errorf("ListMovies by other year = %+v, %v", page, err)
 	}
-	if page, err := l.ListMovies(ctx, router.MovieQueryV1{SubtitleLanguages: []string{"eng"}}); err != nil || page.Total != 0 {
+	if page, err := l.ListMovies(ctx, uuid.Nil, router.MovieQueryV1{SubtitleLanguages: []string{"eng"}}); err != nil || page.Total != 0 {
 		t.Errorf("ListMovies by subtitle language = %+v, %v", page, err)
 	}
 	if err := l.ResyncLibrary(ctx, created.ID); err != nil {
@@ -118,17 +118,23 @@ func TestRoundTrip(t *testing.T) {
 	if !errors.Is(err, client.ErrInvalidArgument) {
 		t.Errorf("unknown location: got %v, want ErrInvalidArgument", err)
 	}
-	if _, err := l.GetMovie(ctx, uuid.New()); !errors.Is(err, client.ErrNotFound) {
+	if _, err := l.GetMovie(ctx, uuid.Nil, uuid.New()); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("unknown movie: got %v, want ErrNotFound", err)
 	}
-	if _, err := l.ListMovies(ctx, router.MovieQueryV1{SortBy: "rating"}); !errors.Is(err, client.ErrInvalidArgument) {
+	if _, err := l.GetMovie(ctx, uuid.New(), movie.ID); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("movie of another library: got %v, want ErrNotFound", err)
+	}
+	if _, err := l.ListMovies(ctx, uuid.New(), router.MovieQueryV1{}); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("movies of an unknown library: got %v, want ErrNotFound", err)
+	}
+	if _, err := l.ListMovies(ctx, uuid.Nil, router.MovieQueryV1{SortBy: "rating"}); !errors.Is(err, client.ErrInvalidArgument) {
 		t.Errorf("unknown sort: got %v, want ErrInvalidArgument", err)
 	}
 
 	if err := l.DeleteLibrary(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteLibrary: %v", err)
 	}
-	if _, err := l.GetMovie(ctx, movie.ID); !errors.Is(err, client.ErrNotFound) {
+	if _, err := l.GetMovie(ctx, uuid.Nil, movie.ID); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("movie of deleted library: got %v, want ErrNotFound", err)
 	}
 	if err := l.DeleteLibrary(ctx, created.ID); !errors.Is(err, client.ErrNotFound) {
@@ -175,7 +181,7 @@ func TestSeriesRoundTrip(t *testing.T) {
 	var episodes router.EpisodeListV1
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		episodes, err = l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{LibraryID: created.ID})
+		episodes, err = l.ListEpisodes(ctx, created.ID, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -199,41 +205,41 @@ func TestSeriesRoundTrip(t *testing.T) {
 		t.Errorf("episodes = %+v, %+v", special, pilot)
 	}
 
-	series, err := l.ListSeries(ctx, router.SeriesQueryV1{LibraryID: created.ID, AudioLanguages: []string{"eng"}})
+	series, err := l.ListSeries(ctx, created.ID, router.SeriesQueryV1{AudioLanguages: []string{"eng"}})
 	if err != nil || series.Total != 1 || series.Series[0].SeasonCount != 2 || series.Series[0].EpisodeCount != 3 {
 		t.Fatalf("ListSeries = %+v, %v", series, err)
 	}
-	if got, err := l.GetSeries(ctx, pilot.SeriesID); err != nil || got.Title != "Firefly" {
+	if got, err := l.GetSeries(ctx, created.ID, pilot.SeriesID); err != nil || got.Title != "Firefly" {
 		t.Errorf("GetSeries = %+v, %v", got, err)
 	}
-	seasons, err := l.ListSeasons(ctx, pilot.SeriesID, router.SeasonQueryV1{})
+	seasons, err := l.ListSeasons(ctx, created.ID, pilot.SeriesID, router.SeasonQueryV1{})
 	if err != nil || len(seasons) != 2 || seasons[1].ID != pilot.SeasonID || seasons[1].EpisodeCount != 2 {
 		t.Errorf("ListSeasons = %+v, %v", seasons, err)
 	}
-	if got, err := l.GetSeason(ctx, pilot.SeriesID, pilot.SeasonID); err != nil || got.Number != 1 {
+	if got, err := l.GetSeason(ctx, uuid.Nil, pilot.SeriesID, pilot.SeasonID); err != nil || got.Number != 1 {
 		t.Errorf("GetSeason = %+v, %v", got, err)
 	}
-	if _, err := l.GetSeason(ctx, uuid.New(), pilot.SeasonID); !errors.Is(err, client.ErrNotFound) {
+	if _, err := l.GetSeason(ctx, uuid.Nil, uuid.New(), pilot.SeasonID); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("season of another series: got %v, want ErrNotFound", err)
 	}
-	page, err := l.ListEpisodes(ctx, uuid.Nil, pilot.SeasonID, router.EpisodeQueryV1{Descending: true, Limit: 1})
+	page, err := l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, pilot.SeasonID, router.EpisodeQueryV1{Descending: true, Limit: 1})
 	if err != nil || page.Total != 2 || page.Episodes[0].Title != "The Train Job" {
 		t.Errorf("ListEpisodes of season = %+v, %v", page, err)
 	}
-	if got, err := l.GetEpisode(ctx, pilot.SeriesID, pilot.SeasonID, pilot.ID); err != nil || got.FileID != pilot.FileID {
+	if got, err := l.GetEpisode(ctx, created.ID, pilot.SeriesID, pilot.SeasonID, pilot.ID); err != nil || got.FileID != pilot.FileID {
 		t.Errorf("GetEpisode = %+v, %v", got, err)
 	}
-	if _, err := l.GetEpisode(ctx, uuid.Nil, uuid.Nil, uuid.New()); !errors.Is(err, client.ErrNotFound) {
+	if _, err := l.GetEpisode(ctx, uuid.Nil, uuid.Nil, uuid.Nil, uuid.New()); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("unknown episode: got %v, want ErrNotFound", err)
 	}
-	if _, err := l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{SortBy: "title"}); !errors.Is(err, client.ErrInvalidArgument) {
+	if _, err := l.ListEpisodes(ctx, uuid.Nil, uuid.Nil, uuid.Nil, router.EpisodeQueryV1{SortBy: "title"}); !errors.Is(err, client.ErrInvalidArgument) {
 		t.Errorf("unknown sort: got %v, want ErrInvalidArgument", err)
 	}
 
 	if err := l.DeleteLibrary(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteLibrary: %v", err)
 	}
-	if _, err := l.GetSeries(ctx, pilot.SeriesID); !errors.Is(err, client.ErrNotFound) {
+	if _, err := l.GetSeries(ctx, uuid.Nil, pilot.SeriesID); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("series of deleted library: got %v, want ErrNotFound", err)
 	}
 }
@@ -264,7 +270,7 @@ func newServer(t *testing.T) clients.Clients {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stor.Close() })
-	for _, p := range []string{"libraries", "movies", "series"} {
+	for _, p := range []string{"libraries"} {
 		mux.Handle("/v1/"+p, lib.Mux)
 		mux.Handle("/v1/"+p+"/", lib.Mux)
 	}

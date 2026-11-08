@@ -36,24 +36,22 @@ type Service interface {
 	// their projections.
 	ResyncLibrary(ctx context.Context, id uuid.UUID) error
 
-	GetMovie(ctx context.Context, id uuid.UUID) (Movie, error)
+	// The catalog is a hierarchy: a library holds movies and series, a
+	// series holds seasons and a season holds episodes. The getters take
+	// the parents in this order; a nil parent matches any, otherwise the
+	// item must belong to it (ErrNotFound if not). The lists fail with
+	// ErrNotFound when a parent set in the query does not exist or does
+	// not belong to its own parents.
+
+	GetMovie(ctx context.Context, libraryID, id uuid.UUID) (Movie, error)
 	ListMovies(ctx context.Context, q MovieQuery) (MoviePage, error)
 
-	GetSeries(ctx context.Context, id uuid.UUID) (Series, error)
+	GetSeries(ctx context.Context, libraryID, id uuid.UUID) (Series, error)
 	ListSeries(ctx context.Context, q SeriesQuery) (SeriesPage, error)
-	// GetSeason returns a season of a series. A nil seriesID matches any
-	// series; otherwise the season must belong to it (ErrNotFound if not).
-	GetSeason(ctx context.Context, seriesID, id uuid.UUID) (Season, error)
-	// ListSeasons lists seasons ordered by series and number. When
-	// q.SeriesID is set, the series must exist (ErrNotFound if not).
+	GetSeason(ctx context.Context, libraryID, seriesID, id uuid.UUID) (Season, error)
+	// ListSeasons lists seasons ordered by series and number.
 	ListSeasons(ctx context.Context, q SeasonQuery) ([]Season, error)
-	// GetEpisode returns an episode of a season of a series. Nil parents
-	// match any; otherwise the episode must belong to them (ErrNotFound
-	// if not).
-	GetEpisode(ctx context.Context, seriesID, seasonID, id uuid.UUID) (Episode, error)
-	// ListEpisodes returns a page of episodes. When q.SeriesID or
-	// q.SeasonID are set, they must exist and the season must belong to
-	// the series (ErrNotFound if not).
+	GetEpisode(ctx context.Context, libraryID, seriesID, seasonID, id uuid.UUID) (Episode, error)
 	ListEpisodes(ctx context.Context, q EpisodeQuery) (EpisodePage, error)
 
 	// HandleStorageEvent updates the catalog with an event of the storage

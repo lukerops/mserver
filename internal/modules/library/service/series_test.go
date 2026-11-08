@@ -176,7 +176,7 @@ func TestCatalogSeries(t *testing.T) {
 		t.Errorf("special = %+v in %+v", episode, specials)
 	}
 
-	sr, err := s.GetSeries(t.Context(), series.SeriesID)
+	sr, err := s.GetSeries(t.Context(), lib.ID, series.SeriesID)
 	if err != nil || sr.SeasonCount != 2 || sr.EpisodeCount != 3 {
 		t.Errorf("series = %+v, %v", sr, err)
 	}
@@ -191,24 +191,36 @@ func TestCatalogSeries(t *testing.T) {
 	}
 
 	// The parents must exist, and the children must belong to them.
-	if got, err := s.GetSeason(t.Context(), series.SeriesID, season.SeasonID); err != nil || got.Number != 1 {
+	if got, err := s.GetSeason(t.Context(), lib.ID, series.SeriesID, season.SeasonID); err != nil || got.Number != 1 {
 		t.Errorf("season of its series = %+v, %v", got, err)
 	}
-	if got, err := s.GetEpisode(t.Context(), series.SeriesID, season.SeasonID, episodeID(first)); err != nil || got.FileID != first {
+	if got, err := s.GetEpisode(t.Context(), lib.ID, series.SeriesID, season.SeasonID, episodeID(first)); err != nil || got.FileID != first {
 		t.Errorf("episode of its season = %+v, %v", got, err)
 	}
-	if got, err := s.GetEpisode(t.Context(), uuid.Nil, uuid.Nil, episodeID(first)); err != nil || got.FileID != first {
+	if got, err := s.GetEpisode(t.Context(), uuid.Nil, uuid.Nil, uuid.Nil, episodeID(first)); err != nil || got.FileID != first {
 		t.Errorf("episode of any season = %+v, %v", got, err)
 	}
 	other := newID()
-	if _, err := s.GetSeason(t.Context(), other, season.SeasonID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetSeries(t.Context(), other, series.SeriesID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("series of another library: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetSeason(t.Context(), uuid.Nil, other, season.SeasonID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("season of another series: got %v, want ErrNotFound", err)
 	}
-	if _, err := s.GetEpisode(t.Context(), uuid.Nil, specials.SeasonID, episodeID(first)); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetEpisode(t.Context(), other, uuid.Nil, uuid.Nil, episodeID(first)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("episode of another library: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.GetEpisode(t.Context(), uuid.Nil, uuid.Nil, specials.SeasonID, episodeID(first)); !errors.Is(err, ErrNotFound) {
 		t.Errorf("episode of another season: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListSeries(t.Context(), SeriesQuery{LibraryID: other}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("series of an unknown library: got %v, want ErrNotFound", err)
 	}
 	if _, err := s.ListSeasons(t.Context(), SeasonQuery{SeriesID: other}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("seasons of an unknown series: got %v, want ErrNotFound", err)
+	}
+	if _, err := s.ListSeasons(t.Context(), SeasonQuery{LibraryID: other, SeriesID: series.SeriesID}); !errors.Is(err, ErrNotFound) {
+		t.Errorf("seasons of a series of another library: got %v, want ErrNotFound", err)
 	}
 	if _, err := s.ListEpisodes(t.Context(), EpisodeQuery{SeriesID: other, SeasonID: season.SeasonID}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("episodes of a season of another series: got %v, want ErrNotFound", err)
@@ -216,7 +228,7 @@ func TestCatalogSeries(t *testing.T) {
 	if _, err := s.ListEpisodes(t.Context(), EpisodeQuery{SeasonID: other}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("episodes of an unknown season: got %v, want ErrNotFound", err)
 	}
-	if page := listEpisodes(t, s, EpisodeQuery{SeriesID: series.SeriesID, SeasonID: season.SeasonID}); page.Total != 2 {
+	if page := listEpisodes(t, s, EpisodeQuery{LibraryID: lib.ID, SeriesID: series.SeriesID, SeasonID: season.SeasonID}); page.Total != 2 {
 		t.Errorf("episodes of the season = %+v", page)
 	}
 
@@ -236,7 +248,7 @@ func TestCatalogSeries(t *testing.T) {
 	if got := evs.topics(t, 3); !equalTopics(got, events.SeasonAddedV1, events.EpisodeUpdatedV1, events.SeasonRemovedV1) {
 		t.Errorf("events of the move = %v", got)
 	}
-	if _, err := s.GetSeason(t.Context(), uuid.Nil, specials.SeasonID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetSeason(t.Context(), uuid.Nil, uuid.Nil, specials.SeasonID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("empty season: got %v, want ErrNotFound", err)
 	}
 
@@ -261,7 +273,7 @@ func TestCatalogSeries(t *testing.T) {
 	if seriesRemoved != (events.SeriesRemovedEventV1{SeriesID: series.SeriesID, LibraryID: lib.ID}) {
 		t.Errorf("series removed = %+v", seriesRemoved)
 	}
-	if _, err := s.GetSeries(t.Context(), series.SeriesID); !errors.Is(err, ErrNotFound) {
+	if _, err := s.GetSeries(t.Context(), uuid.Nil, series.SeriesID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("empty series: got %v, want ErrNotFound", err)
 	}
 	evs.none(t)

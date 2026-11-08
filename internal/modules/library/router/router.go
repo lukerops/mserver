@@ -21,25 +21,28 @@ type router struct {
 	log *slog.Logger
 }
 
-// New returns the routes of the library API.
+// New returns the routes of the library API. The catalog is nested under
+// its library: /v1/libraries/{library_id}/movies/{movie_id} and
+// /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}/episodes/{episode_id}.
+// The parents in the paths of the catalog may be the Wildcard.
 func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 	rt := &router{svc: svc, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/libraries", rt.createLibrary)
 	mux.HandleFunc("GET /v1/libraries", rt.listLibraries)
-	mux.HandleFunc("GET /v1/libraries/{id}", rt.getLibrary)
-	mux.HandleFunc("DELETE /v1/libraries/{id}", rt.deleteLibrary)
-	mux.HandleFunc("POST /v1/libraries/{id}/resync", rt.resyncLibrary)
+	mux.HandleFunc("GET /v1/libraries/{library_id}", rt.getLibrary)
+	mux.HandleFunc("DELETE /v1/libraries/{library_id}", rt.deleteLibrary)
+	mux.HandleFunc("POST /v1/libraries/{library_id}/resync", rt.resyncLibrary)
 
-	mux.HandleFunc("GET /v1/movies", rt.listMovies)
-	mux.HandleFunc("GET /v1/movies/{id}", rt.getMovie)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/movies", rt.listMovies)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/movies/{movie_id}", rt.getMovie)
 
-	mux.HandleFunc("GET /v1/series", rt.listSeries)
-	mux.HandleFunc("GET /v1/series/{series_id}", rt.getSeries)
-	mux.HandleFunc("GET /v1/series/{series_id}/seasons", rt.listSeasons)
-	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}", rt.getSeason)
-	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}/episodes", rt.listEpisodes)
-	mux.HandleFunc("GET /v1/series/{series_id}/seasons/{season_id}/episodes/{episode_id}", rt.getEpisode)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series", rt.listSeries)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series/{series_id}", rt.getSeries)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series/{series_id}/seasons", rt.listSeasons)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}", rt.getSeason)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}/episodes", rt.listEpisodes)
+	mux.HandleFunc("GET /v1/libraries/{library_id}/series/{series_id}/seasons/{season_id}/episodes/{episode_id}", rt.getEpisode)
 	return mux
 }
 
@@ -53,14 +56,8 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// pathID parses the {id} of the path. When it fails, the error response
-// is already written.
-func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
-	return pathUUID(w, r, "id", false)
-}
-
 // Wildcard is the path segment that stands for any parent, as in
-// /v1/series/-/seasons/-/episodes (all the episodes).
+// /v1/libraries/-/series/-/seasons/-/episodes (all the episodes).
 const Wildcard = "-"
 
 // pathUUID parses the path value name. When wildcard is true, "-" is
@@ -77,6 +74,20 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name string, wildcard bool
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+// pathParents parses the parents name of the path, in order, which may
+// be the Wildcard (uuid.Nil). When it fails, the error response is
+// already written.
+func pathParents(w http.ResponseWriter, r *http.Request, names ...string) ([]uuid.UUID, bool) {
+	ids := make([]uuid.UUID, len(names))
+	for i, name := range names {
+		var ok bool
+		if ids[i], ok = pathUUID(w, r, name, true); !ok {
+			return nil, false
+		}
+	}
+	return ids, true
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

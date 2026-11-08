@@ -12,13 +12,17 @@ import (
 )
 
 func (rt *router) listMovies(w http.ResponseWriter, r *http.Request) {
+	parents, ok := pathParents(w, r, "library_id")
+	if !ok {
+		return
+	}
 	q, err := ParseMovieQueryV1(r.URL.Query())
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
 		return
 	}
 	page, err := rt.svc.ListMovies(r.Context(), service.MovieQuery{
-		LibraryID:         q.LibraryID,
+		LibraryID:         parents[0],
 		IDs:               q.IDs,
 		Years:             q.Years,
 		AudioLanguages:    q.AudioLanguages,
@@ -40,11 +44,15 @@ func (rt *router) listMovies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (rt *router) getMovie(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
+	parents, ok := pathParents(w, r, "library_id")
 	if !ok {
 		return
 	}
-	m, err := rt.svc.GetMovie(r.Context(), id)
+	id, ok := pathUUID(w, r, "movie_id", false)
+	if !ok {
+		return
+	}
+	m, err := rt.svc.GetMovie(r.Context(), parents[0], id)
 	if err != nil {
 		rt.writeError(w, r, err)
 		return
@@ -55,9 +63,6 @@ func (rt *router) getMovie(w http.ResponseWriter, r *http.Request) {
 // Values encodes q as query parameters.
 func (q MovieQueryV1) Values() url.Values {
 	v := url.Values{}
-	if q.LibraryID != uuid.Nil {
-		v.Set("library_id", q.LibraryID.String())
-	}
 	if len(q.IDs) > 0 {
 		ids := make([]string, len(q.IDs))
 		for i, id := range q.IDs {
@@ -93,17 +98,10 @@ func (q MovieQueryV1) Values() url.Values {
 	return v
 }
 
-// ParseMovieQueryV1 decodes the query parameters of GET /v1/movies.
+// ParseMovieQueryV1 decodes the query parameters of
+// GET /v1/libraries/{library_id}/movies.
 func ParseMovieQueryV1(v url.Values) (MovieQueryV1, error) {
-	var (
-		q   MovieQueryV1
-		err error
-	)
-	if s := v.Get("library_id"); s != "" {
-		if q.LibraryID, err = uuid.Parse(s); err != nil {
-			return q, &queryError{"library_id", s}
-		}
-	}
+	var q MovieQueryV1
 	if s := v.Get("ids"); s != "" {
 		for part := range strings.SplitSeq(s, ",") {
 			id, err := uuid.Parse(strings.TrimSpace(part))

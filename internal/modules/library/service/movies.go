@@ -7,8 +7,15 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *service) GetMovie(ctx context.Context, id uuid.UUID) (Movie, error) {
-	return s.store.GetMovie(ctx, id)
+func (s *service) GetMovie(ctx context.Context, libraryID, id uuid.UUID) (Movie, error) {
+	m, err := s.store.GetMovie(ctx, id)
+	if err != nil {
+		return Movie{}, err
+	}
+	if !belongs(libraryID, m.LibraryID) {
+		return Movie{}, fmt.Errorf("%w: movie %s of library %s", ErrNotFound, id, libraryID)
+	}
+	return m, nil
 }
 
 func (s *service) ListMovies(ctx context.Context, q MovieQuery) (MoviePage, error) {
@@ -19,6 +26,9 @@ func (s *service) ListMovies(ctx context.Context, q MovieQuery) (MoviePage, erro
 	}
 	if q.Offset < 0 || q.Limit < 0 {
 		return MoviePage{}, fmt.Errorf("%w: negative offset or limit", ErrInvalidArgument)
+	}
+	if err := s.checkParents(ctx, q.LibraryID, uuid.Nil, uuid.Nil); err != nil {
+		return MoviePage{}, err
 	}
 	movies, total, err := s.store.ListMovies(ctx, q)
 	if err != nil {
