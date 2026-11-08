@@ -64,29 +64,29 @@ módulos, em uma instância diferente), a partir do mesmo binário.
 
 ## 3. Decisões de arquitetura
 
-| Tema                          | Decisão                                                                                                                                                                                                                                |
-| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linguagem                     | Go 1.27.3                                                                                                                                                                                                                              |
-| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                                              |
-| Comunicação entre módulos     | **HTTP REST (JSON)** sempre; no monolito via `http://127.0.0.1:<porta>/` usando um `http.Client` central compartilhado                                                                                                                 |
-| Contratos entre módulos       | Rotas e DTOs JSON definidos no pacote `router/` de cada módulo; consumidos apenas pelo pacote `client/` do próprio módulo                                                                                                              |
-| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` no MVP; `PUT` no pós-MVP); bytes nunca trafegam pelos contratos JSON/eventos                                                           |
-| Sincronização de estado       | **ECST (Event-Carried State Transfer)** via eventos duráveis (outbox) + operação `Resync` em todos os módulos produtores para _cold start_ e reconciliação                                                                             |
-| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                                                    |
-| Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface                          |
-| Cache                         | Em memória                                                                                                                                                                                                                             |
-| Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                                                      |
-| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                                                       |
-| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes entram no pós-MVP (seção 7)                                                                   |
-| API do projeto                | As próprias APIs REST dos módulos, servidas juntas em `/v1` (sem surface intermediária)                                                                                                                                                |
-| Processamento multimídia      | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas |
-| FFmpeg ausente                | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; no monolito, o servidor falha no startup                                                                             |
-| Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                                                                                                                                  |
-| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                                              |
-| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                                             |
-| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                                             |
-| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12.4.0** (`docs/jellyfin-openapi-stable.json`); cliente alvo do MVP: **`jellyfin-web`** (`jellyfin-android` e `jellyfin-tizen` no pós-MVP)                                                                     |
-| Licença                       | Apache 2.0                                                                                                                                                                                                                             |
+| Tema                          | Decisão                                                                                                                                                                                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Linguagem                     | Go 1.27.3                                                                                                                                                                                                                                 |
+| Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                                                 |
+| Comunicação entre módulos     | **HTTP REST (JSON)** sempre; no monolito via `http://127.0.0.1:<porta>/` usando um `http.Client` central compartilhado                                                                                                                    |
+| Contratos entre módulos       | Rotas e DTOs JSON definidos no pacote `router/` de cada módulo; consumidos apenas pelo pacote `client/` do próprio módulo                                                                                                                 |
+| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` no MVP; `PUT` no pós-MVP); bytes nunca trafegam pelos contratos JSON/eventos                                                              |
+| Sincronização de estado       | **ECST (Event-Carried State Transfer)** via eventos duráveis (outbox) + operação `Resync` em todos os módulos produtores para _cold start_ e reconciliação                                                                                |
+| Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                                                       |
+| Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface                             |
+| Cache                         | Em memória. Estado efêmero compartilhável entre instâncias (ex.: sessões do `playback`) usa a interface `internal/infra/kv` (`kv.Store`): implementação em memória no MVP e Valkey/Redis no futuro, apenas com comandos nativos (sem Lua) |
+| Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                                                         |
+| Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                                                          |
+| Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes entram no pós-MVP (seção 7)                                                                      |
+| API do projeto                | As próprias APIs REST dos módulos, servidas juntas em `/v1` (sem surface intermediária)                                                                                                                                                   |
+| Processamento multimídia      | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas    |
+| FFmpeg ausente                | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; no monolito, o servidor falha no startup                                                                                |
+| Integrações de infra externas | Nenhuma por enquanto (sem Redis/Valkey, NATS, Postgres etc.); `kv.Store` já isola o ponto de integração futura com Valkey                                                                                                                 |
+| Clientes de download          | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                                                 |
+| Plugins                       | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                                                |
+| Metadados                     | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                                                |
+| Compatibilidade Jellyfin      | Alvo: API do **Jellyfin 12.4.0** (`docs/jellyfin-openapi-stable.json`); cliente alvo do MVP: **`jellyfin-web`** (`jellyfin-android` e `jellyfin-tizen` no pós-MVP)                                                                        |
+| Licença                       | Apache 2.0                                                                                                                                                                                                                                |
 
 ## 4. Comunicação entre módulos
 
@@ -159,8 +159,8 @@ Toda rota entre módulos (e as usadas por plugins) deve seguir:
 5. **Coleções grandes paginadas** (cursor/limite), nunca listas
    ilimitadas.
 6. **Bytes e paths físicos fora dos contratos JSON:** arquivos são
-   referenciados pelo `FileID` (seção 7) e acessados via HTTP do `storage`
-   (ou por caminho local quando `Resolve` permitir). Caminhos só aparecem
+   referenciados pelo `FileID` (seção 7) e acessados via HTTP do `storage`.
+   Caminhos só aparecem
    como **dados relativos a uma localização**.
 7. **Eventos versionados e idempotentes:** eventos usam o envelope
    CloudEvents (seção 4.3) com ID, timestamp e tipo versionado;
@@ -629,12 +629,12 @@ Regras:
   - Escrita via `PUT` (saída do `ffmpeg`, legendas convertidas, imagens) e
     autenticação por URLs assinadas de curta duração entram no pós-MVP com o
     `transcoder`.
-- **Resolução por consumidor:** `Resolve(FileID, consumer) → URL`.
-  - Consumidor local e driver local → caminho direto no disco (sem
-    overhead).
-  - Consumidor remoto → URL HTTP assinada.
-  - Isso permite executar transcodes em máquinas externas sem levar os
-    discos/dados até elas.
+- **Resolução:** `GET /v1/files/{FileID}/resolve` devolve sempre a URL HTTP
+  `http://<host>/locations/{LocationID}/files/{FileID}` (o acesso por
+  caminho local foi descartado para manter um único caminho de dados).
+  - URLs assinadas de curta duração para consumidores remotos (ex.:
+    transcodes em máquinas externas, sem levar os discos até elas) entram
+    no pós-MVP.
 
 ### 7.6 Drivers e capacidades
 
@@ -909,7 +909,11 @@ Estrutura de pastas reconhecida pela identificação:
      (`POST /Sessions/Playing/Progress`), ping (`POST /Sessions/Playing/Ping`)
      e parada (`POST /Sessions/Playing/Stopped`).
    - O plugin `plugins/api/jellyfin` converte os payloads e `PositionTicks` do
-     Jellyfin para o contrato de domínio do `playback`.
+     Jellyfin para o contrato de domínio do `playback`
+     (`/v1/playback/sessions`, cujo ID é sempre gerado pelo servidor).
+   - O `PlaySessionId` do Jellyfin é mapeado para o `PlaybackSessionID` em
+     um `kv.Store` do próprio plugin (`playsessions/{ProfileID}/{PlaySessionId}`),
+     para que várias instâncias do plugin compartilhem o mapeamento.
 4. **Legendas externas `.srt` (MVP):**
    - O plugin `plugins/api/jellyfin` monta os `MediaStreams` de legenda com
      `DeliveryMethod: "External"` e
@@ -948,6 +952,8 @@ mserver/
 │   │   ├── database/                    # transação no contexto (WithTx/ConnFrom)
 │   │   │   └── sqlite/                  # abertura do SQLite e runner de migrations
 │   │   ├── cache/memory/
+│   │   ├── kv/                          # interface kv.Store (Get/Create/Update/Delete/List com TTL)
+│   │   │   └── memory/                  # implementação em memória (Valkey no futuro)
 │   │   ├── queue/                       # interfaces Publisher/Subscriber e Envelope CloudEvents
 │   │   │   └── memory/                  # barramento em memória
 │   │   ├── outbox/                      # outbox transacional reutilizável (tabela + relay)
@@ -958,14 +964,14 @@ mserver/
 │       │       └── local/               # driver de disco local
 │       ├── identity/                    # contas, perfis, setup inicial, dispositivos, sessões e tokens
 │       ├── library/                     # catálogo materializado global (filmes, séries, streams, legendas)
-│       ├── playback/                    # PlaybackInfo (Direct Play), sessões ativas e eventos
+│       ├── playback/                    # sessões ativas (no kv.Store), timeout por inatividade e eventos
 │       └── subtitles/                   # match bidirecional de legendas locais .srt
 ├── plugins/
 │   ├── storage/
 │   │   └── ffprobe/                     # analisador ffprobe (streams técnicos)
 │   └── api/
 │       └── jellyfin/                    # surface plugin de compatibilidade Jellyfin 12.4.0
-├── bruno/                               # coleção de requisições da API
+├── api-collection/                      # coleção de requisições da API (Bruno)
 └── docs/
     ├── planejamento.md
     ├── roadmap.md
@@ -1110,6 +1116,9 @@ MSERVER_<MÓDULO>_URL=http://host:porta       # futuro: URL base de módulo remo
 
 # Storage
 MSERVER_STORAGE_SCAN_INTERVAL=6h             # varredura periódica (0 desativa)
+
+# Playback
+MSERVER_PLAYBACK_SESSION_TIMEOUT=5m          # inatividade até encerrar a sessão (reason: timeout)
 
 # Storage, planejado (localizações de sistema, etapa 7; padrão: <data>/<classe>)
 MSERVER_STORAGE_DRIVER_LOCAL_CACHE_DIR=/mnt/ssd/cache

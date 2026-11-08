@@ -107,7 +107,7 @@ flowchart TD
 - **Dados próprios (SQLite):** `locations`, `files` (`file_id`, `location_id`, `path`, `size`, `mtime`, `inode`, `expires_at`), `file_analyses` (`file_id`, `analyzer`, `version`, `payload_json`).
 - **Projeções de outros módulos:** Nenhuma.
 - **Comunicação:**
-  - Recebe chamadas síncronas de escrita/leitura (`Resolve`, HTTP `GET`/`PUT`) e `Resync(LocationID)`.
+  - Recebe chamadas síncronas de escrita/leitura (`Resolve`, HTTP `GET`/`PUT`) e `Resync(LocationID)`. No MVP, `Resolve` (`GET /v1/files/{FileID}/resolve`) devolve sempre a URL HTTP `http://<host>/locations/{LocationID}/files/{FileID}`.
   - Emite eventos `storage.file.*` sempre que arquivos são indexados, alterados, movidos, removidos ou analisados.
 
 ### 3.2 `identity` (Contas, Perfis e Autenticação — MVP)
@@ -150,13 +150,15 @@ flowchart TD
 
 ### 3.5 `playback` (Sessões de Reprodução em Tempo Real e Salas Compartilhadas — MVP)
 
-- **Responsabilidade:** Manter o estado em memória das sessões de reprodução ativas, decidir sobre reprodução direta ou transcode (no pós-MVP), detectar sessões abandonadas por timeout e emitir eventos de ciclo de vida da reprodução. No pós-MVP, coordena também salas de reprodução sincronizada protegidas por código de acesso.
+- **Responsabilidade:** Manter o estado das sessões de reprodução ativas, decidir sobre reprodução direta ou transcode (no pós-MVP), detectar sessões abandonadas por timeout e emitir eventos de ciclo de vida da reprodução. No pós-MVP, coordena também salas de reprodução sincronizada protegidas por código de acesso.
 - **Isolamento das regras do Jellyfin em `plugins/api/jellyfin`:**
   - A interpretação de `DeviceProfile` e montagem de `PlaybackInfoResponse` (`SupportsDirectPlay`, `SupportsDirectStream`, `Protocol`, `PlaySessionId`, `ErrorCode: "NoCompatibleStream"`) pertencem ao `plugins/api/jellyfin`.
   - No pós-MVP, a adaptação das salas compartilhadas para o protocolo `SyncPlay` do Jellyfin (`/SyncPlay/*` e WebSocket `/socket`) fica isolada em `plugins/api/jellyfin`.
-- **Dados próprios:** Sessões ativas (e salas compartilhadas no pós-MVP) em memória.
+- **Dados próprios:**
+  - Sessões ativas (e salas compartilhadas no pós-MVP) no `kv.Store` compartilhado (`internal/infra/kv`), e não na memória do processo: chave `sessions/{PlaybackSessionID}`, valor JSON, TTL de 2× o timeout de inatividade. No MVP a implementação é `kv/memory`; com `kv/valkey` várias instâncias do `playback` compartilham as sessões.
+  - `playback.db` (SQLite) guarda apenas a `outbox`.
 - **Comunicação:**
-  - Chama `library` e `transcoder.StartTranscode` (no pós-MVP, quando exigir transcode HLS).
+  - No MVP não chama nenhum módulo (`ItemID`/`FileID` chegam do chamador). No pós-MVP, chama `library` e `transcoder.StartTranscode` (quando exigir transcode HLS).
   - Emite eventos duráveis de sessão (`PlaybackStarted`, `PlaybackProgressed`, `PlaybackPaused`, `PlaybackResumed`, `PlaybackStopped`) para `watchstate` e `transcoder`.
 
 ### 3.6 `subtitles` (Legendas Locais `.srt` no MVP e Provedores Externos no Pós-MVP)
@@ -270,13 +272,15 @@ Ordem garantida pela `outbox`: `series.added` → `season.added` → `episode.ad
 
 ### 4.4 Eventos emitidos pelo `playback`
 
-| Tópico (`type`)                  | `subject`           | Consumidores                               | Quando é disparado                                                                            | Campos de referência em `data` (a discutir antes de implementar)                                                                                                     |
-| :------------------------------- | :------------------ | :----------------------------------------- | :-------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `playback.session.started.v1`    | `PlaybackSessionID` | `watchstate`, `notification`               | Perfil iniciou a reprodução de um item.                                                       | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `file_id`, `play_method`, `transcode_session_id` (opcional), `position`, `started_at`     |
-| `playback.session.progressed.v1` | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Atualização periódica da posição de reprodução.                                               | `playback_session_id`, `profile_id`, `device_id`, `item_id`, `transcode_session_id` (opcional), `position`, `is_paused`, `reported_at`                               |
-| `playback.session.paused.v1`     | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil pausou a reprodução (`transcoder` usa para agendar/aplicar `SIGSTOP`).                 | `playback_session_id`, `profile_id`, `item_id`, `transcode_session_id` (opcional), `position`, `paused_at`                                                           |
-| `playback.session.resumed.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil retomou a reprodução (`transcoder` usa para enviar `SIGCONT`).                         | `playback_session_id`, `profile_id`, `item_id`, `transcode_session_id` (opcional), `position`, `resumed_at`                                                          |
-| `playback.session.stopped.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`, `notification` | Reprodução encerrada pelo usuário ou por timeout de heartbeat (`transcoder` envia `SIGTERM`). | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `transcode_session_id` (opcional), `position`, `watched_duration`, `stopped_at`, `reason` |
+| Tópico (`type`)                  | `subject`           | Consumidores                               | Quando é disparado                                                                            | Campos em `data`                                                                                                                                                                                                    |
+| :------------------------------- | :------------------ | :----------------------------------------- | :-------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `playback.session.started.v1`    | `PlaybackSessionID` | `watchstate`, `notification`               | Perfil iniciou a reprodução de um item.                                                       | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `file_id`, `play_method`, `position_ms`, `sequence`, `started_at` — `playback/events.SessionStartedEventV1`                              |
+| `playback.session.progressed.v1` | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Atualização periódica da posição de reprodução.                                               | `playback_session_id`, `profile_id`, `device_id`, `item_id`, `position_ms`, `is_paused`, `sequence`, `reported_at` — `playback/events.SessionProgressedEventV1`                                                     |
+| `playback.session.paused.v1`     | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil pausou a reprodução (`transcoder` usa para agendar/aplicar `SIGSTOP`).                 | `playback_session_id`, `profile_id`, `item_id`, `position_ms`, `sequence`, `paused_at` — `playback/events.SessionPausedEventV1`                                                                                     |
+| `playback.session.resumed.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`                 | Perfil retomou a reprodução (`transcoder` usa para enviar `SIGCONT`).                         | `playback_session_id`, `profile_id`, `item_id`, `position_ms`, `sequence`, `resumed_at` — `playback/events.SessionResumedEventV1`                                                                                   |
+| `playback.session.stopped.v1`    | `PlaybackSessionID` | `watchstate`, `transcoder`, `notification` | Reprodução encerrada pelo usuário ou por timeout de heartbeat (`transcoder` envia `SIGTERM`). | `playback_session_id`, `account_id`, `profile_id`, `device_id`, `item_id`, `position_ms`, `watched_duration_ms`, `sequence`, `stopped_at`, `reason` (`user` \| `timeout`) — `playback/events.SessionStoppedEventV1` |
+
+`sequence` é crescente por sessão e permite aos consumidores descartar eventos fora de ordem. `transcode_session_id` será adicionado quando o `transcoder` existir (pós-MVP).
 
 ---
 

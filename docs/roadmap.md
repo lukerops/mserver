@@ -179,12 +179,18 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 - **Servidor HTTP de Dados do `storage` (`internal/modules/storage`):**
   - Implementa `GET /locations/{LocationID}/files/{FileID}` e `HEAD /locations/{LocationID}/files/{FileID}`.
   - Serve o arquivo físico a partir do driver `local` (`os.Root`) com suporte completo a `Range` (`206 Partial Content`, `Accept-Ranges: bytes`, `Content-Length`, `Content-Type`, `Last-Modified`).
-  - `storage.Resolve(ctx, FileID, consumer)` retorna a URL HTTP interna `/locations/{LocationID}/files/{FileID}` (ou localização correspondente).
+  - `GET /v1/files/{FileID}/resolve` passa a devolver sempre a URL HTTP `http://<host>/locations/{LocationID}/files/{FileID}` (a resolução para `file://` foi removida).
 - **Módulo `playback` (`internal/modules/playback`):**
-  - Gerenciamento em memória das sessões de reprodução ativas (início, progresso, pausa, retomada, heartbeat e encerramento) com detecção de timeout por inatividade, operando sobre tipos de domínio próprios (sem conhecer `DeviceProfile` ou `Ticks` do Jellyfin).
+  - Gerenciamento das sessões de reprodução ativas (início, progresso, pausa, retomada, heartbeat e encerramento) operando sobre tipos de domínio próprios (sem conhecer `DeviceProfile` ou `Ticks` do Jellyfin).
+  - Estado das sessões guardado na abstração `internal/infra/kv` (`kv.Store`), e não na memória do módulo: chave `sessions/{PlaybackSessionID}` com valor JSON e TTL de 2× o timeout (apenas proteção contra lixo). A implementação do MVP é `kv/memory`; trocar por `kv/valkey` permite escalar o `playback` horizontalmente sem mudar o módulo. Sem scripts Lua nem CAS: `Create` (`SET NX`), `Update` (`SET XX`), `Delete` e `List` por prefixo, com "último a escrever vence".
+  - Detecção de timeout por inatividade feita por um _reaper_ periódico (`MSERVER_PLAYBACK_SESSION_TIMEOUT`, padrão `5m`), que relê a sessão antes de removê-la; apenas quem efetivamente remove emite `playback.session.stopped.v1` (`reason: "timeout"`).
+  - API REST `/v1/playback/sessions`: `POST` (o ID da sessão é sempre gerado pelo servidor), `GET` (lista), `GET /{id}`, `POST /{id}/progress`, `POST /{id}/heartbeat` e `POST /{id}/stop`.
+  - No MVP o `playback` não consulta a `library`: `ItemID`/`FileID` chegam do plugin. O `playback.db` (SQLite) guarda apenas a `outbox`.
   - Emissão de eventos via `outbox`: `playback.session.started.v1`, `playback.session.progressed.v1`, `playback.session.paused.v1`, `playback.session.resumed.v1` e `playback.session.stopped.v1`.
 - **Regras de `PlaybackInfo` e Proxy de Streaming isoladas no `plugins/api/jellyfin`:**
   - Avalia o `DeviceProfile` enviado pelo cliente Jellyfin em `POST/GET /Items/{itemId}/PlaybackInfo` frente às informações técnicas do item na `library`, montando `PlaybackInfoResponse` (`MediaSources` com `SupportsDirectPlay: true`, `SupportsDirectStream: true`, `SupportsTranscoding: false`, `Protocol: "File"`, `PlaySessionId` ou `ErrorCode: "NoCompatibleStream"`).
+  - `maxStreamingBitrate` é ignorado no MVP (só há Direct Play).
+  - O `PlaySessionId` do Jellyfin é mapeado para o `PlaybackSessionID` do `playback` em um `kv.Store` próprio do plugin (chave `playsessions/{ProfileID}/{PlaySessionId}`), permitindo que várias instâncias do plugin compartilhem o mapeamento.
   - Nas rotas `GET/HEAD /Videos/{itemId}/stream` e `/Videos/{itemId}/stream.{container}`, valida o token (via header ou query `api_key`), resolve o `(LocationID, FileID)` do item e faz **proxy reverso em streaming** para `GET /locations/{LocationID}/files/{FileID}` no `storage`, preservando `Range` na ida e `Content-Range`, `Content-Length`, `Accept-Ranges` e status `200`/`206` na volta.
 
 #### Endpoints do `storage` (Plano de Dados Interno)
@@ -261,3 +267,4 @@ Após a conclusão das 5 entregas do MVP, a evolução segue com:
    - Jobs em background no `transcoder` (thumbnails, imagens de capítulos, _trickplay_, detecção de abertura/créditos por `chromaprint`).
    - Pipeline de aquisição (`indexer`, `downloader`, `acquisition`), `translation` e `notification`.
    - Execução distribuída: um binário por módulo, com a URL base de cada módulo remoto configurada por variável de ambiente.
+   - Implementação `internal/infra/kv/valkey` (Valkey/Redis usando apenas comandos nativos — `SET NX`/`SET XX` com `PX`, `GET`, `DEL`, `SCAN` — sem scripts Lua) e barramento de eventos distribuído, permitindo escalar `playback` e `plugins/api/jellyfin` horizontalmente.
