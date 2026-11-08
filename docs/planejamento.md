@@ -107,13 +107,10 @@ módulos, em uma instância diferente), a partir do mesmo binário.
   | `/`                  | APIs de todos os módulos  | `/v1/sessions`, `/v1/locations` |
   | `/plugins/<plugin>/` | Plugins de API (surfaces) | `/plugins/jellyfin/Users/Me`    |
 
-- **Token das rotas de módulos:** toda requisição às rotas dos módulos
-  (`/v1`) precisa de `Authorization: Bearer <MSERVER_PRIVATE_TOKEN>`
-  (senão `401`). O token é obrigatório (mínimo de 32 caracteres; a
-  inicialização falha sem ele) e é o mesmo em todos os processos. O
-  `http.Client` central o injeta em todas as chamadas, então os pacotes
-  `client/` não lidam com ele. Os plugins de API têm autenticação
-  própria e não usam o token.
+- **Autenticação das rotas de módulos:** por simplicidade, as rotas dos
+  módulos (`/v1`) não têm autenticação no momento; a segurança delas será
+  definida no futuro. Até lá, elas não devem ficar expostas fora de uma
+  rede confiável. Os plugins de API têm autenticação própria.
 - **Exposição:** o servidor tem um único listener e sempre roda atrás de
   um API gateway/reverse proxy, que filtra o que fica exposto ao exterior
   (ex.: apenas `/plugins/<plugin>/`). Listeners separados para rotas
@@ -148,6 +145,10 @@ Toda rota entre módulos (e as usadas por plugins) deve seguir:
    `client/`; structs planas e explícitas, campos opcionais explícitos.
    Como mudam junto com a versão da API, todo DTO leva a versão como
    sufixo (ex.: `AccountV1`, `SetupRequestV1`, `ErrorV1`).
+   **Eventos também são API:** seus tipos e payloads ficam no pacote
+   `events/` do módulo emissor, seguindo as mesmas regras (ex.: o tipo
+   `FileIndexedV1 = "storage.file.indexed.v1"` e o payload
+   `FileEventV1`).
 4. **Erros tipados:** respostas de erro usam o corpo `{"error": "..."}` e
    status HTTP mapeados a partir dos erros do service (`400`
    InvalidArgument, `401` Unauthenticated, `403` PermissionDenied, `404`
@@ -240,9 +241,11 @@ db, fn)` e `ConnFrom(ctx, db)`. A transação aberta viaja no `ctx`, e
   | `specversion` | `1.0`                                                              |
   | `time`        | Momento do evento (UTC)                                            |
   | `subject`     | Recurso principal, ex.: o `FileID`                                 |
-  | `data`        | Payload específico, definido no `service/` do módulo de origem     |
+  | `data`        | Payload específico, definido no `events/` do módulo de origem      |
 
-  Consumidores decodificam `queue.Envelope[<api do módulo>.<Evento>]`.
+  Consumidores decodificam `queue.Envelope[<events do módulo>.<Evento>V<n>]`
+  (ex.: `queue.Envelope[storageevents.FileEventV1]`), importando o pacote
+  `events/` do módulo emissor.
 
 ### 4.4 ECST (Event-Carried State Transfer) e `Resync`
 
@@ -395,7 +398,7 @@ Observações:
   - **Nenhum conceito que não tenha sido discutido deve existir fora de `plugins/api/jellyfin`.** Tudo o que for preciso adicionar fora do plugin do Jellyfin (nos módulos de domínio, em suas APIs REST ou na infraestrutura) **deve ser discutido antes**.
 - A **API do projeto** é o conjunto das APIs REST dos módulos, servidas
   juntas em `/v1` (ex.: `POST /v1/setup` do `identity`, `/v1/locations` do
-  `storage`), protegidas pelo `MSERVER_PRIVATE_TOKEN`. Não existe uma surface intermediária: a administração do
+  `storage`), ainda sem autenticação. Não existe uma surface intermediária: a administração do
   servidor (contas, perfis, localizações, bibliotecas e operações
   administrativas) usa diretamente as rotas dos módulos. Novas rotas
   devem ser discutidas antes da implementação.
@@ -562,6 +565,11 @@ Regras:
 - Informações técnicas de mídia e hashes são
   calculados por **analisadores**, plugins do tipo provider do `storage`
   (`plugins/storage/<nome>`).
+- **O próprio módulo inicializa seus plugins** (no `New`, a partir das
+  suas variáveis de ambiente), com a interface que fizer sentido para ele
+  (aqui, `storage/analyzer.Analyzer`). Só os plugins de API
+  (`plugins/api/*`) são criados fora dos módulos, pelo `cmd/server`,
+  porque se integram diretamente ao servidor HTTP.
 - **MVP:** analisador `ffprobe` (`plugins/storage/ffprobe`), que inspeciona
   arquivos de mídia e extrai container, duração, bitrate e faixas de vídeo,
   áudio e legendas embutidas (`MediaStreams`).
@@ -660,11 +668,15 @@ Regras:
 - Todos usam o envelope CloudEvents (seção 4.3) com `source` = `storage`
   e `subject` = `FileID`.
 - Os eventos de ciclo de vida (`indexed`, `changed`, `moved`, `removed`)
-  usam `api.FileEvent`: `file_id`, `location_id`, `path` (relativo à
-  localização; no `removed`, o último caminho conhecido), `size` e `mtime`.
-- O evento `storage.file.analyzed.v1` traz `file_id`, `location_id`,
-  `analyzer` (ex.: `ffprobe`, `sha256`), `version` e o resultado tipado da
-  análise (streams técnicos, duração, capítulos embutidos ou hashes).
+  usam `events.FileEventV1`: `file_id`, `location_id` e `path` (relativo à
+  localização; no `removed`, o último caminho conhecido).
+- O evento `storage.file.analyzed.v1` (`events.FileAnalyzedEventV1`) traz
+  `file_id`, `location_id`, `analyzer` (ex.: `ffprobe`), `version` e o
+  `result` da análise, cujo formato depende do analisador e da versão.
+  Os formatos de resultado também ficam no pacote `events/` do `storage`
+  (ex.: `FFprobeResultV1` para o `ffprobe` versão 1: `container`,
+  `duration_ms`, `bit_rate`, `size` e `streams[]`). Análises que falham
+  por causa do arquivo são registradas, mas não publicadas.
 - São gravados na outbox na mesma transação do scan, da análise ou da
   remoção da localização e publicados pelo relay (seção 4.3).
 - Consumidos pela `library` e pelo `subtitles`.
@@ -996,28 +1008,34 @@ entre as pastas:
 
 ```
 internal/modules/<módulo>/
-├── service/               # regra de negócio: interface Service, erros, eventos e Resync
+├── service/               # regra de negócio: interface Service, erros e Resync
 ├── router/                # rotas HTTP (/v1/...) e DTOs JSON versionados (ex.: AccountV1)
+├── events/                # tipos e payloads versionados dos eventos publicados (ex.: AccountEventV1)
 ├── store/                 # interface de persistência (store.Store), models e erros
 │   └── sqlite/            # implementação SQLite, um arquivo por contexto
 │       └── migrations/    # migrations embutidas (go:embed)
 ├── client/                # client HTTP da própria API (usado por outros módulos e surfaces)
-└── module.go              # New/Close: abre o banco, cria store, service e router; expõe o Mux
+└── module.go              # New/Close: abre o banco, cria store, service, router e plugins; expõe o Mux
 ```
 
 - **`service/`**: contém toda a regra de negócio e define a própria
   interface `Service`. Não importa nada do `router/`. Pode importar o
-  `store/` do próprio módulo e os `client/` de outros módulos, mas não
-  cria nenhum deles: recebe tudo pronto no `New`.
+  `store/` e o `events/` do próprio módulo e os `client/` e `events/` de
+  outros módulos, mas não cria nenhum deles: recebe tudo pronto no `New`.
 - **`router/`**: sem regra de negócio. Só decodifica e valida a entrada,
   chama o `service`, converte a saída para JSON e mapeia erros para status
   HTTP. Os DTOs JSON ficam aqui.
+- **`events/`**: a API de eventos do módulo. Só tipos (nomes versionados
+  dos eventos, `Source` e payloads com sufixo de versão); não importa
+  nenhum outro pacote do módulo. O `service/` monta os envelopes a partir
+  dos seus registros.
 - **`client/`**: importa **apenas** o `router/` do próprio módulo (para
   reutilizar os DTOs). Recebe um `*http.Client` e a URL base no `New`,
   reaproveitando as otimizações do client central, e converte respostas
   de erro de volta para os erros sentinela do módulo.
-- **`module.go`**: cria `store`, `service` e `router` diretamente no
-  `New` e repassa ao `service` apenas os clients de que ele precisa.
+- **`module.go`**: cria `store`, `service`, `router` e os plugins do
+  módulo (ex.: analisadores do `storage`) diretamente no `New` e repassa
+  ao `service` apenas os clients de que ele precisa.
 
 O `service` depende apenas da interface `store.Store`; só o `module.go`
 escolhe a implementação. Um novo banco (ex.: Postgres) entra como
@@ -1033,10 +1051,11 @@ separado por comentários.
 
 Aplicadas via lint (`depguard` no golangci-lint ou `go-arch-lint`):
 
-- Um módulo só pode importar o pacote `client/` de outro módulo (e, por
-  tabela, os DTOs do `router/` dele). Nunca `service/` ou `store/`.
+- Um módulo só pode importar os pacotes `client/` e `events/` de outro
+  módulo (e, por tabela, os DTOs do `router/` dele). Nunca `service/` ou
+  `store/`.
 - `service/` nunca importa `router/`; `client/` só importa o `router/` do
-  próprio módulo.
+  próprio módulo; `events/` não importa nenhum pacote do módulo.
 - Surfaces (`plugins/api/*`) usam apenas os `client/` dos módulos.
 - Fora do `storage`, nenhum código acessa o sistema de arquivos de mídia
   diretamente (`os.Open` etc.).
@@ -1058,18 +1077,18 @@ c := clients.Clients{
 }
 m, err := identity.New(ctx, dataDir, bus, c, log) // banco, migrations, outbox, service e router
 defer m.Close()                                   // encerra e libera os recursos
-mux.Handle("/", requireToken(token, modules(m.Mux, ...))) // todos os módulos dividem a raiz (/v1)
+mux.Handle("/", modules(m.Mux, ...))              // todos os módulos dividem a raiz (/v1)
 ```
 
 O `cmd/server` faz o `net.Listen` antes de criar os módulos, para
 conhecer a URL base (`http://127.0.0.1:<porta>/` no monolito), cria o
-`http.Client` central (que injeta o `MSERVER_PRIVATE_TOKEN`) e os clients
+`http.Client` central e os clients
 de todos os módulos e entrega a struct `clients.Clients` completa a cada
 `module.go`. Surfaces recebem a mesma struct e devolvem um
 `*http.ServeMux`:
 
 ```go
-jf, err := jellyfin.New(dataDir, c, log) // usa identity, library, playback, watchstate e storage
+jf := jellyfin.New(c, log) // usa identity, library, playback, watchstate e storage
 mux.Handle("/plugins/jellyfin/", http.StripPrefix("/plugins/jellyfin", jf))
 ```
 
@@ -1082,10 +1101,11 @@ sem varredura do ambiente.
 
 ```sh
 MSERVER_DATA_DIR=/var/lib/mserver            # SQLite por módulo: <data>/<módulo>.db
-MSERVER_PRIVATE_TOKEN=<32+ caracteres>       # obrigatório: token das rotas de módulos (/v1)
+
 MSERVER_HTTP_ADDR=:8096                      # endereço HTTP
 MSERVER_LOG_LEVEL=info                       # debug, info, warn, error
 MSERVER_LOG_FORMAT=text                      # text, json
+MSERVER_FFPROBE_PATH=/usr/bin/ffprobe        # executável do ffprobe (padrão: "ffprobe" do PATH)
 MSERVER_<MÓDULO>_URL=http://host:porta       # futuro: URL base de módulo remoto
 
 # Storage
