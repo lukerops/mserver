@@ -406,3 +406,40 @@ func (p *plugin) utcTime(w http.ResponseWriter, _ *http.Request) {
 		ResponseTransmissionTime: time.Now().UTC(),
 	})
 }
+
+// Bounds of the size of GET /Playback/BitrateTest.
+const (
+	bitrateTestDefaultSize = 102400
+	bitrateTestMaxSize     = 100_000_000
+)
+
+// bitrateTest answers size bytes, which the client downloads to measure
+// the bandwidth to the server (jellyfin-web does it before playing).
+func (p *plugin) bitrateTest(w http.ResponseWriter, r *http.Request) {
+	if _, ok := p.authenticate(w, r); !ok {
+		return
+	}
+	size := int64(bitrateTestDefaultSize)
+	if s := lowerQuery(r)["size"]; s != "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < 1 || n > bitrateTestMaxSize {
+			http.Error(w, "invalid size", http.StatusBadRequest)
+			return
+		}
+		size = n
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/octet-stream")
+	h.Set("Content-Length", strconv.FormatInt(size, 10))
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.CopyN(w, zeroReader{}, size)
+}
+
+// zeroReader reads an endless stream of zero bytes.
+type zeroReader struct{}
+
+func (zeroReader) Read(b []byte) (int, error) {
+	clear(b)
+	return len(b), nil
+}

@@ -191,4 +191,29 @@ func TestPlayback(t *testing.T) {
 	if utc.RequestReceptionTime == "" || utc.ResponseTransmissionTime == "" {
 		t.Errorf("utc time = %+v", utc)
 	}
+
+	res, body = c.raw("GET", "/Playback/BitrateTest?Size=500000&api_key="+token, nil)
+	if res.StatusCode != http.StatusOK || len(body) != 500000 ||
+		res.Header.Get("Content-Type") != "application/octet-stream" ||
+		res.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("bitrate test: status %d, %d bytes, headers %v", res.StatusCode, len(body), res.Header)
+	}
+	res, body = c.raw("GET", "/Playback/BitrateTest?api_key="+token, nil)
+	if res.StatusCode != http.StatusOK || len(body) != 102400 {
+		t.Errorf("default bitrate test: status %d, %d bytes", res.StatusCode, len(body))
+	}
+	c.expect("GET", "/Playback/BitrateTest?size=0", auth, nil, nil, http.StatusBadRequest)
+	c.expect("GET", "/Playback/BitrateTest?size=100000001", auth, nil, nil, http.StatusBadRequest)
+	c.expect("GET", "/Playback/BitrateTest", "", nil, nil, http.StatusUnauthorized)
+
+	// The preflight allows any header the client asks for.
+	res, _ = c.raw("OPTIONS", "/Playback/BitrateTest?Size=500000", http.Header{
+		"Origin":                         {"http://localhost:8080"},
+		"Access-Control-Request-Method":  {"GET"},
+		"Access-Control-Request-Headers": {"authorization,cache-control,x-custom"},
+	})
+	if res.StatusCode != http.StatusNoContent || res.Header.Get("Access-Control-Allow-Origin") != "*" ||
+		res.Header.Get("Access-Control-Allow-Headers") != "authorization,cache-control,x-custom" {
+		t.Errorf("bitrate test preflight: status %d, headers %v", res.StatusCode, res.Header)
+	}
 }

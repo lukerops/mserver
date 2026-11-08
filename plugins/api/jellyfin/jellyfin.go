@@ -88,6 +88,7 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 	mux.HandleFunc("POST /sessions/playing/stopped", p.stopped)
 
 	mux.HandleFunc("GET /getutctime", p.utcTime)
+	mux.HandleFunc("GET /playback/bitratetest", p.bitrateTest)
 
 	mux.HandleFunc("GET /displaypreferences/{displayPreferencesId}", p.displayPreferences)
 	mux.HandleFunc("POST /displaypreferences/{displayPreferencesId}", p.updateDisplayPreferences)
@@ -132,8 +133,16 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
-		h.Set("Access-Control-Allow-Headers",
-			"Accept, Authorization, Content-Type, Origin, Range, X-Requested-With, X-Emby-Authorization, X-Emby-Token, X-MediaBrowser-Token")
+		// Like Jellyfin (AllowAnyHeader), the preflight allows whatever
+		// headers the client asks for: a header missing from a fixed list
+		// fails the request in the browser as a CORS error.
+		if asked := r.Header.Get("Access-Control-Request-Headers"); asked != "" {
+			h.Set("Access-Control-Allow-Headers", asked)
+		} else {
+			h.Set("Access-Control-Allow-Headers",
+				"Accept, Authorization, Content-Type, Origin, Range, X-Requested-With, X-Emby-Authorization, X-Emby-Token, X-MediaBrowser-Token")
+		}
+		h.Add("Vary", "Access-Control-Request-Headers")
 		h.Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
