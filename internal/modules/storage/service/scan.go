@@ -1,34 +1,35 @@
-package storage
+package service
 
 import (
 	"context"
 	"fmt"
 	"slices"
 
+	"github.com/google/uuid"
+
 	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/storage/api"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
-func (s *Service) ScanLocation(ctx context.Context, id api.LocationID) (api.ScanResult, error) {
+func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, error) {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
 	loc, err := s.store.GetLocation(ctx, id)
 	if err != nil {
-		return api.ScanResult{}, err
+		return ScanResult{}, err
 	}
 	d, err := newDriver(loc.Driver, loc.Options)
 	if err != nil {
-		return api.ScanResult{}, err
+		return ScanResult{}, err
 	}
 
 	files, err := s.store.ListFiles(ctx, id)
 	if err != nil {
-		return api.ScanResult{}, err
+		return ScanResult{}, err
 	}
-	known := make(map[string]api.File, len(files))
+	known := make(map[string]File, len(files))
 	for _, f := range files {
 		known[f.Path] = f
 	}
@@ -40,12 +41,12 @@ func (s *Service) ScanLocation(ctx context.Context, id api.LocationID) (api.Scan
 	})
 	if err != nil {
 		// Unmounted disk or unreadable directory: keep the index untouched.
-		return api.ScanResult{}, fmt.Errorf("%w: scan of location %s failed: %w", api.ErrUnavailable, id, err)
+		return ScanResult{}, fmt.Errorf("%w: scan of location %s failed: %w", ErrUnavailable, id, err)
 	}
 
 	changes, events := diff(id, known, found)
 	if len(events) == 0 {
-		return api.ScanResult{}, nil
+		return ScanResult{}, nil
 	}
 	if err := s.store.WithTx(ctx, func(ctx context.Context) error {
 		if err := s.store.ApplyScan(ctx, id, changes); err != nil {
@@ -53,7 +54,7 @@ func (s *Service) ScanLocation(ctx context.Context, id api.LocationID) (api.Scan
 		}
 		return s.outbox.Publish(ctx, events...)
 	}); err != nil {
-		return api.ScanResult{}, err
+		return ScanResult{}, err
 	}
 	return scanResult(events), nil
 }
@@ -61,11 +62,11 @@ func (s *Service) ScanLocation(ctx context.Context, id api.LocationID) (api.Scan
 // diff compares the index of a location with the files found on disk and
 // returns the changes with their events. A new path with the inode of a
 // missing file is the same file, moved.
-func diff(loc api.LocationID, known map[string]api.File, found []driver.FileInfo) (store.ScanChanges, []queue.Event) {
+func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (store.ScanChanges, []queue.Event) {
 	var (
 		changes = store.ScanChanges{
-			Added:   make(map[api.FileID]driver.FileInfo),
-			Updated: make(map[api.FileID]driver.FileInfo),
+			Added:   make(map[uuid.UUID]driver.FileInfo),
+			Updated: make(map[uuid.UUID]driver.FileInfo),
 		}
 		events []queue.Event
 		newer  []driver.FileInfo
@@ -80,7 +81,7 @@ func diff(loc api.LocationID, known map[string]api.File, found []driver.FileInfo
 			newer = append(newer, info)
 		case f.Size != info.Size || !f.ModTime.Equal(info.ModTime) || f.Inode != info.Inode:
 			changes.Updated[f.ID] = info
-			events = append(events, newFileEvent(api.EventFileChanged, loc, f.ID, info.Path))
+			events = append(events, fileEvent(EventFileChanged, location, f.ID, info.Path))
 		}
 	}
 
@@ -97,12 +98,12 @@ func diff(loc api.LocationID, known map[string]api.File, found []driver.FileInfo
 			seen[old] = true
 			id := known[old].ID
 			changes.Updated[id] = info
-			events = append(events, newFileEvent(api.EventFileMoved, loc, id, info.Path))
+			events = append(events, fileEvent(EventFileMoved, location, id, info.Path))
 			continue
 		}
-		id := api.NewFileID()
+		id := newID()
 		changes.Added[id] = info
-		events = append(events, newFileEvent(api.EventFileIndexed, loc, id, info.Path))
+		events = append(events, fileEvent(EventFileIndexed, location, id, info.Path))
 	}
 
 	var removed []string
@@ -115,30 +116,29 @@ func diff(loc api.LocationID, known map[string]api.File, found []driver.FileInfo
 	for _, p := range removed {
 		id := known[p].ID
 		changes.Removed = append(changes.Removed, id)
-		events = append(events, newFileEvent(api.EventFileRemoved, loc, id, p))
+		events = append(events, fileEvent(EventFileRemoved, location, id, p))
 	}
 	return changes, events
 }
 
-func scanResult(events []queue.Event) api.ScanResult {
-	var r api.ScanResult
+func scanResult(events []queue.Event) ScanResult {
+	var r ScanResult
 	for _, e := range events {
 		switch e.Topic() {
-		case api.EventFileIndexed:
+		case EventFileIndexed:
 			r.Added++
-		case api.EventFileChanged:
+		case EventFileChanged:
 			r.Changed++
-		case api.EventFileMoved:
+		case EventFileMoved:
 			r.Moved++
-		case api.EventFileRemoved:
+		case EventFileRemoved:
 			r.Removed++
 		}
 	}
 	return r
 }
 
-// scanAll scans every location, logging failures.
-func (s *Service) scanAll(ctx context.Context) {
+func (s *service) ScanAll(ctx context.Context) {
 	locations, err := s.store.ListLocations(ctx)
 	if err != nil {
 		s.log.Error("storage: list locations", "error", err)

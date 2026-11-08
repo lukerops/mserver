@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lukerops/mserver/internal/modules/storage/api"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
 )
 
@@ -33,13 +32,13 @@ var _ driver.Driver = (*Driver)(nil)
 func New(options map[string]string) (driver.Driver, error) {
 	for key := range options {
 		if key != OptionDir {
-			return nil, fmt.Errorf("%w: local: unknown option %q", api.ErrInvalidArgument, key)
+			return nil, fmt.Errorf("%w: local: unknown option %q", driver.ErrInvalidOptions, key)
 		}
 	}
 
 	dir := options[OptionDir]
 	if !filepath.IsAbs(dir) {
-		return nil, fmt.Errorf("%w: local: option %q must be an absolute path", api.ErrInvalidArgument, OptionDir)
+		return nil, fmt.Errorf("%w: local: option %q must be an absolute path", driver.ErrInvalidOptions, OptionDir)
 	}
 	return &Driver{dir: filepath.Clean(dir)}, nil
 }

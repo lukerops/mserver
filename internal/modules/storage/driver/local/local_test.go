@@ -7,7 +7,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/lukerops/mserver/internal/modules/storage/api"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
 )
 
@@ -36,8 +35,8 @@ func TestNewValidatesOptions(t *testing.T) {
 		{OptionDir: "relative/dir"},
 		{OptionDir: "/tmp", "other": "x"},
 	} {
-		if _, err := New(options); !errors.Is(err, api.ErrInvalidArgument) {
-			t.Errorf("New(%v): got %v, want ErrInvalidArgument", options, err)
+		if _, err := New(options); !errors.Is(err, driver.ErrInvalidOptions) {
+			t.Errorf("New(%v): got %v, want ErrInvalidOptions", options, err)
 		}
 	}
 }

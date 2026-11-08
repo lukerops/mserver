@@ -1,12 +1,19 @@
-// Package store defines the persistence of the storage index. Database
-// backends implement Store in subpackages (e.g. store/sqlite).
+// Package store defines the persistence of the storage index: its records
+// and the Store interface. Database backends implement Store in
+// subpackages (e.g. store/sqlite).
 package store
 
 import (
 	"context"
+	"errors"
 
-	"github.com/lukerops/mserver/internal/modules/storage/api"
-	"github.com/lukerops/mserver/internal/modules/storage/driver"
+	"github.com/google/uuid"
+)
+
+// Errors returned by Store implementations, wrapped with context.
+var (
+	ErrNotFound      = errors.New("not found")
+	ErrAlreadyExists = errors.New("already exists")
 )
 
 // Store persists locations and files.
@@ -15,31 +22,25 @@ type Store interface {
 	// methods called with the context given to fn join the transaction.
 	WithTx(ctx context.Context, fn func(ctx context.Context) error) error
 
-	// InsertLocation saves a new location. It returns api.ErrAlreadyExists
-	// if root is inside, contains or equals the root of another location.
-	InsertLocation(ctx context.Context, loc api.Location, root string) error
-	// GetLocation returns api.ErrNotFound if the location does not exist.
-	GetLocation(ctx context.Context, id api.LocationID) (api.Location, error)
-	ListLocations(ctx context.Context) ([]api.Location, error)
+	// InsertLocation saves a new location. It returns ErrAlreadyExists if
+	// root is inside, contains or equals the root of another location.
+	InsertLocation(ctx context.Context, loc Location, root string) error
+	// GetLocation returns ErrNotFound if the location does not exist.
+	GetLocation(ctx context.Context, id uuid.UUID) (Location, error)
+	// ListLocations returns every location ordered by ID.
+	ListLocations(ctx context.Context) ([]Location, error)
 	// DeleteLocation removes a location and its files. It returns
-	// api.ErrNotFound if the location does not exist.
-	DeleteLocation(ctx context.Context, id api.LocationID) error
+	// ErrNotFound if the location does not exist.
+	DeleteLocation(ctx context.Context, id uuid.UUID) error
 
-	// GetFile returns api.ErrNotFound if the file does not exist.
-	GetFile(ctx context.Context, id api.FileID) (api.File, error)
+	// GetFile returns ErrNotFound if the file does not exist.
+	GetFile(ctx context.Context, id uuid.UUID) (File, error)
 	// ListFiles returns the files of a location ordered by path.
-	ListFiles(ctx context.Context, id api.LocationID) ([]api.File, error)
+	ListFiles(ctx context.Context, location uuid.UUID) ([]File, error)
 	// Siblings returns the other files in the same directory as f,
 	// ordered by path.
-	Siblings(ctx context.Context, f api.File) ([]api.Sibling, error)
+	Siblings(ctx context.Context, f File) ([]Sibling, error)
 
 	// ApplyScan applies the changes of a scan atomically.
-	ApplyScan(ctx context.Context, id api.LocationID, c ScanChanges) error
-}
-
-// ScanChanges is the difference between the index and a location walk.
-type ScanChanges struct {
-	Added   map[api.FileID]driver.FileInfo
-	Updated map[api.FileID]driver.FileInfo // changed or moved
-	Removed []api.FileID
+	ApplyScan(ctx context.Context, location uuid.UUID, c ScanChanges) error
 }

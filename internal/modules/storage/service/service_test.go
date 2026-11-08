@@ -1,29 +1,47 @@
-package storage
+package service
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
+	database "github.com/lukerops/mserver/internal/infra/database/sqlite"
+	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/storage/api"
+	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
 )
 
-func newTestService(t *testing.T) *Service {
+// newTestService returns a service over a SQLite database in dataDir,
+// publishing its events on pub.
+func newTestService(t *testing.T, dataDir string, pub queue.Publisher) Service {
 	t.Helper()
-	m := New(DefaultConfig(t.TempDir()), memory.New(), nil)
-	if err := m.Init(t.Context()); err != nil {
+	ctx := t.Context()
+	log := slog.Default()
+	db, err := database.Open(ctx, filepath.Join(dataDir, "storage.db"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	svc := m.svc
-	t.Cleanup(func() { m.Stop(t.Context()) })
-	return svc
+	t.Cleanup(func() { db.Close() })
+	ob, err := outbox.New(ctx, db, pub, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := sqlite.New(ctx, db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ob.Start(ctx)
+	t.Cleanup(ob.Stop)
+	return New(st, ob, log)
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -36,9 +54,9 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func createLocation(t *testing.T, s *Service, dir string) api.Location {
+func createLocation(t *testing.T, s Service, dir string) Location {
 	t.Helper()
-	loc, err := s.CreateLocation(t.Context(), api.CreateLocationRequest{
+	loc, err := s.CreateLocation(t.Context(), CreateLocationRequest{
 		Driver:  "local",
 		Options: map[string]string{"dir": dir},
 	})
@@ -48,7 +66,7 @@ func createLocation(t *testing.T, s *Service, dir string) api.Location {
 	return loc
 }
 
-func scan(t *testing.T, s *Service, id api.LocationID) api.ScanResult {
+func scan(t *testing.T, s Service, id uuid.UUID) ScanResult {
 	t.Helper()
 	result, err := s.ScanLocation(t.Context(), id)
 	if err != nil {
@@ -57,14 +75,14 @@ func scan(t *testing.T, s *Service, id api.LocationID) api.ScanResult {
 	return result
 }
 
-// files returns the FileIDs of a location by path.
-func files(t *testing.T, s *Service, id api.LocationID) map[string]api.FileID {
+// files returns the file IDs of a location by path.
+func files(t *testing.T, s Service, id uuid.UUID) map[string]uuid.UUID {
 	t.Helper()
 	list, err := s.ListFiles(t.Context(), id)
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := make(map[string]api.FileID)
+	out := make(map[string]uuid.UUID)
 	for _, f := range list {
 		out[f.Path] = f.ID
 	}
@@ -72,19 +90,19 @@ func files(t *testing.T, s *Service, id api.LocationID) map[string]api.FileID {
 }
 
 func TestScanLifecycle(t *testing.T) {
-	s := newTestService(t)
+	s := newTestService(t, t.TempDir(), memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Show/ep1.mkv"), "episode 1")
 	writeFile(t, filepath.Join(dir, "Show/ep2.mkv"), "episode 2")
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	loc := createLocation(t, s, dir)
 
-	if got := scan(t, s, loc.ID); got != (api.ScanResult{Added: 3}) {
+	if got := scan(t, s, loc.ID); got != (ScanResult{Added: 3}) {
 		t.Fatalf("first scan = %+v", got)
 	}
 	before := files(t, s, loc.ID)
 
-	if got := scan(t, s, loc.ID); got != (api.ScanResult{}) {
+	if got := scan(t, s, loc.ID); got != (ScanResult{}) {
 		t.Fatalf("second scan = %+v", got)
 	}
 
@@ -100,25 +118,46 @@ func TestScanLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	want := api.ScanResult{Changed: 1, Moved: 1, Removed: 1}
+	want := ScanResult{Changed: 1, Moved: 1, Removed: 1}
 	if got := scan(t, s, loc.ID); got != want {
 		t.Fatalf("third scan = %+v, want %+v", got, want)
 	}
 
 	after := files(t, s, loc.ID)
 	if after["movie.mkv"] != before["movie.mkv"] {
-		t.Error("changed file got a new FileID")
+		t.Error("changed file got a new ID")
 	}
 	if after["Show/S01E01.mkv"] != before["Show/ep1.mkv"] {
-		t.Error("renamed file got a new FileID")
+		t.Error("renamed file got a new ID")
 	}
-	if _, err := s.GetFile(t.Context(), before["Show/ep2.mkv"]); !errors.Is(err, api.ErrNotFound) {
+	if _, err := s.GetFile(t.Context(), before["Show/ep2.mkv"]); !errors.Is(err, ErrNotFound) {
 		t.Errorf("removed file: got %v, want ErrNotFound", err)
 	}
 }
 
+func TestInvalidLocationsAreRejected(t *testing.T) {
+	s := newTestService(t, t.TempDir(), memory.New())
+	for _, req := range []CreateLocationRequest{
+		{Driver: "nfs", Options: map[string]string{"dir": t.TempDir()}},
+		{Driver: "local", Options: map[string]string{"dir": "relative"}},
+	} {
+		if _, err := s.CreateLocation(t.Context(), req); !errors.Is(err, ErrInvalidArgument) {
+			t.Errorf("CreateLocation(%+v): got %v, want ErrInvalidArgument", req, err)
+		}
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, err := s.CreateLocation(t.Context(), CreateLocationRequest{
+		Driver:  "local",
+		Options: map[string]string{"dir": missing},
+	})
+	if !errors.Is(err, ErrFailedPrecondition) {
+		t.Errorf("CreateLocation(missing): got %v, want ErrFailedPrecondition", err)
+	}
+}
+
 func TestOverlappingLocationsAreRejected(t *testing.T) {
-	s := newTestService(t)
+	s := newTestService(t, t.TempDir(), memory.New())
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "Series"), 0o755); err != nil {
 		t.Fatal(err)
@@ -126,18 +165,18 @@ func TestOverlappingLocationsAreRejected(t *testing.T) {
 	createLocation(t, s, filepath.Join(dir, "Series"))
 
 	for _, d := range []string{dir, filepath.Join(dir, "Series")} {
-		_, err := s.CreateLocation(t.Context(), api.CreateLocationRequest{
+		_, err := s.CreateLocation(t.Context(), CreateLocationRequest{
 			Driver:  "local",
 			Options: map[string]string{"dir": d},
 		})
-		if !errors.Is(err, api.ErrAlreadyExists) {
+		if !errors.Is(err, ErrAlreadyExists) {
 			t.Errorf("CreateLocation(%s): got %v, want ErrAlreadyExists", d, err)
 		}
 	}
 }
 
 func TestInaccessibleLocationKeepsIndex(t *testing.T) {
-	s := newTestService(t)
+	s := newTestService(t, t.TempDir(), memory.New())
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "disk")
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
@@ -148,7 +187,7 @@ func TestInaccessibleLocationKeepsIndex(t *testing.T) {
 	if err := os.Rename(dir, filepath.Join(parent, "gone")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ScanLocation(t.Context(), loc.ID); !errors.Is(err, api.ErrUnavailable) {
+	if _, err := s.ScanLocation(t.Context(), loc.ID); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("scan: got %v, want ErrUnavailable", err)
 	}
 	if got := files(t, s, loc.ID); len(got) != 1 {
@@ -157,7 +196,7 @@ func TestInaccessibleLocationKeepsIndex(t *testing.T) {
 }
 
 func TestDeleteLocation(t *testing.T) {
-	s := newTestService(t)
+	s := newTestService(t, t.TempDir(), memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	loc := createLocation(t, s, dir)
@@ -167,10 +206,10 @@ func TestDeleteLocation(t *testing.T) {
 	if err := s.DeleteLocation(t.Context(), loc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetFile(t.Context(), movie); !errors.Is(err, api.ErrNotFound) {
+	if _, err := s.GetFile(t.Context(), movie); !errors.Is(err, ErrNotFound) {
 		t.Errorf("file of deleted location: got %v, want ErrNotFound", err)
 	}
-	if err := s.DeleteLocation(t.Context(), loc.ID); !errors.Is(err, api.ErrNotFound) {
+	if err := s.DeleteLocation(t.Context(), loc.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("second delete: got %v, want ErrNotFound", err)
 	}
 	// The directory can be registered again.
@@ -178,7 +217,7 @@ func TestDeleteLocation(t *testing.T) {
 }
 
 func TestSiblingsAndResolve(t *testing.T) {
-	s := newTestService(t)
+	s := newTestService(t, t.TempDir(), memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Movie/Movie.mkv"), "movie")
 	writeFile(t, filepath.Join(dir, "Movie/Movie.en.srt"), "subtitle")
@@ -191,7 +230,7 @@ func TestSiblingsAndResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []api.Sibling{{FileID: ids["Movie/Movie.en.srt"], Path: "Movie/Movie.en.srt"}}
+	want := []Sibling{{FileID: ids["Movie/Movie.en.srt"], Path: "Movie/Movie.en.srt"}}
 	if !slices.Equal(siblings, want) {
 		t.Errorf("siblings = %+v, want %+v", siblings, want)
 	}
@@ -205,47 +244,27 @@ func TestSiblingsAndResolve(t *testing.T) {
 	}
 }
 
-func TestModuleScansOnStart(t *testing.T) {
-	cfg := DefaultConfig(t.TempDir())
-	dir := t.TempDir()
-	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
+func TestScanAll(t *testing.T) {
+	s := newTestService(t, t.TempDir(), memory.New())
+	first, second := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(first, "movie.mkv"), "movie")
+	writeFile(t, filepath.Join(second, "show.mkv"), "show")
+	a := createLocation(t, s, first)
+	b := createLocation(t, s, second)
 
-	// Register the location in a first run.
-	m := New(cfg, memory.New(), nil)
-	if err := m.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	loc := createLocation(t, m.svc, dir)
-	if err := m.Stop(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	s.ScanAll(t.Context())
 
-	// The second run scans it in the background.
-	m = New(cfg, memory.New(), nil)
-	if err := m.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	svc := m.svc
-	if err := m.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer m.Stop(t.Context())
-
-	deadline := time.Now().Add(5 * time.Second)
-	for len(files(t, svc, loc.ID)) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("location was not scanned on start")
-		}
-		time.Sleep(10 * time.Millisecond)
+	if len(files(t, s, a.ID)) != 1 || len(files(t, s, b.ID)) != 1 {
+		t.Error("ScanAll did not scan every location")
 	}
 }
 
 func TestFileEventsArePublished(t *testing.T) {
 	bus := memory.New()
-	got := make(chan queue.Envelope[api.FileEvent], 10)
-	for _, typ := range []string{api.EventFileIndexed, api.EventFileChanged, api.EventFileMoved, api.EventFileRemoved} {
+	got := make(chan queue.Envelope[FileEvent], 10)
+	for _, typ := range []string{EventFileIndexed, EventFileChanged, EventFileMoved, EventFileRemoved} {
 		bus.Subscribe(typ, func(_ context.Context, msg queue.Message) error {
-			var e queue.Envelope[api.FileEvent]
+			var e queue.Envelope[FileEvent]
 			if err := json.Unmarshal(msg.Payload, &e); err != nil {
 				t.Error(err)
 			}
@@ -253,52 +272,43 @@ func TestFileEventsArePublished(t *testing.T) {
 			return nil
 		})
 	}
+	s := newTestService(t, t.TempDir(), bus)
 
-	m := New(DefaultConfig(t.TempDir()), bus, nil)
-	if err := m.Init(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	svc := m.svc
-	if err := m.Start(t.Context()); err != nil {
-		t.Fatal(err)
-	}
-	defer m.Stop(t.Context())
-
-	next := func(want, path string) api.FileEvent {
+	next := func(want, path string) FileEvent {
 		t.Helper()
 		select {
 		case e := <-got:
-			ok := e.Type == want && e.Source == api.Source && e.SpecVersion == queue.SpecVersion &&
+			ok := e.Type == want && e.Source == Source && e.SpecVersion == queue.SpecVersion &&
 				e.ID != "" && !e.Time.IsZero() && e.Subject == e.Data.FileID.String() &&
-				e.Data.Path == path && e.Data.LocationID != (api.LocationID{})
+				e.Data.Path == path && e.Data.LocationID != uuid.Nil
 			if !ok {
 				t.Fatalf("event = %+v, want %s for %s", e, want, path)
 			}
 			return e.Data
 		case <-time.After(5 * time.Second):
 			t.Fatalf("no %s event for %s", want, path)
-			return api.FileEvent{}
+			return FileEvent{}
 		}
 	}
 
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
-	loc := createLocation(t, svc, dir)
-	scan(t, svc, loc.ID)
-	indexed := next(api.EventFileIndexed, "movie.mkv")
+	loc := createLocation(t, s, dir)
+	scan(t, s, loc.ID)
+	indexed := next(EventFileIndexed, "movie.mkv")
 
 	if err := os.Rename(filepath.Join(dir, "movie.mkv"), filepath.Join(dir, "film.mkv")); err != nil {
 		t.Fatal(err)
 	}
-	scan(t, svc, loc.ID)
-	if moved := next(api.EventFileMoved, "film.mkv"); moved.FileID != indexed.FileID {
-		t.Errorf("moved FileID = %s, want %s", moved.FileID, indexed.FileID)
+	scan(t, s, loc.ID)
+	if moved := next(EventFileMoved, "film.mkv"); moved.FileID != indexed.FileID {
+		t.Errorf("moved file ID = %s, want %s", moved.FileID, indexed.FileID)
 	}
 
-	if err := svc.DeleteLocation(t.Context(), loc.ID); err != nil {
+	if err := s.DeleteLocation(t.Context(), loc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if removed := next(api.EventFileRemoved, "film.mkv"); removed.FileID != indexed.FileID {
-		t.Errorf("removed FileID = %s, want %s", removed.FileID, indexed.FileID)
+	if removed := next(EventFileRemoved, "film.mkv"); removed.FileID != indexed.FileID {
+		t.Errorf("removed file ID = %s, want %s", removed.FileID, indexed.FileID)
 	}
 }

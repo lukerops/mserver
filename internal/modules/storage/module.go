@@ -1,107 +1,114 @@
-// Package storage implements the storage module: the VFS that owns every
-// physical path and indexes files into FileIDs. Other modules depend only
-// on the storage/api package.
+// Package storage is the storage module: the VFS that owns every physical
+// path and indexes files into IDs. Other modules reach it only through its
+// REST API (see the client package).
 package storage
 
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/lukerops/mserver/internal/clients"
 	database "github.com/lukerops/mserver/internal/infra/database/sqlite"
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/storage/api"
+	"github.com/lukerops/mserver/internal/modules/storage/router"
+	"github.com/lukerops/mserver/internal/modules/storage/service"
 	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
 )
 
-// Module is the storage module lifecycle.
+// defaultScanInterval is used when MSERVER_STORAGE_SCAN_INTERVAL is unset.
+const defaultScanInterval = 6 * time.Hour
+
+// Module is a running storage module.
 type Module struct {
-	cfg Config
-	pub queue.Publisher
-	log *slog.Logger
+	// Mux serves the storage API.
+	Mux *http.ServeMux
 
 	db     *sql.DB
 	outbox *outbox.Outbox
-	svc    *Service
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// New creates the storage module. File events are published on pub.
-func New(cfg Config, pub queue.Publisher, log *slog.Logger) *Module {
+// New opens the database <dataDir>/storage.db, starts publishing the saved
+// events on pub and builds the API. It scans every location now and then
+// every MSERVER_STORAGE_SCAN_INTERVAL (a duration, default 6h; 0 disables
+// the periodic scans). The storage uses no other module.
+func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Clients, log *slog.Logger) (*Module, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Module{cfg: cfg, pub: pub, log: log}
-}
-
-// Init opens the database.
-func (m *Module) Init(ctx context.Context) error {
-	db, err := database.Open(ctx, filepath.Join(m.cfg.DataDir, "storage.db"))
+	interval, err := scanInterval(os.Getenv("MSERVER_STORAGE_SCAN_INTERVAL"))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ob, err := outbox.New(ctx, db, m.pub, m.log)
+	db, err := database.Open(ctx, filepath.Join(dataDir, "storage.db"))
 	if err != nil {
-		db.Close()
-		return err
+		return nil, err
+	}
+	ob, err := outbox.New(ctx, db, pub, log)
+	if err != nil {
+		return nil, errors.Join(err, db.Close())
 	}
 	st, err := sqlite.New(ctx, db)
 	if err != nil {
-		db.Close()
-		return err
+		return nil, errors.Join(err, db.Close())
 	}
-	m.db, m.outbox = db, ob
-	m.svc = &Service{store: st, outbox: ob, log: m.log}
-	return nil
-}
+	ob.Start(ctx)
 
-// Service returns the module contract. Valid after Init.
-func (m *Module) Service() api.Service { return m.svc }
-
-// Start publishes the saved events in the background and scans every
-// location now and then every ScanInterval.
-func (m *Module) Start(ctx context.Context) error {
-	m.outbox.Start(ctx)
-
+	svc := service.New(st, ob, log)
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	m.cancel = cancel
-	m.wg.Go(func() {
-		m.svc.scanAll(runCtx)
-		if m.cfg.ScanInterval == 0 {
-			return
-		}
-
-		ticker := time.NewTicker(m.cfg.ScanInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-runCtx.Done():
-				return
-			case <-ticker.C:
-				m.svc.scanAll(runCtx)
-			}
-		}
-	})
-	return nil
+	m := &Module{Mux: router.New(svc, log), db: db, outbox: ob, cancel: cancel}
+	m.wg.Go(func() { scanLoop(runCtx, svc, interval) })
+	return m, nil
 }
 
-// Stop waits for the background work and closes the database.
-func (m *Module) Stop(ctx context.Context) error {
-	if m.cancel != nil {
-		m.cancel()
+// scanInterval parses the value of MSERVER_STORAGE_SCAN_INTERVAL. An empty
+// value is the default; zero disables the periodic scans.
+func scanInterval(v string) (time.Duration, error) {
+	if v == "" {
+		return defaultScanInterval, nil
 	}
-	m.wg.Wait()
+	d, err := time.ParseDuration(v)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("storage: MSERVER_STORAGE_SCAN_INTERVAL: invalid duration %q", v)
+	}
+	return d, nil
+}
 
-	if m.db == nil {
-		return nil
+// scanLoop scans every location now and then every interval, until ctx is
+// canceled. A zero interval scans only once.
+func scanLoop(ctx context.Context, svc service.Service, interval time.Duration) {
+	svc.ScanAll(ctx)
+	if interval == 0 {
+		return
 	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			svc.ScanAll(ctx)
+		}
+	}
+}
+
+// Close stops the background scans and the event publishing, and closes
+// the database.
+func (m *Module) Close() error {
+	m.cancel()
+	m.wg.Wait()
 	m.outbox.Stop()
-	err := m.db.Close()
-	m.db, m.outbox, m.svc = nil, nil, nil
-	return err
+	return m.db.Close()
 }

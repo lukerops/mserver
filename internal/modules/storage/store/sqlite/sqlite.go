@@ -12,10 +12,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"time"
 
 	"github.com/lukerops/mserver/internal/infra/database"
 	dbsqlite "github.com/lukerops/mserver/internal/infra/database/sqlite"
-	"github.com/lukerops/mserver/internal/modules/storage/api"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
@@ -54,7 +54,10 @@ type rowScanner interface{ Scan(dest ...any) error }
 
 func notFound(err error, what string) error {
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: %s", api.ErrNotFound, what)
+		return fmt.Errorf("%w: %s", store.ErrNotFound, what)
 	}
 	return fmt.Errorf("store: %s: %w", what, err)
 }
+
+func nanos(t time.Time) int64     { return t.UnixNano() }
+func fromNanos(n int64) time.Time { return time.Unix(0, n).UTC() }

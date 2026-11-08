@@ -1,24 +1,24 @@
-package storage
+package service
 
 import (
 	"context"
 	"net/url"
 
-	"github.com/lukerops/mserver/internal/modules/storage/api"
+	"github.com/google/uuid"
 )
 
-func (s *Service) GetFile(ctx context.Context, id api.FileID) (api.File, error) {
+func (s *service) GetFile(ctx context.Context, id uuid.UUID) (File, error) {
 	return s.store.GetFile(ctx, id)
 }
 
-func (s *Service) ListFiles(ctx context.Context, id api.LocationID) ([]api.File, error) {
-	if _, err := s.store.GetLocation(ctx, id); err != nil {
+func (s *service) ListFiles(ctx context.Context, location uuid.UUID) ([]File, error) {
+	if _, err := s.store.GetLocation(ctx, location); err != nil {
 		return nil, err
 	}
-	return s.store.ListFiles(ctx, id)
+	return s.store.ListFiles(ctx, location)
 }
 
-func (s *Service) ListSiblings(ctx context.Context, id api.FileID) ([]api.Sibling, error) {
+func (s *service) ListSiblings(ctx context.Context, id uuid.UUID) ([]Sibling, error) {
 	f, err := s.store.GetFile(ctx, id)
 	if err != nil {
 		return nil, err
@@ -26,7 +26,7 @@ func (s *Service) ListSiblings(ctx context.Context, id api.FileID) ([]api.Siblin
 	return s.store.Siblings(ctx, f)
 }
 
-func (s *Service) Resolve(ctx context.Context, id api.FileID) (string, error) {
+func (s *service) Resolve(ctx context.Context, id uuid.UUID) (string, error) {
 	f, err := s.store.GetFile(ctx, id)
 	if err != nil {
 		return "", err

@@ -7,8 +7,13 @@ package driver
 
 import (
 	"context"
+	"errors"
 	"time"
 )
+
+// ErrInvalidOptions is returned by factories for invalid location
+// options, wrapped with context.
+var ErrInvalidOptions = errors.New("invalid options")
 
 // FileInfo describes a regular file.
 type FileInfo struct {
@@ -34,5 +39,5 @@ type Driver interface {
 }
 
 // Factory creates a driver from location options. Invalid options return
-// api.ErrInvalidArgument.
+// ErrInvalidOptions.
 type Factory func(options map[string]string) (Driver, error)

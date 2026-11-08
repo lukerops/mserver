@@ -1,4 +1,4 @@
-package storage
+package service
 
 import (
 	"context"
@@ -6,40 +6,41 @@ import (
 	"maps"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/storage/api"
 )
 
-func (s *Service) CreateLocation(ctx context.Context, req api.CreateLocationRequest) (api.Location, error) {
+func (s *service) CreateLocation(ctx context.Context, req CreateLocationRequest) (Location, error) {
 	d, err := newDriver(req.Driver, req.Options)
 	if err != nil {
-		return api.Location{}, err
+		return Location{}, err
 	}
 	if err := d.Check(ctx); err != nil {
-		return api.Location{}, fmt.Errorf("%w: location is not accessible: %w", api.ErrFailedPrecondition, err)
+		return Location{}, fmt.Errorf("%w: location is not accessible: %w", ErrFailedPrecondition, err)
 	}
 
-	loc := api.Location{
-		ID:        api.NewLocationID(),
+	loc := Location{
+		ID:        newID(),
 		Driver:    req.Driver,
 		Options:   maps.Clone(req.Options),
 		CreatedAt: time.Now().UTC(),
 	}
 	if err := s.store.InsertLocation(ctx, loc, d.Root()); err != nil {
-		return api.Location{}, err
+		return Location{}, err
 	}
 	return loc, nil
 }
 
-func (s *Service) GetLocation(ctx context.Context, id api.LocationID) (api.Location, error) {
+func (s *service) GetLocation(ctx context.Context, id uuid.UUID) (Location, error) {
 	return s.store.GetLocation(ctx, id)
 }
 
-func (s *Service) ListLocations(ctx context.Context) ([]api.Location, error) {
+func (s *service) ListLocations(ctx context.Context) ([]Location, error) {
 	return s.store.ListLocations(ctx)
 }
 
-func (s *Service) DeleteLocation(ctx context.Context, id api.LocationID) error {
+func (s *service) DeleteLocation(ctx context.Context, id uuid.UUID) error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
@@ -53,7 +54,7 @@ func (s *Service) DeleteLocation(ctx context.Context, id api.LocationID) error {
 		}
 		events := make([]queue.Event, len(files))
 		for i, f := range files {
-			events[i] = newFileEvent(api.EventFileRemoved, id, f.ID, f.Path)
+			events[i] = fileEvent(EventFileRemoved, id, f.ID, f.Path)
 		}
 		return s.outbox.Publish(ctx, events...)
 	})
