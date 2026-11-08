@@ -1,0 +1,40 @@
+info:
+  name: create
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{BaseURL}}/v1/playback/sessions"
+  body:
+    type: json
+    data: |-
+      {
+        "account_id": "{{AccountID}}",
+        "profile_id": "{{ProfileID}}",
+        "device_id": "0198c3a0-0000-7000-8000-000000000001",
+        "item_id": "{{MovieID}}",
+        "file_id": "{{MovieFileID}}",
+        "play_method": "direct_play",
+        "position_ms": 0,
+        "paused": false
+      }
+  auth: inherit
+
+runtime:
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.id
+        method: jsonq
+      variable:
+        name: PlaybackSessionID
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

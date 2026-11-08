@@ -15,6 +15,25 @@ http:
       type: query
   auth: inherit
 
+runtime:
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.movies[0].id
+        method: jsonq
+      variable:
+        name: MovieID
+        scope: runtime
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.movies[0].file_id
+        method: jsonq
+      variable:
+        name: MovieFileID
+        scope: runtime
+
 settings:
   encodeUrl: true
   timeout: 0

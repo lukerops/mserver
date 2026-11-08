@@ -1,0 +1,19 @@
+info:
+  name: content
+  type: http
+  seq: 2
+
+http:
+  method: GET
+  url: "{{BaseURL}}/locations/{{MovieLocationID}}/files/{{MovieFileID}}"
+  headers:
+    - name: Range
+      value: bytes=0-1023
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

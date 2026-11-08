@@ -1,0 +1,23 @@
+info:
+  name: progress
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BaseURL}}/v1/playback/sessions/{{PlaybackSessionID}}/progress"
+  body:
+    type: json
+    data: |-
+      {
+        "position_ms": 60000,
+        "paused": true
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
