@@ -1,18 +1,17 @@
 // Command server runs mserver as a monolith: every module and API plugin
 // is served by the same HTTP server, and the modules talk to each other
 // through their REST APIs on that same server. The module routes (/v1)
-// require "Authorization: Bearer <MSERVER_PRIVATE_TOKEN>"; the plugin
-// routes have their own authentication.
+// have no authentication yet; the plugin routes have their own.
 //
 // Variables:
 //
-//	MSERVER_PRIVATE_TOKEN  token of the module routes (required, at least 32 chars)
 //	MSERVER_HTTP_ADDR      HTTP listen address (default ":8096")
 //	MSERVER_DATA_DIR       directory of the databases (default "data")
 //	MSERVER_LOG_LEVEL      debug, info, warn or error (default info)
 //	MSERVER_LOG_FORMAT     text or json (default text)
 //
-// Each module reads its own variables (e.g. MSERVER_STORAGE_*).
+// Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
+// and MSERVER_FFPROBE_PATH in the storage).
 package main
 
 import (
@@ -48,10 +47,7 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-	token := os.Getenv("MSERVER_PRIVATE_TOKEN")
-	if len(token) < minTokenLen {
-		return fmt.Errorf("MSERVER_PRIVATE_TOKEN: must have at least %d characters (e.g. openssl rand -hex 32)", minTokenLen)
-	}
+
 	addr := os.Getenv("MSERVER_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8096"
@@ -87,14 +83,13 @@ func run(ctx context.Context) error {
 	baseURL := localURL(ln.Addr())
 
 	// One HTTP client for every module client, so that connections are
-	// reused. It never uses a proxy (the calls are internal) and sends the
-	// private token on every request.
-	hc := &http.Client{Transport: bearer{token: token, next: &http.Transport{
+	// reused. It never uses a proxy (the calls are internal).
+	hc := &http.Client{Transport: &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
-	}}}
+	}}
 	c := clients.Clients{
 		Identity: identityclient.New(hc, baseURL),
 		Storage:  storageclient.New(hc, baseURL),
@@ -119,10 +114,10 @@ func run(ctx context.Context) error {
 	}
 
 	// Modules and plugins register their routes at the root. The modules
-	// share the root (every module route is under /v1) and require the
-	// private token; plugins are mounted under their own path.
+	// share the root (every module route is under /v1); plugins are
+	// mounted under their own path.
 	mux := http.NewServeMux()
-	mux.Handle("/", requireToken(token, modules(ident.Mux, stor.Mux)))
+	mux.Handle("/", modules(ident.Mux, stor.Mux))
 	mount(mux, "/plugins/jellyfin", jf)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
