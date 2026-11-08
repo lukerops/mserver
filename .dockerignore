@@ -1,0 +1,14 @@
+.git
+.github
+.gitignore
+.env
+build/
+data/
+docs/
+README.md
+LICENSE
+Dockerfile
+.dockerignore
+*.test
+*.out
+coverage.*
