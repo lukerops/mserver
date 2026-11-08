@@ -10,8 +10,12 @@ import (
 	"strings"
 
 	"github.com/lukerops/mserver/internal/clients"
+	"github.com/lukerops/mserver/internal/infra/kv"
+	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
 	identity "github.com/lukerops/mserver/internal/modules/identity/client"
 	library "github.com/lukerops/mserver/internal/modules/library/client"
+	playback "github.com/lukerops/mserver/internal/modules/playback/client"
+	storage "github.com/lukerops/mserver/internal/modules/storage/client"
 )
 
 const (
@@ -28,16 +32,36 @@ type plugin struct {
 	// library is nil when the library module is not available: there are
 	// no items then.
 	library *library.Client
-	log     *slog.Logger
+	// storage is nil when the storage module is not available: nothing
+	// can be streamed then.
+	storage *storage.Client
+	// playback is nil when the playback module is not available: the
+	// playback reports are ignored then.
+	playback *playback.Client
+	// kv maps the Jellyfin PlaySessionIds to playback sessions. It is
+	// shared by every instance of the plugin.
+	kv  kv.Store
+	log *slog.Logger
 }
 
 // New returns the routes of the Jellyfin API. It talks to the modules only
-// through their clients.
-func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
+// through their clients. Its state lives in st (in memory when nil), which
+// every instance of the plugin must share.
+func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 	if log == nil {
 		log = slog.Default()
 	}
-	p := &plugin{identity: c.Identity, library: c.Library, log: log}
+	if st == nil {
+		st = kvmemory.New()
+	}
+	p := &plugin{
+		identity: c.Identity,
+		library:  c.Library,
+		storage:  c.Storage,
+		playback: c.Playback,
+		kv:       st,
+		log:      log,
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /system/info/public", p.publicSystemInfo)
@@ -58,6 +82,12 @@ func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
 
 	mux.HandleFunc("POST /sessions/capabilities/full", p.capabilities)
 	mux.HandleFunc("POST /sessions/logout", p.logout)
+	mux.HandleFunc("POST /sessions/playing", p.playing)
+	mux.HandleFunc("POST /sessions/playing/progress", p.progress)
+	mux.HandleFunc("POST /sessions/playing/ping", p.pingPlayback)
+	mux.HandleFunc("POST /sessions/playing/stopped", p.stopped)
+
+	mux.HandleFunc("GET /getutctime", p.utcTime)
 
 	mux.HandleFunc("GET /displaypreferences/{displayPreferencesId}", p.displayPreferences)
 	mux.HandleFunc("POST /displaypreferences/{displayPreferencesId}", p.updateDisplayPreferences)
@@ -77,6 +107,12 @@ func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
 	mux.HandleFunc("GET /items/{itemId}/specialfeatures", p.emptyItemList)
 	mux.HandleFunc("GET /items/{itemId}/localtrailers", p.emptyItemList)
 	mux.HandleFunc("GET /items/{itemId}/collections", p.collections)
+	mux.HandleFunc("GET /items/{itemId}/playbackinfo", p.playbackInfo)
+	mux.HandleFunc("POST /items/{itemId}/playbackinfo", p.playbackInfo)
+
+	// /Videos/{itemId}/stream and /Videos/{itemId}/stream.{container}: a
+	// pattern cannot match part of a segment. GET also serves HEAD.
+	mux.HandleFunc("GET /videos/{itemId}/{file}", p.stream)
 
 	mux.HandleFunc("GET /shows/{seriesId}/seasons", p.seasons)
 	mux.HandleFunc("GET /shows/{seriesId}/episodes", p.episodes)
@@ -95,9 +131,10 @@ func New(c clients.Clients, log *slog.Logger) *http.ServeMux {
 	cors.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+		h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
 		h.Set("Access-Control-Allow-Headers",
-			"Accept, Authorization, Content-Type, Origin, X-Requested-With, X-Emby-Authorization, X-Emby-Token, X-MediaBrowser-Token")
+			"Accept, Authorization, Content-Type, Origin, Range, X-Requested-With, X-Emby-Authorization, X-Emby-Token, X-MediaBrowser-Token")
+		h.Set("Access-Control-Expose-Headers", "Accept-Ranges, Content-Length, Content-Range")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

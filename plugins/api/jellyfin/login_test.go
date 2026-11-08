@@ -24,6 +24,8 @@ const (
 type client struct {
 	t    *testing.T
 	base string
+	// modules are the clients of the modules behind the plugin, if any.
+	modules clients.Clients
 }
 
 // start serves the plugin on an identity with the account admin and the
@@ -51,7 +53,7 @@ func start(t *testing.T) client {
 		t.Fatal(err)
 	}
 
-	srv := httptest.NewServer(jellyfin.New(c, nil))
+	srv := httptest.NewServer(jellyfin.New(c, nil, nil))
 	t.Cleanup(srv.Close)
 	return client{t: t, base: srv.URL}
 }

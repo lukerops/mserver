@@ -1,6 +1,8 @@
 package jellyfin
 
 import (
+	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -363,6 +365,90 @@ type MediaStream struct {
 	SupportsExternalStream bool
 	PixelFormat            string `json:",omitempty"`
 	Level                  int
+}
+
+// PlaybackInfoDto is the body of POST /Items/{itemId}/PlaybackInfo. The
+// same fields may come as query parameters; the body wins.
+type PlaybackInfoDto struct {
+	UserId              string
+	StartTimeTicks      *flexInt
+	AudioStreamIndex    *flexInt
+	SubtitleStreamIndex *flexInt
+	MediaSourceId       string
+	DeviceProfile       *DeviceProfile
+}
+
+// flexInt is an integer of a request body that may come as a JSON number
+// or as a string: jellyfin-web sends, for example, "AudioStreamIndex":"1"
+// (the Jellyfin server reads numbers from strings).
+type flexInt int64
+
+func (n *flexInt) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		b = []byte(s)
+	}
+	v, err := strconv.ParseInt(string(b), 10, 64)
+	if err != nil {
+		return err
+	}
+	*n = flexInt(v)
+	return nil
+}
+
+// intPtr converts an optional flexInt to an optional int.
+func (n *flexInt) intPtr() *int {
+	if n == nil {
+		return nil
+	}
+	v := int(*n)
+	return &v
+}
+
+// DeviceProfile describes what a client plays. Only the direct play
+// profiles are used.
+type DeviceProfile struct {
+	DirectPlayProfiles []DirectPlayProfile
+}
+
+// DirectPlayProfile is a combination of container and codecs a client
+// plays as is. The lists are comma-separated; an empty one accepts
+// anything.
+type DirectPlayProfile struct {
+	Container  string
+	AudioCodec string
+	VideoCodec string
+	// Type is "Audio", "Video" or "Photo".
+	Type string
+}
+
+type PlaybackInfoResponse struct {
+	MediaSources  []MediaSourceInfo
+	PlaySessionId string
+	// ErrorCode is "NoCompatibleStream" when no media source plays on
+	// the client.
+	ErrorCode string `json:",omitempty"`
+}
+
+// PlaybackReport is the body of the /Sessions/Playing reports
+// (PlaybackStartInfo, PlaybackProgressInfo and PlaybackStopInfo), with
+// the fields that are used.
+type PlaybackReport struct {
+	ItemId        string
+	MediaSourceId string
+	PlaySessionId string
+	PositionTicks *flexInt
+	IsPaused      bool
+	// PlayMethod is "DirectPlay", "DirectStream" or "Transcode".
+	PlayMethod string
+}
+
+type UtcTimeResponse struct {
+	RequestReceptionTime     time.Time
+	ResponseTransmissionTime time.Time
 }
 
 // userDto maps a profile to a Jellyfin user: a Jellyfin user is a profile,

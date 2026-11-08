@@ -11,7 +11,11 @@
 //	MSERVER_LOG_FORMAT     text or json (default text)
 //
 // Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
-// and MSERVER_FFPROBE_PATH in the storage).
+// and MSERVER_FFPROBE_PATH in the storage, MSERVER_PLAYBACK_SESSION_TIMEOUT
+// in the playback).
+//
+// The shared state of the playback module and of the Jellyfin plugin
+// lives in memory (internal/infra/kv/memory), so a single instance runs.
 package main
 
 import (
@@ -27,11 +31,14 @@ import (
 	"time"
 
 	"github.com/lukerops/mserver/internal/clients"
+	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
 	"github.com/lukerops/mserver/internal/modules/identity"
 	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
 	"github.com/lukerops/mserver/internal/modules/library"
 	libraryclient "github.com/lukerops/mserver/internal/modules/library/client"
+	"github.com/lukerops/mserver/internal/modules/playback"
+	playbackclient "github.com/lukerops/mserver/internal/modules/playback/client"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	storageclient "github.com/lukerops/mserver/internal/modules/storage/client"
 
@@ -96,6 +103,7 @@ func run(ctx context.Context) error {
 		Identity: identityclient.New(hc, baseURL),
 		Storage:  storageclient.New(hc, baseURL),
 		Library:  libraryclient.New(hc, baseURL),
+		Playback: playbackclient.New(hc, baseURL),
 	}
 	bus := memory.New()
 
@@ -119,13 +127,19 @@ func run(ctx context.Context) error {
 	}
 	defer closeModule(log, "storage", stor.Close)
 
-	jf := jellyfin.New(c, log.With("plugin", "jellyfin"))
+	pb, err := playback.New(ctx, dataDir, bus, kvmemory.New(), c, log.With("module", "playback"))
+	if err != nil {
+		return err
+	}
+	defer closeModule(log, "playback", pb.Close)
+
+	jf := jellyfin.New(c, kvmemory.New(), log.With("plugin", "jellyfin"))
 
 	// Modules and plugins register their routes at the root. The modules
 	// share the root (every module route is under /v1); plugins are
 	// mounted under their own path.
 	mux := http.NewServeMux()
-	mux.Handle("/", modules(ident.Mux, lib.Mux, stor.Mux))
+	mux.Handle("/", modules(ident.Mux, lib.Mux, stor.Mux, pb.Mux))
 	mount(mux, "/plugins/jellyfin", jf)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}

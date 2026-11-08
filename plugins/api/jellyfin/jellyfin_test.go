@@ -59,7 +59,7 @@ func TestServerIDIsFixed(t *testing.T) {
 		t.Fatalf("server id = %q", serverID)
 	}
 	rec := httptest.NewRecorder()
-	New(clients.Clients{}, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
+	New(clients.Clients{}, nil, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
 	if !strings.Contains(rec.Body.String(), `"Id":"`+serverID+`"`) {
 		t.Fatalf("body = %s", rec.Body)
 	}
@@ -85,7 +85,7 @@ func TestEndpoint(t *testing.T) {
 }
 
 func TestLocalAddressHasMountPath(t *testing.T) {
-	mux := New(clients.Clients{}, nil)
+	mux := New(clients.Clients{}, nil, nil)
 	root := http.NewServeMux()
 	root.Handle("/plugins/jellyfin/", http.StripPrefix("/plugins/jellyfin", mux))
 

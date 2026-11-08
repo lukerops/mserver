@@ -15,6 +15,7 @@ import (
 
 	"github.com/lukerops/mserver/internal/clients"
 	"github.com/lukerops/mserver/internal/infra/ffmpeg/ffmpegtest"
+	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
 	"github.com/lukerops/mserver/internal/modules/identity"
 	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
@@ -22,6 +23,8 @@ import (
 	"github.com/lukerops/mserver/internal/modules/library"
 	libraryclient "github.com/lukerops/mserver/internal/modules/library/client"
 	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
+	"github.com/lukerops/mserver/internal/modules/playback"
+	playbackclient "github.com/lukerops/mserver/internal/modules/playback/client"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	storageclient "github.com/lukerops/mserver/internal/modules/storage/client"
 	storagerouter "github.com/lukerops/mserver/internal/modules/storage/router"
@@ -63,6 +66,7 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 		Identity: identityclient.New(modules.Client(), modules.URL),
 		Storage:  storageclient.New(modules.Client(), modules.URL),
 		Library:  libraryclient.New(modules.Client(), modules.URL),
+		Playback: playbackclient.New(modules.Client(), modules.URL),
 	}
 	bus := memory.New()
 	ident, err := identity.New(ctx, dir, bus, c, nil)
@@ -80,8 +84,13 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { stor.Close() })
+	pb, err := playback.New(ctx, dir, bus, kvmemory.New(), c, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pb.Close() })
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, m := range []*http.ServeMux{ident.Mux, lib.Mux, stor.Mux} {
+		for _, m := range []*http.ServeMux{ident.Mux, lib.Mux, stor.Mux, pb.Mux} {
 			if _, pattern := m.Handler(r); pattern != "" {
 				m.ServeHTTP(w, r)
 				return
@@ -139,9 +148,9 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	srv := httptest.NewServer(jellyfin.New(c, nil))
+	srv := httptest.NewServer(jellyfin.New(c, nil, nil))
 	t.Cleanup(srv.Close)
-	jc := client{t: t, base: srv.URL}
+	jc := client{t: t, base: srv.URL, modules: c}
 
 	var auth struct{ AccessToken string }
 	jc.expect("POST", "/Users/AuthenticateByName", authHeader,
