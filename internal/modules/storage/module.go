@@ -19,6 +19,7 @@ import (
 	database "github.com/lukerops/mserver/internal/infra/database/sqlite"
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
 	"github.com/lukerops/mserver/internal/modules/storage/router"
 	"github.com/lukerops/mserver/internal/modules/storage/service"
 	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
@@ -26,6 +27,10 @@ import (
 
 // defaultScanInterval is used when MSERVER_STORAGE_SCAN_INTERVAL is unset.
 const defaultScanInterval = 6 * time.Hour
+
+// analysisInterval is how often files waiting to become stable are looked
+// for. Scans that change the index also start an analysis round.
+const analysisInterval = time.Minute
 
 // Module is a running storage module.
 type Module struct {
@@ -41,7 +46,8 @@ type Module struct {
 // New opens the database <dataDir>/storage.db, starts publishing the saved
 // events on pub and builds the API. It scans every location now and then
 // every MSERVER_STORAGE_SCAN_INTERVAL (a duration, default 6h; 0 disables
-// the periodic scans). The storage uses no other module.
+// the periodic scans). Files are analyzed in the background by the
+// analyzer plugins (see analyzers). The storage uses no other module.
 func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Clients, log *slog.Logger) (*Module, error) {
 	if log == nil {
 		log = slog.Default()
@@ -50,6 +56,7 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	if err != nil {
 		return nil, err
 	}
+	analyzers := newAnalyzers(log)
 	db, err := database.Open(ctx, filepath.Join(dataDir, "storage.db"))
 	if err != nil {
 		return nil, err
@@ -64,11 +71,19 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	}
 	ob.Start(ctx)
 
-	svc := service.New(st, ob, log)
+	svc := service.New(st, ob, log, analyzers...)
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	m := &Module{Mux: router.New(svc, log), db: db, outbox: ob, cancel: cancel}
 	m.wg.Go(func() { scanLoop(runCtx, svc, interval) })
+	m.wg.Go(func() { svc.RunAnalysis(runCtx, analysisInterval) })
 	return m, nil
+}
+
+// newAnalyzers creates the analyzer plugins
+// A missing executable is not fatal: the files wait to be analyzed until
+// it is installed.
+func newAnalyzers(log *slog.Logger) []analyzer.Analyzer {
+	return []analyzer.Analyzer{}
 }
 
 // scanInterval parses the value of MSERVER_STORAGE_SCAN_INTERVAL. An empty

@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -43,4 +44,16 @@ type Store interface {
 
 	// ApplyScan applies the changes of a scan atomically.
 	ApplyScan(ctx context.Context, location uuid.UUID, c ScanChanges) error
+
+	// PendingAnalysis returns the files modified at or before
+	// stableBefore that have no analysis of the analyzer at this version
+	// for their current size and mtime, ordered by ID.
+	PendingAnalysis(ctx context.Context, analyzer string, version int, stableBefore time.Time) ([]File, error)
+	// SaveAnalysis saves the analysis of a file, replacing the previous
+	// one of the same analyzer.
+	SaveAnalysis(ctx context.Context, a Analysis) error
+	// ListAnalyses returns the successful analyses of the files of a
+	// location that match the current state of the files, ordered by
+	// file ID.
+	ListAnalyses(ctx context.Context, location uuid.UUID) ([]Analysis, error)
 }

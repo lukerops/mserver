@@ -17,12 +17,14 @@ import (
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
+	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
+	"github.com/lukerops/mserver/internal/modules/storage/events"
 	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
 )
 
 // newTestService returns a service over a SQLite database in dataDir,
 // publishing its events on pub.
-func newTestService(t *testing.T, dataDir string, pub queue.Publisher) Service {
+func newTestService(t *testing.T, dataDir string, pub queue.Publisher, analyzers ...analyzer.Analyzer) Service {
 	t.Helper()
 	ctx := t.Context()
 	log := slog.Default()
@@ -41,7 +43,7 @@ func newTestService(t *testing.T, dataDir string, pub queue.Publisher) Service {
 	}
 	ob.Start(ctx)
 	t.Cleanup(ob.Stop)
-	return New(st, ob, log)
+	return New(st, ob, log, analyzers...)
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -261,10 +263,10 @@ func TestScanAll(t *testing.T) {
 
 func TestFileEventsArePublished(t *testing.T) {
 	bus := memory.New()
-	got := make(chan queue.Envelope[FileEvent], 10)
-	for _, typ := range []string{EventFileIndexed, EventFileChanged, EventFileMoved, EventFileRemoved} {
+	got := make(chan queue.Envelope[events.FileEventV1], 10)
+	for _, typ := range []string{events.FileIndexedV1, events.FileChangedV1, events.FileMovedV1, events.FileRemovedV1} {
 		bus.Subscribe(typ, func(_ context.Context, msg queue.Message) error {
-			var e queue.Envelope[FileEvent]
+			var e queue.Envelope[events.FileEventV1]
 			if err := json.Unmarshal(msg.Payload, &e); err != nil {
 				t.Error(err)
 			}
@@ -274,11 +276,11 @@ func TestFileEventsArePublished(t *testing.T) {
 	}
 	s := newTestService(t, t.TempDir(), bus)
 
-	next := func(want, path string) FileEvent {
+	next := func(want, path string) events.FileEventV1 {
 		t.Helper()
 		select {
 		case e := <-got:
-			ok := e.Type == want && e.Source == Source && e.SpecVersion == queue.SpecVersion &&
+			ok := e.Type == want && e.Source == events.Source && e.SpecVersion == queue.SpecVersion &&
 				e.ID != "" && !e.Time.IsZero() && e.Subject == e.Data.FileID.String() &&
 				e.Data.Path == path && e.Data.LocationID != uuid.Nil
 			if !ok {
@@ -287,7 +289,7 @@ func TestFileEventsArePublished(t *testing.T) {
 			return e.Data
 		case <-time.After(5 * time.Second):
 			t.Fatalf("no %s event for %s", want, path)
-			return FileEvent{}
+			return events.FileEventV1{}
 		}
 	}
 
@@ -295,20 +297,20 @@ func TestFileEventsArePublished(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	loc := createLocation(t, s, dir)
 	scan(t, s, loc.ID)
-	indexed := next(EventFileIndexed, "movie.mkv")
+	indexed := next(events.FileIndexedV1, "movie.mkv")
 
 	if err := os.Rename(filepath.Join(dir, "movie.mkv"), filepath.Join(dir, "film.mkv")); err != nil {
 		t.Fatal(err)
 	}
 	scan(t, s, loc.ID)
-	if moved := next(EventFileMoved, "film.mkv"); moved.FileID != indexed.FileID {
+	if moved := next(events.FileMovedV1, "film.mkv"); moved.FileID != indexed.FileID {
 		t.Errorf("moved file ID = %s, want %s", moved.FileID, indexed.FileID)
 	}
 
 	if err := s.DeleteLocation(t.Context(), loc.ID); err != nil {
 		t.Fatal(err)
 	}
-	if removed := next(EventFileRemoved, "film.mkv"); removed.FileID != indexed.FileID {
+	if removed := next(events.FileRemovedV1, "film.mkv"); removed.FileID != indexed.FileID {
 		t.Errorf("removed file ID = %s, want %s", removed.FileID, indexed.FileID)
 	}
 }

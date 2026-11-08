@@ -24,10 +24,17 @@ func (s *service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
 	if err != nil {
 		return err
 	}
+	analyses, err := s.store.ListAnalyses(ctx, id)
+	if err != nil {
+		return err
+	}
 
-	evs := make([]queue.Event, 0, len(files))
+	evs := make([]queue.Event, 0, len(files)+len(analyses))
 	for _, f := range files {
 		evs = append(evs, fileEvent(events.FileIndexedV1, id, f.ID, f.Path))
+	}
+	for _, a := range analyses {
+		evs = append(evs, fileAnalyzedEvent(id, a))
 	}
 	return s.outbox.Publish(ctx, evs...)
 }

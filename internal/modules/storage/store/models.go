@@ -41,6 +41,21 @@ type Sibling struct {
 	Path string
 }
 
+// Analysis is the result of an analyzer on a file, in the state (size and
+// mtime) the file had when it was analyzed.
+type Analysis struct {
+	FileID   uuid.UUID
+	Analyzer string
+	Version  int
+	Size     int64
+	ModTime  time.Time
+	// Result is JSON. It is nil when the analysis failed.
+	Result []byte
+	// Error is empty when the analysis succeeded.
+	Error      string
+	AnalyzedAt time.Time
+}
+
 // ScanChanges is the difference between the index and a location walk.
 type ScanChanges struct {
 	Added   map[uuid.UUID]driver.FileInfo

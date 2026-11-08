@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/modules/storage/events"
 )
 
 func (s *service) CreateLocation(ctx context.Context, req CreateLocationRequest) (Location, error) {
@@ -52,10 +53,10 @@ func (s *service) DeleteLocation(ctx context.Context, id uuid.UUID) error {
 		if err := s.store.DeleteLocation(ctx, id); err != nil {
 			return err
 		}
-		events := make([]queue.Event, len(files))
+		evs := make([]queue.Event, len(files))
 		for i, f := range files {
-			events[i] = fileEvent(EventFileRemoved, id, f.ID, f.Path)
+			evs[i] = fileEvent(events.FileRemovedV1, id, f.ID, f.Path)
 		}
-		return s.outbox.Publish(ctx, events...)
+		return s.outbox.Publish(ctx, evs...)
 	})
 }

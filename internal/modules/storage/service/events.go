@@ -4,34 +4,23 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/modules/storage/events"
 )
 
-// Source is the CloudEvents source of the storage events.
-const Source = "storage"
-
-// Versioned types of the storage events. Events are published on a topic
-// with the same name. Delivery is at-least-once: consumers must tolerate
-// duplicates.
-const (
-	EventFileIndexed = "storage.file.indexed.v1"
-	EventFileChanged = "storage.file.changed.v1"
-	EventFileMoved   = "storage.file.moved.v1"
-	EventFileRemoved = "storage.file.removed.v1"
-)
-
-// FileEvent is the data of every file event. The subject is the file id.
-type FileEvent struct {
-	FileID     uuid.UUID `json:"file_id"`
-	LocationID uuid.UUID `json:"location_id"`
-	// Path is relative to the location. For removed files it is the last
-	// known path.
-	Path string `json:"path"`
-}
-
-func fileEvent(typ string, location, id uuid.UUID, path string) queue.Envelope[FileEvent] {
-	return queue.NewEnvelope(typ, Source, id.String(), FileEvent{
+func fileEvent(typ string, location, id uuid.UUID, path string) queue.Envelope[events.FileEventV1] {
+	return queue.NewEnvelope(typ, events.Source, id.String(), events.FileEventV1{
 		FileID:     id,
 		LocationID: location,
 		Path:       path,
+	})
+}
+
+func fileAnalyzedEvent(location uuid.UUID, a Analysis) queue.Envelope[events.FileAnalyzedEventV1] {
+	return queue.NewEnvelope(events.FileAnalyzedV1, events.Source, a.FileID.String(), events.FileAnalyzedEventV1{
+		FileID:     a.FileID,
+		LocationID: location,
+		Analyzer:   a.Analyzer,
+		Version:    a.Version,
+		Result:     a.Result,
 	})
 }

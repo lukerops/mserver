@@ -9,6 +9,7 @@ import (
 
 	"github.com/lukerops/mserver/internal/infra/queue"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
+	"github.com/lukerops/mserver/internal/modules/storage/events"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
@@ -44,19 +45,20 @@ func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, e
 		return ScanResult{}, fmt.Errorf("%w: scan of location %s failed: %w", ErrUnavailable, id, err)
 	}
 
-	changes, events := diff(id, known, found)
-	if len(events) == 0 {
+	changes, evs := diff(id, known, found)
+	if len(evs) == 0 {
 		return ScanResult{}, nil
 	}
 	if err := s.store.WithTx(ctx, func(ctx context.Context) error {
 		if err := s.store.ApplyScan(ctx, id, changes); err != nil {
 			return err
 		}
-		return s.outbox.Publish(ctx, events...)
+		return s.outbox.Publish(ctx, evs...)
 	}); err != nil {
 		return ScanResult{}, err
 	}
-	return scanResult(events), nil
+	s.kickAnalysis()
+	return scanResult(evs), nil
 }
 
 // diff compares the index of a location with the files found on disk and
@@ -68,9 +70,9 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 			Added:   make(map[uuid.UUID]driver.FileInfo),
 			Updated: make(map[uuid.UUID]driver.FileInfo),
 		}
-		events []queue.Event
-		newer  []driver.FileInfo
-		seen   = make(map[string]bool, len(found))
+		evs   []queue.Event
+		newer []driver.FileInfo
+		seen  = make(map[string]bool, len(found))
 	)
 
 	for _, info := range found {
@@ -81,7 +83,7 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 			newer = append(newer, info)
 		case f.Size != info.Size || !f.ModTime.Equal(info.ModTime) || f.Inode != info.Inode:
 			changes.Updated[f.ID] = info
-			events = append(events, fileEvent(EventFileChanged, location, f.ID, info.Path))
+			evs = append(evs, fileEvent(events.FileChangedV1, location, f.ID, info.Path))
 		}
 	}
 
@@ -98,12 +100,12 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 			seen[old] = true
 			id := known[old].ID
 			changes.Updated[id] = info
-			events = append(events, fileEvent(EventFileMoved, location, id, info.Path))
+			evs = append(evs, fileEvent(events.FileMovedV1, location, id, info.Path))
 			continue
 		}
 		id := newID()
 		changes.Added[id] = info
-		events = append(events, fileEvent(EventFileIndexed, location, id, info.Path))
+		evs = append(evs, fileEvent(events.FileIndexedV1, location, id, info.Path))
 	}
 
 	var removed []string
@@ -116,22 +118,22 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 	for _, p := range removed {
 		id := known[p].ID
 		changes.Removed = append(changes.Removed, id)
-		events = append(events, fileEvent(EventFileRemoved, location, id, p))
+		evs = append(evs, fileEvent(events.FileRemovedV1, location, id, p))
 	}
-	return changes, events
+	return changes, evs
 }
 
-func scanResult(events []queue.Event) ScanResult {
+func scanResult(evs []queue.Event) ScanResult {
 	var r ScanResult
-	for _, e := range events {
+	for _, e := range evs {
 		switch e.Topic() {
-		case EventFileIndexed:
+		case events.FileIndexedV1:
 			r.Added++
-		case EventFileChanged:
+		case events.FileChangedV1:
 			r.Changed++
-		case EventFileMoved:
+		case events.FileMovedV1:
 			r.Moved++
-		case EventFileRemoved:
+		case events.FileRemovedV1:
 			r.Removed++
 		}
 	}

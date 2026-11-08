@@ -7,6 +7,7 @@ type (
 	Location = store.Location
 	File     = store.File
 	Sibling  = store.Sibling
+	Analysis = store.Analysis
 )
 
 // CreateLocationRequest registers a location.

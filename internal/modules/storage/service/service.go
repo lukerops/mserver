@@ -9,10 +9,12 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/lukerops/mserver/internal/infra/outbox"
+	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
 	"github.com/lukerops/mserver/internal/modules/storage/driver/local"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
@@ -36,6 +38,16 @@ type Service interface {
 	// the location and the analyzed event of every analysis of their
 	// current content, so that consumers can rebuild their projections.
 	ResyncLocation(ctx context.Context, id uuid.UUID) error
+
+	// AnalyzePending runs the analyzers on the files they accept that
+	// were not analyzed in their current state and are unmodified for
+	// StableAfter. It returns how many files were analyzed. It stops at
+	// the first failure that is not about the file itself (e.g. the
+	// analyzer is not installed).
+	AnalyzePending(ctx context.Context) (int, error)
+	// RunAnalysis runs AnalyzePending every interval and after every scan
+	// that changes the index, until ctx is canceled.
+	RunAnalysis(ctx context.Context, interval time.Duration)
 
 	GetFile(ctx context.Context, id uuid.UUID) (File, error)
 	// ListFiles lists the files of a location ordered by path.
@@ -62,17 +74,28 @@ var factories = map[string]driver.Factory{
 }
 
 type service struct {
-	store  store.Store
-	outbox *outbox.Outbox
-	log    *slog.Logger
+	store     store.Store
+	outbox    *outbox.Outbox
+	log       *slog.Logger
+	analyzers []analyzer.Analyzer
 
-	// scanMu serializes scans and location deletions.
+	// scanMu serializes the changes of the index: scans, location
+	// deletions, saved analyses and resyncs.
 	scanMu sync.Mutex
+	// analysisKick wakes up RunAnalysis.
+	analysisKick chan struct{}
 }
 
-// New returns the service on st. Events are saved in ob.
-func New(st store.Store, ob *outbox.Outbox, log *slog.Logger) Service {
-	return &service{store: st, outbox: ob, log: log}
+// New returns the service on st. Events are saved in ob. Files are
+// analyzed by the given analyzers.
+func New(st store.Store, ob *outbox.Outbox, log *slog.Logger, analyzers ...analyzer.Analyzer) Service {
+	return &service{
+		store:        st,
+		outbox:       ob,
+		log:          log,
+		analyzers:    analyzers,
+		analysisKick: make(chan struct{}, 1),
+	}
 }
 
 func newID() uuid.UUID { return uuid.Must(uuid.NewV7()) }
