@@ -6,9 +6,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// MediaTypeMovies is the media type of the movie libraries, the only one
-// supported for now.
-const MediaTypeMovies = "movies"
+// Media types of the libraries.
+const (
+	MediaTypeMovies = "movies"
+	// MediaTypeTVShows libraries hold series, cataloged as series, seasons
+	// and episodes.
+	MediaTypeTVShows = "tvshows"
+)
 
 // Library groups locations of the storage holding one type of media.
 type Library struct {
@@ -84,11 +88,13 @@ type Stream struct {
 	SampleRate    int    `json:"sample_rate,omitempty"`
 }
 
-// Sort orders of ListMovies.
+// Sort orders of ListMovies and ListSeries.
 const (
 	SortByTitle = "title"
 	SortByAdded = "added"
 	SortByYear  = "year"
+	// SortByNumber sorts episodes by series, season and episode number.
+	SortByNumber = "number"
 )
 
 // MovieQuery selects a page of movies.
@@ -110,5 +116,126 @@ type MovieQuery struct {
 	Descending bool
 	Offset     int
 	// Limit is the maximum number of movies; zero means no limit.
+	Limit int
+}
+
+// Series groups the seasons of a show. It is a logical entity: it has no
+// folder, and its episodes may come from several folders and locations of
+// its library. Episodes join the series of their library with the same
+// key and year.
+type Series struct {
+	// ID is a UUIDv7 given when the series is created.
+	ID        uuid.UUID
+	LibraryID uuid.UUID
+	Title     string
+	SortTitle string
+	// Key is the normalized title the episodes are matched by.
+	Key string
+	// Year is zero when unknown.
+	Year      int
+	CreatedAt time.Time
+	// SeasonCount and EpisodeCount are filled by the reads of the store and
+	// ignored by the writes.
+	SeasonCount  int
+	EpisodeCount int
+}
+
+// Season groups the episodes of a series with the same season number. It
+// is removed with its last episode.
+type Season struct {
+	// ID is a UUIDv7 given when the season is created.
+	ID        uuid.UUID
+	SeriesID  uuid.UUID
+	LibraryID uuid.UUID
+	// Number is 0 for the specials.
+	Number    int
+	CreatedAt time.Time
+	// SeriesTitle, SeriesYear and EpisodeCount are filled by the reads of
+	// the store and ignored by the writes.
+	SeriesTitle  string
+	SeriesYear   int
+	EpisodeCount int
+}
+
+// Episode is an episode identified from a file of the storage. A file may
+// hold several episodes (Number to EndNumber).
+type Episode struct {
+	// ID is derived from FileID.
+	ID         uuid.UUID
+	LibraryID  uuid.UUID
+	SeriesID   uuid.UUID
+	SeasonID   uuid.UUID
+	FileID     uuid.UUID
+	LocationID uuid.UUID
+	// Path is relative to the location.
+	Path  string
+	Title string
+	// SortKey sorts the episodes of a season without number naturally
+	// ("ep2" before "ep10").
+	SortKey string
+	// Number is nil when unknown. EndNumber is the last episode of a file
+	// holding several episodes, or nil.
+	Number    *int
+	EndNumber *int
+	// MediaInfo is nil until the file is analyzed.
+	MediaInfo *MediaInfo
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	// SeriesTitle, SeriesYear and SeasonNumber are filled by the reads of
+	// the store and ignored by the writes.
+	SeriesTitle  string
+	SeriesYear   int
+	SeasonNumber int
+}
+
+// SeriesQuery selects a page of series.
+type SeriesQuery struct {
+	// LibraryID restricts the series to a library, unless it is uuid.Nil.
+	LibraryID uuid.UUID
+	// IDs restricts the series to these IDs, unless it is empty.
+	IDs []uuid.UUID
+	// Years restricts the series to these years, unless it is empty.
+	Years []int
+	// AudioLanguages and SubtitleLanguages restrict the series to the ones
+	// with an episode with an audio (subtitle) stream in one of these
+	// languages, unless they are empty.
+	AudioLanguages    []string
+	SubtitleLanguages []string
+	// SortBy is SortByTitle (default), SortByAdded or SortByYear.
+	SortBy     string
+	Descending bool
+	Offset     int
+	// Limit is the maximum number of series; zero means no limit.
+	Limit int
+}
+
+// SeasonQuery selects seasons, ordered by series and number.
+type SeasonQuery struct {
+	// LibraryID, SeriesID and IDs restrict the seasons, unless they are
+	// zero.
+	LibraryID uuid.UUID
+	SeriesID  uuid.UUID
+	IDs       []uuid.UUID
+}
+
+// EpisodeQuery selects a page of episodes.
+type EpisodeQuery struct {
+	// LibraryID, SeriesID, SeasonID and IDs restrict the episodes, unless
+	// they are zero.
+	LibraryID uuid.UUID
+	SeriesID  uuid.UUID
+	SeasonID  uuid.UUID
+	IDs       []uuid.UUID
+	// AudioLanguages and SubtitleLanguages restrict the episodes as in
+	// MovieQuery.
+	AudioLanguages    []string
+	SubtitleLanguages []string
+	// SortBy is SortByNumber (default: series title, season number,
+	// episode number, then naturally by file name; episodes without number
+	// last) or SortByAdded.
+	SortBy     string
+	Descending bool
+	Offset     int
+	// Limit is the maximum number of episodes; zero means no limit.
 	Limit int
 }
