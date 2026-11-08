@@ -24,7 +24,7 @@ import (
 
 func TestRoundTrip(t *testing.T) {
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
-	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FakeFFprobe(t, ffmpegtest.Movie, 0))
+	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
 	ctx := t.Context()
 
 	// Both modules on the same server, as in cmd/server.
@@ -55,12 +55,7 @@ func TestRoundTrip(t *testing.T) {
 	old := time.Now().Add(-time.Hour) // stable: analyzed right away
 	for _, name := range []string{"Alien (1979)/Alien.mkv", "Alien (1979)/Alien.en.srt"} {
 		p := filepath.Join(dir, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
-			t.Fatal(err)
-		}
+		writeMedia(t, p)
 		if err := os.Chtimes(p, old, old); err != nil {
 			t.Fatal(err)
 		}
@@ -113,8 +108,8 @@ func TestRoundTrip(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if movie.Title != "Alien" || movie.Year != 1979 || movie.LocationID != loc.ID ||
-		movie.Path != "Alien (1979)/Alien.mkv" || movie.MediaInfo.DurationMs != 7_020_000 ||
-		len(movie.MediaInfo.Streams) != 2 || movie.MediaInfo.Streams[0].Width != 1920 {
+		movie.Path != "Alien (1979)/Alien.mkv" || movie.MediaInfo.DurationMs < ffmpegtest.MovieMinDurationMs ||
+		len(movie.MediaInfo.Streams) != 2 || movie.MediaInfo.Streams[0].Width != ffmpegtest.MovieWidth {
 		t.Errorf("movie = %+v (media %+v)", movie, movie.MediaInfo)
 	}
 	if got, err := l.GetMovie(ctx, movie.ID); err != nil || got.ID != movie.ID || got.MediaInfo == nil {
@@ -163,5 +158,20 @@ func TestRoundTrip(t *testing.T) {
 	}
 	if err := l.DeleteLibrary(ctx, created.ID); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("deleted twice: got %v, want ErrNotFound", err)
+	}
+}
+
+// writeMedia writes at p a real movie (.mkv) or subtitle (.srt).
+func writeMedia(t *testing.T, p string) {
+	t.Helper()
+	if filepath.Ext(p) == ".mkv" {
+		ffmpegtest.WriteMovie(t, p)
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -34,7 +34,7 @@ import (
 func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	t.Helper()
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
-	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FakeFFprobe(t, ffmpegtest.Movie, 0))
+	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
 	ctx := t.Context()
 	dir := t.TempDir()
 
@@ -86,10 +86,9 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 	old := time.Now().Add(-time.Hour)
 	for _, name := range []string{"Heat (1995).mkv", "Heat (1995).en.srt", "Alien (1979)/Alien.mkv"} {
 		p := filepath.Join(media, name)
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(name), 0o644); err != nil {
+		if filepath.Ext(p) == ".mkv" {
+			ffmpegtest.WriteMovie(t, p)
+		} else if err := os.WriteFile(p, []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.Chtimes(p, old, old); err != nil {
@@ -244,18 +243,18 @@ func TestMovieNavigation(t *testing.T) {
 	var movie item
 	c.expect("GET", "/Items/"+heat.Id+"?userId=x", token, nil, &movie, http.StatusOK)
 	if movie.Type != "Movie" || movie.Name != "Heat" || movie.ProductionYear != 1995 ||
-		movie.RunTimeTicks != 7_020_000*10_000 || movie.Container != "mkv" || movie.MediaType != "Video" ||
+		movie.RunTimeTicks < ffmpegtest.MovieMinDurationMs*10_000 || movie.Container != "mkv" || movie.MediaType != "Video" ||
 		movie.UserData.Key != movie.Id || len(movie.MediaSources) != 1 || len(movie.MediaStreams) != 2 {
 		t.Fatalf("movie = %+v", movie)
 	}
 	src := movie.MediaSources[0]
 	if src.Id != movie.Id || src.Protocol != "File" || src.RunTimeTicks != movie.RunTimeTicks ||
-		src.Size != 7_000_000_000 || src.Bitrate != 8_000_000 || !src.SupportsDirectPlay ||
+		src.Size <= 0 || src.Bitrate <= 0 || !src.SupportsDirectPlay ||
 		src.DefaultAudioStreamIndex == nil || *src.DefaultAudioStreamIndex != 1 {
 		t.Errorf("media source = %+v", src)
 	}
 	video, audio := movie.MediaStreams[0], movie.MediaStreams[1]
-	if video.Type != "Video" || video.DisplayTitle != "1080p H264 SDR" || video.Width != 1920 {
+	if video.Type != "Video" || video.DisplayTitle != "1080p H264 SDR" || video.Width != ffmpegtest.MovieWidth {
 		t.Errorf("video = %+v", video)
 	}
 	if audio.Type != "Audio" || audio.DisplayTitle != "English - AAC - Stereo - Default" || audio.Index != 1 {
