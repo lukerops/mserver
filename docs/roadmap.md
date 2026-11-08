@@ -15,18 +15,18 @@ Permitir que o cliente oficial **`jellyfin-web`** se conecte ao `mserver`, auten
 1. **Isolamento Total do Jellyfin e Governança de Escopo (Inegociável):**
    - **Todas as regras de negócio, conceitos, DTOs, unidades (`Ticks`), fluxos e adaptações referentes ao Jellyfin devem estar 100% isoladas dentro do plugin `plugins/api/jellyfin`.**
    - **Nenhum conceito que não foi discutido deve existir fora do plugin do Jellyfin.**
-   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos módulos de domínio, contratos `api/`, infraestrutura ou API própria `internal/server`) deve ser discutido antes.**
+   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos módulos de domínio, contratos REST dos módulos ou infraestrutura) deve ser discutido antes.**
 2. **Arquitetura ECST (Event-Carried State Transfer) completa:**
    - 1 banco SQLite isolado por módulo (`<MSERVER_DATA_DIR>/<modulo>.db`) com migrations embutidas (`go:embed`).
    - Transação propagada pelo contexto (`database.WithTx` / `database.ConnFrom`).
    - `outbox` transacional (`internal/infra/outbox`) gravando eventos na mesma transação de negócio com chave `UUIDv7` monótona.
    - Barramento de eventos em memória (`internal/infra/queue/memory`) trafegando envelopes **CloudEvents 1.0** (`queue.Envelope[T]`).
    - Operação universal `Resync(ctx, escopo)` em todos os módulos produtores de estado (`identity`, `storage`, `library`, `subtitles`).
-3. **Fronteiras estritas entre módulos (`api/`):**
-   - Nenhum módulo importa pacotes internos de outro módulo — apenas contratos `api/` com DTOs serializáveis ("proto-friendly") e erros de domínio tipados.
+3. **Fronteiras estritas entre módulos (HTTP REST):**
+   - Toda comunicação síncrona entre módulos passa pelas rotas REST do módulo de destino, inclusive no monolito (`http://127.0.0.1:<porta>/`). Nenhum módulo importa `service/` ou `store/` de outro: apenas o pacote `client/`, com DTOs JSON e erros tipados.
    - Apenas o módulo `storage` acessa o sistema de arquivos físico (confinado por `os.Root`). O restante do sistema referencia arquivos exclusivamente por `FileID` (`UUIDv7`).
 4. **Separação estrita de Surfaces:**
-   - **`internal/server` (API Própria do Projeto):** voltada à administração do servidor no MVP (qualquer rota ou contrato específico fora do que já foi acordado deve ser discutido antes).
+   - **API do Projeto (APIs REST dos módulos em `/v1`):** cada módulo registra suas rotas na raiz do listener, todas sob o mesmo `/v1` e sem prefixo de módulo (ex.: `/v1/setup`, `/v1/accounts`, `/v1/locations`). Os DTOs carregam o sufixo da versão (`AccountV1`, `LocationV1`). Qualquer rota ou contrato fora do que já foi acordado deve ser discutido antes.
    - **`plugins/api/jellyfin` (Plugin Surface Jellyfin):** concentra **100% das rotas e regras de negócio da API Jellyfin 12.4.0** (incluindo parse de `<username ou email>#<profile>`, `QuickConnect`, tradução para `BaseItemDto`/`MediaSources`/`MediaStreams`/`DeliveryUrl`, avaliação de `DeviceProfile`/`PlaybackInfo`, conversão para `Ticks` e stubs de compatibilidade). Nenhuma rota ou regra do Jellyfin existe fora desse plugin.
    - **`storage` HTTP Data Plane:** expõe apenas `GET /locations/{LocationID}/files/{FileID}` (com suporte a `Range`). Nas rotas de streaming de vídeo e legenda do Jellyfin, o plugin `plugins/api/jellyfin` atua como **proxy reverso em streaming** para o `storage`.
 5. **Autenticação Jellyfin (`CustomAuthentication` — isolada em `plugins/api/jellyfin`):**
@@ -50,22 +50,24 @@ flowchart LR
 
 #### Escopo Técnico
 
-- **Infraestrutura e Bootstrap (`cmd/server`, `internal/infra`, `internal/app`, `internal/server`):**
-  - Carregamento de variáveis de ambiente (`MSERVER_*`) com validação de prefixos.
+- **Infraestrutura e Bootstrap (`cmd/server`, `internal/infra`, `internal/clients`):**
+  - Variáveis de ambiente (`MSERVER_*`) lidas explicitamente pelo nome completo.
   - Logging estruturado (`slog`), abertura de SQLite por módulo com runner de migrations, `database.WithTx`/`ConnFrom`.
-  - `queue` (`Envelope[T]` CloudEvents 1.0 + implementação `queue/memory`), `outbox` transacional (tabela `outbox` + relay assíncrono ordenado por `UUIDv7`), `registry.Registry[T]` e `httpserver`.
-  - Ciclo de vida `app.Module` (`Name`, `Requires`, `Init`, `Start`, `Stop`) e wiring centralizado em `internal/app`.
+  - `queue` (`Envelope[T]` CloudEvents 1.0 + implementação `queue/memory`) e `outbox` transacional (tabela `outbox` + relay assíncrono ordenado por `UUIDv7`).
+  - Módulos com `service/`, `router/`, `store/`, `client/` e `module.go` (apenas `New`/`Close`, expondo um `*http.ServeMux`), sem gerência de dependências. O `cmd/server` cria o `http.Client` central e os clients de todos os módulos e monta os muxes de módulos e surfaces em um único listener (`MSERVER_HTTP_ADDR`), exposto via API gateway/reverse proxy. As rotas dos módulos (`/v1`) exigem `Authorization: Bearer <MSERVER_PRIVATE_TOKEN>` (obrigatório; a inicialização falha sem ele).
 - **Módulo `identity` (`internal/modules/identity`):**
   - Separação entre **Conta (`Account`)** e **Perfil (`Profile`)**:
     - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id/bcrypt), `is_admin`, `disabled`, `created_at`.
     - `Profile`: `profile_id` (UUIDv7), `account_id`, `handle` (identificador curto único na conta), `display_name`, `created_at`.
   - Sessões e tokens de acesso vinculados a `(AccountID, ProfileID, DeviceID)`.
   - Autenticação no domínio recebendo conta (`username` ou `email`), `handle` do perfil e senha de forma estruturada (o parse da string concatenada `<username ou email>#<profile>` pertence exclusivamente ao `plugins/api/jellyfin`).
-  - Emissão de eventos via `outbox` (`identity.account.created.v1`, `identity.account.updated.v1`, `identity.account.deleted.v1`, `identity.profile.created.v1`, `identity.profile.updated.v1`, `identity.profile.deleted.v1`, `identity.session.revoked.v1`) e operação `Resync(ctx)`.
+  - Emissão de eventos via `outbox` (`identity.account.created.v1`, `identity.account.updated.v1`, `identity.account.deleted.v1`, `identity.profile.created.v1`, `identity.profile.updated.v1`, `identity.profile.deleted.v1`, `identity.session.revoked.v1`) e operações `Resync` por contexto (`POST /v1/accounts/resync`, `POST /v1/profiles/resync`).
 
-> **Nota sobre `internal/server`:** Os endpoints administrativos da API própria (`internal/server`) para gerenciamento de contas, perfis, localizações e bibliotecas devem ser discutidos antes de serem adicionados.
+> **Nota sobre a API do projeto:** Na Entrega 1, a única rota administrativa é `POST /v1/setup` do `identity`. Novos endpoints administrativos para gerenciamento de contas, perfis, localizações e bibliotecas devem ser discutidos antes de serem adicionados.
 
 #### Endpoints Jellyfin (`plugins/api/jellyfin`) — Validados no OpenAPI 12.4.0
+
+As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfin`).
 
 | Método        | Rota (`jellyfin-openapi-stable.json`)        | `operationId`                                       | Request / Params                                                                   | Response Schema                                                                                                                | Observação                                                                                         |
 | :------------ | :------------------------------------------- | :-------------------------------------------------- | :--------------------------------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------- |
@@ -85,8 +87,8 @@ flowchart LR
 
 #### Critério de Aceite (Entrega 1)
 
-1. Executar `POST /api/v1/setup` criando a conta `admin` e o perfil `lucas` (e verificar que uma segunda chamada a `/api/v1/setup` retorna `409 Conflict`).
-2. Abrir o `jellyfin-web`, conectar ao servidor, fazer login com `admin#lucas` + senha e carregar a tela inicial do `jellyfin-web` sem erros.
+1. Executar `POST /v1/setup` (com `Authorization: Bearer <MSERVER_PRIVATE_TOKEN>`) criando a conta `admin` e o perfil `lucas` (e verificar que uma segunda chamada a `/v1/setup` retorna `409 Conflict` e que sem o token retorna `401`).
+2. Abrir o `jellyfin-web`, conectar ao servidor em `http://<host>:<porta>/plugins/jellyfin`, fazer login com `admin#lucas` + senha e carregar a tela inicial do `jellyfin-web` sem erros.
 
 ---
 
@@ -250,4 +252,4 @@ Após a conclusão das 5 entregas do MVP, a evolução segue com:
    - Módulo `metadata` (TMDB, TVDB, AniDB, AniSkip, IntroDB) e imagens (`/Items/{itemId}/Images/{imageType}`).
    - Jobs em background no `transcoder` (thumbnails, imagens de capítulos, _trickplay_, detecção de abertura/créditos por `chromaprint`).
    - Pipeline de aquisição (`indexer`, `downloader`, `acquisition`), `translation` e `notification`.
-   - Adaptadores gRPC (`bufconn` / TCP) para execução distribuída.
+   - Execução distribuída: um binário por módulo, com a URL base de cada módulo remoto configurada por variável de ambiente.

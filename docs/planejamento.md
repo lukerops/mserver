@@ -56,10 +56,11 @@ módulos, em uma instância diferente), a partir do mesmo binário.
    síncrono) no caminho crítico de leitura. Todo módulo produtor de estado
    expõe uma operação de `Resync` para republicar seu estado atual na
    outbox, garantindo consistência eventual e reconstrução de projeções.
-8. **Interfaces Go hoje, gRPC amanhã.** A comunicação síncrona entre
-   módulos começa com interfaces Go in-process, mas todo contrato é
-   escrito para permitir a migração para gRPC sem alterar os consumidores
-   (ver seção 4).
+8. **HTTP REST entre módulos desde o primeiro dia.** Toda comunicação
+   síncrona entre módulos passa por HTTP REST, inclusive no monolito
+   (chamadas para `http://127.0.0.1:<porta>/`). O código segue sempre o
+   mesmo caminho, rodando como monolito ou como microserviços (ver seção
+   4).
 
 ## 3. Decisões de arquitetura
 
@@ -67,9 +68,9 @@ módulos, em uma instância diferente), a partir do mesmo binário.
 | ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linguagem                     | Go 1.27.3                                                                                                                                                                                                                              |
 | Modo de execução              | Mesmo binário; módulos habilitados via configuração/variáveis de ambiente                                                                                                                                                              |
-| Comunicação entre módulos     | **Agora:** interfaces Go in-process. **Futuro:** gRPC (`bufconn` no monolito, TCP quando distribuído)                                                                                                                                  |
-| Contratos entre módulos       | **Agora:** pacote `api/` de cada módulo. **Futuro:** `.proto` gerenciados com `buf`                                                                                                                                                    |
-| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` no MVP; `PUT` no pós-MVP); bytes nunca trafegam pelos contratos de RPC/eventos                                                         |
+| Comunicação entre módulos     | **HTTP REST (JSON)** sempre; no monolito via `http://127.0.0.1:<porta>/` usando um `http.Client` central compartilhado                                                                                                                 |
+| Contratos entre módulos       | Rotas e DTOs JSON definidos no pacote `router/` de cada módulo; consumidos apenas pelo pacote `client/` do próprio módulo                                                                                                              |
+| Plano de dados (bytes)        | HTTP servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` no MVP; `PUT` no pós-MVP); bytes nunca trafegam pelos contratos JSON/eventos                                                           |
 | Sincronização de estado       | **ECST (Event-Carried State Transfer)** via eventos duráveis (outbox) + operação `Resync` em todos os módulos produtores para _cold start_ e reconciliação                                                                             |
 | Descoberta de serviços        | Endereços fixos definidos por variáveis de ambiente (quando houver módulos remotos)                                                                                                                                                    |
 | Banco de dados                | Interface de persistência por módulo (`store.Store`); implementação inicial **SQLite**, um arquivo por módulo, migrations embutidas (`go:embed`). Outros bancos entram como novas implementações da interface                          |
@@ -77,7 +78,7 @@ módulos, em uma instância diferente), a partir do mesmo binário.
 | Filas / eventos               | Interface em `internal/infra/queue`; implementação inicial em memória. Eventos duráveis passam pela **outbox no banco do módulo**                                                                                                      |
 | Storage                       | Módulo próprio implementando um VFS; driver inicial: disco local                                                                                                                                                                       |
 | Identificação de arquivos     | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes entram no pós-MVP (seção 7)                                                                   |
-| API do projeto                | Surface do núcleo em `internal/server` (não é plugin)                                                                                                                                                                                  |
+| API do projeto                | As próprias APIs REST dos módulos, servidas juntas em `/v1` (sem surface intermediária)                                                                                                                                                |
 | Processamento multimídia      | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`. Reavaliar (ex.: build próprio) se houver problemas |
 | FFmpeg ausente                | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; no monolito, o servidor falha no startup                                                                             |
 | Integrações de infra externas | Nenhuma por enquanto (sem Redis, NATS, Postgres etc.)                                                                                                                                                                                  |
@@ -91,60 +92,85 @@ módulos, em uma instância diferente), a partir do mesmo binário.
 
 ### 4.1 Estratégia
 
-- **Fase atual:** cada módulo expõe um contrato em Go (pacote `api/`) e os
-  demais módulos dependem apenas dessa interface. O wiring em
-  `internal/app` injeta a implementação local.
-- **Fase futura:** para cada contrato serão criados:
-  - um `.proto` equivalente;
-  - um **adaptador servidor** (gRPC → implementação local);
-  - um **adaptador cliente** (implementa a interface Go chamando gRPC).
+- Cada módulo funciona como uma **mini aplicação HTTP**: registra suas
+  rotas REST **na raiz**, versionadas e agrupadas por contexto (ex.:
+  `/v1/sessions`, `/v1/accounts/{id}`, `/v1/locations`), sem prefixo do
+  módulo, e entrega um `*http.ServeMux` ao `cmd/server`. Todos os módulos
+  compartilham o mesmo `/v1`: cada contexto (recurso) pertence a um único
+  módulo, então as rotas não colidem.
+- No monolito, o `cmd/server` encaminha cada requisição ao primeiro mux de
+  módulo que tiver uma rota compatível (ou `404`). APIs e plugins são
+  montados em caminhos próprios (via `http.StripPrefix`):
 
-  O `internal/app` passa a escolher, por módulo, entre a implementação
-  local, `bufconn` ou TCP. **Nenhum consumidor precisa mudar.**
+  | Montagem             | Conteúdo                  | Exemplo                         |
+  | -------------------- | ------------------------- | ------------------------------- |
+  | `/`                  | APIs de todos os módulos  | `/v1/sessions`, `/v1/locations` |
+  | `/plugins/<plugin>/` | Plugins de API (surfaces) | `/plugins/jellyfin/Users/Me`    |
 
-### 4.2 Regras para facilitar a migração para gRPC
+- **Token das rotas de módulos:** toda requisição às rotas dos módulos
+  (`/v1`) precisa de `Authorization: Bearer <MSERVER_PRIVATE_TOKEN>`
+  (senão `401`). O token é obrigatório (mínimo de 32 caracteres; a
+  inicialização falha sem ele) e é o mesmo em todos os processos. O
+  `http.Client` central o injeta em todas as chamadas, então os pacotes
+  `client/` não lidam com ele. Os plugins de API têm autenticação
+  própria e não usam o token.
+- **Exposição:** o servidor tem um único listener e sempre roda atrás de
+  um API gateway/reverse proxy, que filtra o que fica exposto ao exterior
+  (ex.: apenas `/plugins/<plugin>/`). Listeners separados para rotas
+  públicas e internas ficam para quando houver necessidade.
 
-Toda interface em `api/` (entre módulos **e** de plugins) deve seguir:
+- Todas as rotas de módulos são versionadas (`/v1`).
+  Plugins de API seguem os caminhos do protocolo que implementam (o
+  Jellyfin não tem versão no path); o cliente Jellyfin é configurado com
+  o endereço `http://<host>:<porta>/plugins/jellyfin`.
+- Outros módulos e plugins **nunca** importam o `service` de outro módulo;
+  eles usam o pacote `client/` do módulo de destino, que faz chamadas HTTP.
+- No monolito, o `cmd/server` sobe um único listener, monta os muxes de
+  todos os módulos nele e aponta os clients para
+  `http://127.0.0.1:<porta>`. Distribuído, cada módulo roda em seu
+  próprio binário e os clients apontam para o endereço remoto. **O código
+  dos consumidores é o mesmo nos dois cenários.**
+- Não existe gerência de dependências entre módulos na inicialização: um
+  client é só um endereço; se o módulo de destino estiver indisponível, a
+  chamada falha em tempo de execução como falharia em microserviços.
 
-1. **Assinatura padrão:** `ctx context.Context` como primeiro parâmetro e
-   `error` como último retorno em todos os métodos.
-2. **Apenas tipos serializáveis** em parâmetros e retornos: tipos
-   primitivos, structs, slices, maps com chave `string`, `time.Time`,
-   `time.Duration` e UUIDs. **Proibido:** `func`, `chan`, `io.Reader`/
-   `io.Writer`, `*sql.DB`, interfaces dentro de DTOs ou qualquer handle de
-   recurso.
-3. **Semântica de cópia:** nunca retornar ponteiros para estado interno
-   nem depender de mutação dos argumentos pelo chamado. O comportamento
-   deve ser idêntico ao de uma chamada remota.
-4. **DTOs "proto-friendly":** structs planas e explícitas (sem embedding),
-   enums como tipos com constantes e valor zero `Unspecified`, campos
-   opcionais explícitos.
-5. **Erros tipados:** cada `api/` usa erros de domínio que mapeiam 1:1
-   para códigos gRPC (`NotFound`, `InvalidArgument`, `AlreadyExists`,
-   `PermissionDenied`, `Unauthenticated`, `FailedPrecondition`,
-   `Unavailable`, `Internal`). Os consumidores usam `errors.Is`/`errors.As`,
-   nunca comparação de strings.
-6. **Coleções grandes paginadas** (cursor/limite), nunca slices
-   ilimitados.
-7. **Bytes e paths físicos fora do contrato:** arquivos são referenciados
-   pelo `FileID` (seção 7) e acessados via HTTP do `storage` (ou por
-   caminho local quando `Resolve` permitir). Nenhum contrato recebe ou
-   devolve `io.Reader`/`io.Writer` nem caminhos absolutos. Caminhos só
-   aparecem como **dados relativos a uma localização** (ex.: o caminho de
-   um arquivo dentro de um diretório da biblioteca).
-8. **Contexto de chamada explícito:** identidade da conta/perfil/dispositivo
-   e correlation ID trafegam pelo `ctx` usando helpers do pacote de
-   contrato, mapeáveis para metadata gRPC no futuro.
-9. **Eventos versionados e idempotentes:** eventos usam o envelope
+### 4.2 Regras dos contratos HTTP
+
+Toda rota entre módulos (e as usadas por plugins) deve seguir:
+
+1. **Assinatura padrão no client:** `ctx context.Context` como primeiro
+   parâmetro e `error` como último retorno em todos os métodos.
+2. **Apenas tipos serializáveis em JSON** nos DTOs: tipos primitivos,
+   structs, slices, maps com chave `string`, `time.Time` e UUIDs.
+   **Proibido:** `func`, `chan`, `io.Reader`/`io.Writer`, `*sql.DB`,
+   interfaces dentro de DTOs ou qualquer handle de recurso.
+3. **DTOs pertencem ao `router/`** do módulo e são reutilizados pelo seu
+   `client/`; structs planas e explícitas, campos opcionais explícitos.
+   Como mudam junto com a versão da API, todo DTO leva a versão como
+   sufixo (ex.: `AccountV1`, `SetupRequestV1`, `ErrorV1`).
+4. **Erros tipados:** respostas de erro usam o corpo `{"error": "..."}` e
+   status HTTP mapeados a partir dos erros do service (`400`
+   InvalidArgument, `401` Unauthenticated, `403` PermissionDenied, `404`
+   NotFound, `409` AlreadyExists, `412` FailedPrecondition, `503`
+   Unavailable, `500` Internal). O client converte o status de volta para
+   os erros sentinela do módulo, e os consumidores usam
+   `errors.Is`/`errors.As`, nunca comparação de strings.
+5. **Coleções grandes paginadas** (cursor/limite), nunca listas
+   ilimitadas.
+6. **Bytes e paths físicos fora dos contratos JSON:** arquivos são
+   referenciados pelo `FileID` (seção 7) e acessados via HTTP do `storage`
+   (ou por caminho local quando `Resolve` permitir). Caminhos só aparecem
+   como **dados relativos a uma localização**.
+7. **Eventos versionados e idempotentes:** eventos usam o envelope
    CloudEvents (seção 4.3) com ID, timestamp e tipo versionado;
    consumidores devem tolerar entrega duplicada (at-least-once).
-10. **Sem estado global compartilhado** entre módulos; cada módulo acessa
-    apenas seu próprio banco e recursos.
-11. **Wiring centralizado:** módulos recebem dependências por interface;
-    apenas `internal/app` conhece implementações concretas.
-12. **Testes de contrato:** cada módulo mantém uma suíte de testes escrita
-    contra a interface `api/`. Hoje roda contra a implementação local; no
-    futuro, a mesma suíte roda contra o adaptador gRPC.
+8. **Sem estado global compartilhado** entre módulos; cada módulo acessa
+   apenas seu próprio banco e recursos.
+9. **Wiring centralizado:** apenas `cmd/server` cria o `http.Client`
+   central e os clients de todos os módulos.
+10. **Testes de contrato:** cada `client/` é testado contra o `router/` real
+    do módulo (via `httptest`), garantindo que ida e volta pelo HTTP
+    preservam dados e erros.
 
 ### 4.3 Filas, eventos e outbox
 
@@ -189,7 +215,8 @@ Toda interface em `api/` (entre módulos **e** de plugins) deve seguir:
   - O **service** concentra a regra de negócio: monta os eventos e
     publica pelo outbox.
   - O `module.go` faz o wiring e o ciclo de vida: abre o banco, cria o
-    outbox e o `store` sobre ele e chama `Start`/`Stop` do outbox.
+    outbox e o `store` sobre ele e inicia o relay no `New` (parado no
+    `Close`).
 - **Transação no contexto:** `internal/infra/database` tem `WithTx(ctx,
 db, fn)` e `ConnFrom(ctx, db)`. A transação aberta viaja no `ctx`, e
   toda consulta feita com esse `ctx` no mesmo banco entra nela (store e
@@ -213,7 +240,7 @@ db, fn)` e `ConnFrom(ctx, db)`. A transação aberta viaja no `ctx`, e
   | `specversion` | `1.0`                                                              |
   | `time`        | Momento do evento (UTC)                                            |
   | `subject`     | Recurso principal, ex.: o `FileID`                                 |
-  | `data`        | Payload específico, definido no `api/` do módulo de origem         |
+  | `data`        | Payload específico, definido no `service/` do módulo de origem     |
 
   Consumidores decodificam `queue.Envelope[<api do módulo>.<Evento>]`.
 
@@ -245,7 +272,9 @@ carregando estado (ECST)** em vez de chamadas síncronas em cascata:
   (ex.: `playback` chamando `StartTranscode` no `transcoder` ao iniciar um
   stream HLS, ou módulos gravando arquivos no `storage`).
 - **Operação `Resync` universal:** todo módulo produtor de estado implementa
-  uma operação `Resync(ctx, escopo)` em seu contrato `api/`. Ao ser
+  uma operação de `Resync` por contexto, exposta como rota REST (ex.:
+  `POST /v1/accounts/resync` e `POST /v1/profiles/resync` no `identity`).
+  Ao ser
   invocada, ela lê os registros atuais do banco do módulo e republica os
   eventos de estado na outbox. Como todo consumidor é idempotente (upsert
   por ID), o `Resync` resolve:
@@ -295,17 +324,16 @@ operador escolhe, é backend.**
    (ex.: `api/jellyfin`).
 3. **Hook** — reage a eventos (notificações, webhooks).
 
-> A **API do projeto** não é um plugin: ela é uma surface do núcleo,
-> sempre presente (ver seção 6.1).
+> A **API do projeto** não é um plugin: ela é formada pelas próprias
+> APIs REST dos módulos, sempre presentes (ver seção 6.1).
 
 ### 5.3 Diretrizes
 
 - Plugins podem ser **bundled** e habilitados por padrão.
-- Plugins internos usam **apenas o contrato público** (`api/`) do módulo
-  que estendem. Se precisarem de algo interno, o contrato está incompleto.
+- Plugins internos usam **apenas o contrato público** do módulo que
+  estendem. Se precisarem de algo interno, o contrato está incompleto.
 - Contratos de plugin seguem as mesmas regras da seção 4.2, permitindo
-  plugins externos no futuro (ex.: via `hashicorp/go-plugin`, que usa
-  gRPC).
+  plugins externos no futuro.
 - Registro explícito (`plugins/all.go`), sem depender de `init()`.
 - Cada módulo extensível possui um registro baseado em um `Registry[T]`
   genérico.
@@ -352,7 +380,7 @@ Observações:
 - O wrapper de baixo nível do `ffprobe` (e futuramente `ffmpeg`) fica em
   `internal/infra/ffmpeg` e é usado pelo analisador `ffprobe` do `storage`.
   Ele recebe caminhos/URLs já resolvidos pelo `storage`.
-- **Dependências obrigatórias:** cada módulo valida, no `Init`, as
+- **Dependências obrigatórias:** cada módulo valida, no `New`, as
   dependências externas de que precisa (no MVP, o `storage` valida `ffprobe`).
   Se a validação falhar, o módulo não inicializa e o startup do processo é
   abortado com uma mensagem de erro clara.
@@ -364,19 +392,20 @@ Observações:
 
 - **Regra inegociável de isolamento:**
   - **Todas as regras de negócio, modelos de dados, rotas e adaptações referentes ao Jellyfin devem estar estritamente isoladas dentro do plugin `plugins/api/jellyfin`.**
-  - **Nenhum conceito que não tenha sido discutido deve existir fora de `plugins/api/jellyfin`.** Tudo o que for preciso adicionar fora do plugin do Jellyfin (nos módulos de domínio, na infraestrutura ou na API própria `internal/server`) **deve ser discutido antes**.
-- A **API do projeto** (`internal/server`) faz parte do núcleo e, no MVP, é
-  voltada à administração do servidor (gerenciamento de contas, perfis,
-  localizações do `storage`, bibliotecas da `library` e acionamento de
-  operações administrativas). Seus endpoints e fluxos específicos devem ser
-  discutidos antes da implementação.
+  - **Nenhum conceito que não tenha sido discutido deve existir fora de `plugins/api/jellyfin`.** Tudo o que for preciso adicionar fora do plugin do Jellyfin (nos módulos de domínio, em suas APIs REST ou na infraestrutura) **deve ser discutido antes**.
+- A **API do projeto** é o conjunto das APIs REST dos módulos, servidas
+  juntas em `/v1` (ex.: `POST /v1/setup` do `identity`, `/v1/locations` do
+  `storage`), protegidas pelo `MSERVER_PRIVATE_TOKEN`. Não existe uma surface intermediária: a administração do
+  servidor (contas, perfis, localizações, bibliotecas e operações
+  administrativas) usa diretamente as rotas dos módulos. Novas rotas
+  devem ser discutidas antes da implementação.
 - O **plugin `api/jellyfin`** (`plugins/api/jellyfin`) concentra **100% das
   rotas e regras de compatibilidade com a API do Jellyfin 12.4.0** (descoberta,
   login, parse de `<username ou email>#<profile>`, `QuickConnect`, tradução de
   catálogo para `BaseItemDto`/`MediaSources`/`MediaStreams`/`DeliveryUrl`,
   avaliação de `DeviceProfile` em `PlaybackInfo`, conversão de unidades para
   `Ticks`, sessões de reprodução e streaming). Nenhuma rota ou regra do
-  Jellyfin existe em `internal/server` ou nos demais módulos.
+  Jellyfin existe nos módulos.
 - **Streaming de vídeo e legendas via Proxy no plugin Jellyfin:** o módulo
   `storage` expõe apenas sua rota HTTP interna de dados
   (`GET /locations/{LocationID}/files/{FileID}`, com suporte a `Range`). Nas
@@ -389,11 +418,11 @@ Observações:
   domínio do `mserver`, ela deve ser discutida antes de entrar no contrato de
   um módulo.
 - No modo distribuído, surfaces são "módulos sem banco" que podem rodar
-  em qualquer instância, falando com os demais módulos via gRPC.
+  em qualquer instância, falando com os demais módulos via HTTP REST.
 
 ```mermaid
 flowchart TD
-    REST[API do projeto - Admin] --> ID[identity]
+    REST[API do projeto - /v1 dos módulos] --> ID[identity]
     REST --> STO[storage]
     REST --> LIB[library]
     JF[plugin api/jellyfin] --> ID
@@ -446,13 +475,13 @@ absolutos.
 | `images`     | Storage, automaticamente (de sistema) | Não                      | Sim | Imagens, frames de capítulos e _trickplay_ (pós-MVP)  |
 
 - **Localizações de sistema** (todas as classes exceto `media`):
-  - São criadas pelo storage no `Init`. O driver e o destino de cada uma
+  - São criadas pelo storage no `New`. O driver e o destino de cada uma
     são definidos pelo operador via variáveis de ambiente no formato
     `MSERVER_STORAGE_DRIVER_<DRIVER>_<LOCALIZAÇÃO>_<OPÇÃO>` (ex.:
     `MSERVER_STORAGE_DRIVER_LOCAL_CACHE_DIR=/mnt/ssd/cache`). Sem
     configuração, usam o driver local em `<MSERVER_DATA_DIR>/<classe>`.
     Configurar mais de um driver para a mesma localização é erro no
-    `Init`.
+    `New`.
   - Não podem ser usadas como diretório de biblioteca.
   - Os arquivos são gravados pelos módulos via contrato do storage, que
     devolve o `FileID`.
@@ -813,7 +842,7 @@ Estrutura de pastas reconhecida pela identificação:
     Jellyfin. Tudo o que for preciso adicionar fora de `plugins/api/jellyfin`
     deve ser discutido antes.**
 - Enquanto não houver UI própria, o `jellyfin-web` é a interface de reprodução
-  e a administração é feita via API (`internal/server`, via curl/Bruno).
+  e a administração é feita pelas APIs REST dos módulos (`/v1`, via curl/Bruno).
 
 ### 9.1 Regras de negócio isoladas em `plugins/api/jellyfin`
 
@@ -900,22 +929,17 @@ Estrutura de pastas reconhecida pela identificação:
 ```
 mserver/
 ├── cmd/
-│   └── server/                          # ponto de entrada
+│   └── server/                          # ponto de entrada: http.Client central, clients, módulos e listener
 ├── internal/
-│   ├── app/                             # bootstrap, registro de módulos, ciclo de vida, wiring
-│   ├── server/                          # API do projeto (administração e setup inicial único)
+│   ├── clients/                         # struct Clients com o client HTTP de cada módulo
 │   ├── infra/
-│   │   ├── config/
-│   │   ├── logging/
 │   │   ├── database/                    # transação no contexto (WithTx/ConnFrom)
 │   │   │   └── sqlite/                  # abertura do SQLite e runner de migrations
 │   │   ├── cache/memory/
 │   │   ├── queue/                       # interfaces Publisher/Subscriber e Envelope CloudEvents
 │   │   │   └── memory/                  # barramento em memória
 │   │   ├── outbox/                      # outbox transacional reutilizável (tabela + relay)
-│   │   ├── registry/                    # Registry[T] genérico para plugins
-│   │   ├── ffmpeg/                      # wrapper de ffprobe (e ffmpeg no pós-MVP)
-│   │   └── httpserver/                  # listener HTTP e middlewares compartilhados pelas surfaces
+│   │   └── ffmpeg/                      # wrapper de ffprobe (e ffmpeg no pós-MVP)
 │   └── modules/
 │       ├── storage/                     # VFS, localizações, FileID, analisadores, HTTP Range GET
 │       │   └── driver/
@@ -925,7 +949,6 @@ mserver/
 │       ├── playback/                    # PlaybackInfo (Direct Play), sessões ativas e eventos
 │       └── subtitles/                   # match bidirecional de legendas locais .srt
 ├── plugins/
-│   ├── all.go                           # registro explícito dos plugins
 │   ├── storage/
 │   │   └── ffprobe/                     # analisador ffprobe (streams técnicos)
 │   └── api/
@@ -964,42 +987,39 @@ antecipadamente):
     └── notification/                    # webhook, discord, telegram, ...
 ```
 
-Itens adicionados na migração para gRPC (não criar antecipadamente):
-
-```
-├── proto/mserver/<módulo>/v1/           # contratos .proto
-├── internal/gen/                        # código gerado pelo buf
-├── internal/infra/grpcserver/           # bufconn + TCP
-└── internal/modules/<módulo>/grpc/      # adaptadores servidor/cliente
-```
-
 Plugins seguem sempre a convenção `plugins/<módulo-que-estende>/<nome>`.
 
 ### 10.2 Estrutura interna de um módulo
 
+Cada módulo é uma mini aplicação HTTP, com isolamento total de contexto
+entre as pastas:
+
 ```
 internal/modules/<módulo>/
-├── api/                   # CONTRATO PÚBLICO: interfaces, DTOs, erros, IDs e eventos
-│   ├── service.go         # interface principal do módulo (inclui Resync quando produtor)
-│   ├── events.go          # tópicos e payloads dos eventos emitidos pelo módulo
-│   ├── ids.go             # tipos de IDs fortemente tipados
-│   ├── errors.go          # erros de domínio mapeáveis para gRPC
-│   └── provider.go        # contrato de plugins (apenas se o módulo for extensível)
-├── config.go              # configuração específica do módulo
-├── module.go              # implementa o ciclo de vida (Init/Start/Stop), DB, outbox e subscriptions
-├── service.go             # implementação local de api.Service
-├── events.go              # publicação na outbox e handlers de eventos consumidos (ECST)
-├── resync.go              # republicação idempotente do estado atual na outbox
-├── registry.go            # instância de Registry[T] (apenas se o módulo for extensível)
-├── <módulo>_test.go       # testes contra o contrato api/
-└── store/                 # interface de persistência do módulo (store.Store)
-    ├── store.go
-    └── sqlite/            # implementação SQLite, um arquivo por contexto
-        ├── sqlite.go
-        └── migrations/    # migrations embutidas (go:embed)
+├── service/               # regra de negócio: interface Service, erros, eventos e Resync
+├── router/                # rotas HTTP (/v1/...) e DTOs JSON versionados (ex.: AccountV1)
+├── store/                 # interface de persistência (store.Store), models e erros
+│   └── sqlite/            # implementação SQLite, um arquivo por contexto
+│       └── migrations/    # migrations embutidas (go:embed)
+├── client/                # client HTTP da própria API (usado por outros módulos e surfaces)
+└── module.go              # New/Close: abre o banco, cria store, service e router; expõe o Mux
 ```
 
-O módulo depende apenas da interface `store.Store`; só o `module.go`
+- **`service/`**: contém toda a regra de negócio e define a própria
+  interface `Service`. Não importa nada do `router/`. Pode importar o
+  `store/` do próprio módulo e os `client/` de outros módulos, mas não
+  cria nenhum deles: recebe tudo pronto no `New`.
+- **`router/`**: sem regra de negócio. Só decodifica e valida a entrada,
+  chama o `service`, converte a saída para JSON e mapeia erros para status
+  HTTP. Os DTOs JSON ficam aqui.
+- **`client/`**: importa **apenas** o `router/` do próprio módulo (para
+  reutilizar os DTOs). Recebe um `*http.Client` e a URL base no `New`,
+  reaproveitando as otimizações do client central, e converte respostas
+  de erro de volta para os erros sentinela do módulo.
+- **`module.go`**: cria `store`, `service` e `router` diretamente no
+  `New` e repassa ao `service` apenas os clients de que ele precisa.
+
+O `service` depende apenas da interface `store.Store`; só o `module.go`
 escolhe a implementação. Um novo banco (ex.: Postgres) entra como
 `store/postgres/`, com suas próprias migrations, sem mudar o restante do
 módulo. A interface é de domínio (ex.: `ApplyScan`), e não SQL
@@ -1013,37 +1033,60 @@ separado por comentários.
 
 Aplicadas via lint (`depguard` no golangci-lint ou `go-arch-lint`):
 
-- Um módulo só pode importar o pacote `api/` de outro módulo.
-- `plugins/<módulo>/...` importa apenas o `api/` do módulo que estende
-  (surface plugins podem importar o `api/` de vários módulos).
-- A API do projeto (`internal/server`) importa apenas pacotes `api/` dos
-  módulos, como qualquer surface.
+- Um módulo só pode importar o pacote `client/` de outro módulo (e, por
+  tabela, os DTOs do `router/` dele). Nunca `service/` ou `store/`.
+- `service/` nunca importa `router/`; `client/` só importa o `router/` do
+  próprio módulo.
+- Surfaces (`plugins/api/*`) usam apenas os `client/` dos módulos.
 - Fora do `storage`, nenhum código acessa o sistema de arquivos de mídia
   diretamente (`os.Open` etc.).
 - `internal/infra/...` não importa módulos nem plugins.
-- Apenas `internal/app` importa implementações concretas de módulos.
+- Apenas `cmd/server` importa os `module.go` e cria os clients.
 
-### 10.4 Contrato de módulo (esboço)
+### 10.4 Ciclo de vida de um módulo
+
+Não há interface comum nem gerência de dependências entre módulos: cada
+módulo deve poder rodar sozinho (como microserviço), sem que os outros
+estejam disponíveis no mesmo processo. Um módulo expõe apenas `New` e
+`Close`; toda a inicialização acontece dentro do `New`:
 
 ```go
-type Module interface {
-	Name() string
-	Requires() []string                        // módulos dos quais depende
-	Init(ctx context.Context, deps Deps) error // recebe DB, cache, filas e contratos (api/) de outros módulos
-	Start(ctx context.Context) error
-	Stop(ctx context.Context) error
+hc := &http.Client{...}                          // client central otimizado
+c := clients.Clients{
+	Identity: identityclient.New(hc, baseURL),
+	Storage:  storageclient.New(hc, baseURL),
 }
+m, err := identity.New(ctx, dataDir, bus, c, log) // banco, migrations, outbox, service e router
+defer m.Close()                                   // encerra e libera os recursos
+mux.Handle("/", requireToken(token, modules(m.Mux, ...))) // todos os módulos dividem a raiz (/v1)
+```
+
+O `cmd/server` faz o `net.Listen` antes de criar os módulos, para
+conhecer a URL base (`http://127.0.0.1:<porta>/` no monolito), cria o
+`http.Client` central (que injeta o `MSERVER_PRIVATE_TOKEN`) e os clients
+de todos os módulos e entrega a struct `clients.Clients` completa a cada
+`module.go`. Surfaces recebem a mesma struct e devolvem um
+`*http.ServeMux`:
+
+```go
+jf, err := jellyfin.New(dataDir, c, log) // usa identity, library, playback, watchstate e storage
+mux.Handle("/plugins/jellyfin/", http.StripPrefix("/plugins/jellyfin", jf))
 ```
 
 ### 10.5 Configuração por variáveis de ambiente (proposta)
 
 Convenção: toda variável segue `MSERVER_<MÓDULO>_<OPÇÃO>`. Opções
 globais, que não pertencem a nenhum módulo, usam `MSERVER_<OPÇÃO>`.
+Cada variável é lida explicitamente pelo nome completo (`os.Getenv`),
+sem varredura do ambiente.
 
 ```sh
-MSERVER_MODULES=all                          # ou: storage,identity,library,watchstate,playback,subtitles,transcoder
 MSERVER_DATA_DIR=/var/lib/mserver            # SQLite por módulo: <data>/<módulo>.db
-MSERVER_<MÓDULO>_ADDR=host:porta             # futuro: endereço de módulo remoto
+MSERVER_PRIVATE_TOKEN=<32+ caracteres>       # obrigatório: token das rotas de módulos (/v1)
+MSERVER_HTTP_ADDR=:8096                      # endereço HTTP
+MSERVER_LOG_LEVEL=info                       # debug, info, warn, error
+MSERVER_LOG_FORMAT=text                      # text, json
+MSERVER_<MÓDULO>_URL=http://host:porta       # futuro: URL base de módulo remoto
 
 # Storage
 MSERVER_STORAGE_SCAN_INTERVAL=6h             # varredura periódica (0 desativa)
@@ -1055,9 +1098,6 @@ MSERVER_STORAGE_DRIVER_LOCAL_IMAGES_DIR=/mnt/ssd/images
 MSERVER_STORAGE_CACHE_TTL=24h                # TTL padrão por classe
 MSERVER_STORAGE_TRANSCODES_TTL=1h
 ```
-
-Variáveis desconhecidas com o prefixo de um módulo são rejeitadas no
-`Init`, para que erros de digitação não passem despercebidos.
 
 ## 11. Roadmap
 
@@ -1096,8 +1136,8 @@ Sem ordem definida:
   suporte aos clientes `jellyfin-android` e `jellyfin-tizen`, fluxo
   `QuickConnect`, protocolo `SyncPlay` + WebSocket (`/socket`), e exposição de
   `Chapters` / `MediaSegments` (`GET /MediaSegments/{itemId}`).
-- Migração dos contratos para gRPC (`bufconn`/TCP) e descoberta via
-  variáveis de ambiente.
+- Execução distribuída (um binário por módulo) com a URL base de cada
+  módulo remoto definida por variáveis de ambiente.
 - Analisadores de hash no `storage` (SHA-256, ED2K), com detecção de
   arquivos movidos entre localizações pelo SHA-256, e observação em
   tempo real (`fsnotify`).

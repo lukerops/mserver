@@ -17,13 +17,13 @@ Mesmo quando executado como um único binário (monolito) em uma única máquina
    - Nenhum outro módulo acessa o sistema de arquivos diretamente.
    - Sempre que um módulo produz um novo arquivo (`transcoder`, `subtitles`, `metadata`, `downloader`), ele o grava de forma **síncrona** no `storage` (via contrato/HTTP `PUT`), recebendo o `FileID`. O `storage` jamais busca dados nos outros módulos.
 4. **Consistência Eventual Garantida com `Resync` Universal:**
-   - Todo módulo produtor de estado expõe um método `Resync(ctx, escopo)` em seu contrato `api/`.
+   - Todo módulo produtor de estado expõe operações de `Resync` por contexto como rotas REST (ex.: `POST /v1/accounts/resync` e `POST /v1/profiles/resync` no `identity`).
    - O `Resync` lê os registros atuais do banco do módulo e republica os eventos correspondentes na `outbox`.
    - Como todos os handlers de eventos são **idempotentes** (upsert baseado em ID e timestamp/versão), o `Resync` permite inicializar módulos novos (_cold start_), cadastrar bibliotecas sobre localizações já existentes e reconstruir o banco de qualquer módulo derivado do zero.
 5. **Isolamento Total do Jellyfin e Governança de Conceitos (Regra Inegociável):**
    - **Todas as regras de negócio, conceitos, DTOs, unidades (como `.NET Ticks`), fluxos (`QuickConnect`, parse de `<user>#<profile>`, `DeviceProfile`/`PlaybackInfo`, `MediaSources`/`MediaStreams`/`DeliveryUrl`, `UserData`, protocolo `SyncPlay`) referentes ao Jellyfin devem estar 100% isolados no plugin `plugins/api/jellyfin`.**
    - **Nenhum conceito que não foi discutido deve estar fora do plugin do Jellyfin.**
-   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos contratos `api/`, bancos, eventos ou módulos internos) deve ser discutido antes.**
+   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos contratos REST dos módulos, bancos, eventos ou módulos internos) deve ser discutido antes.**
 
 ---
 
@@ -64,10 +64,10 @@ flowchart TD
     end
 
     %% Chamadas Síncronas (Sólidas)
-    REST & JF -->|RPC Leitura/Comando| ID & LIB & WS & PB
+    REST & JF -->|HTTP Leitura/Comando| ID & LIB & WS & PB
     JF -->|Proxy HTTP Range GET| STO
-    PB -->|RPC Leitura| LIB
-    PB -->|RPC StartTranscode| TR
+    PB -->|HTTP Leitura| LIB
+    PB -->|HTTP StartTranscode| TR
     TR & SUB & META & DL -->|Push Síncrono PUT / Range GET| STO
 
     %% Fluxos Assíncronos por Eventos (Pontilhadas)
@@ -89,12 +89,12 @@ flowchart TD
 
 | Origem → Destino                                                | Tipo                                | Quando e Por Quê                                                                                                                                                        |
 | :-------------------------------------------------------------- | :---------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Surfaces` → `identity`, `library`, `watchstate`, `playback`    | **Síncrona (RPC)**                  | Responder às requisições HTTP dos clientes compondo dados globais (`library`) com dados do perfil (`watchstate` — Pós-MVP).                                             |
+| `Surfaces` → `identity`, `library`, `watchstate`, `playback`    | **Síncrona (HTTP REST)**            | Responder às requisições HTTP dos clientes compondo dados globais (`library`) com dados do perfil (`watchstate` — Pós-MVP).                                             |
 | `plugins/api/jellyfin` → `storage`                              | **Síncrona (HTTP Range Proxy)**     | Proxy reverso em streaming de vídeo e legendas externas (`.srt`) para `GET /locations/{LocationID}/files/{FileID}` no `storage`.                                        |
-| `library` → `storage.Resync`                                    | **Síncrona (RPC)**                  | Disparar a republicação dos eventos `FileIndexed`/`FileAnalyzed` de uma `LocationID` quando uma biblioteca nova é cadastrada.                                           |
-| `playback` → `library`                                          | **Síncrona (RPC)**                  | Obter as informações técnicas consolidadas do item para validar ou iniciar uma sessão de reprodução.                                                                    |
-| `playback` → `transcoder.StartTranscode`                        | **Síncrona (RPC)**                  | Iniciar imediatamente o processo `ffmpeg` para entregar a playlist HLS ao player sem latência de fila.                                                                  |
-| `transcoder`, `subtitles`, `metadata`, `downloader` → `storage` | **Síncrona (RPC / HTTP)**           | Gravar novos arquivos ou ler bytes (`Range`) no VFS.                                                                                                                    |
+| `library` → `storage.Resync`                                    | **Síncrona (HTTP REST)**            | Disparar a republicação dos eventos `FileIndexed`/`FileAnalyzed` de uma `LocationID` quando uma biblioteca nova é cadastrada.                                           |
+| `playback` → `library`                                          | **Síncrona (HTTP REST)**            | Obter as informações técnicas consolidadas do item para validar ou iniciar uma sessão de reprodução.                                                                    |
+| `playback` → `transcoder.StartTranscode`                        | **Síncrona (HTTP REST)**            | Iniciar imediatamente o processo `ffmpeg` para entregar a playlist HLS ao player sem latência de fila.                                                                  |
+| `transcoder`, `subtitles`, `metadata`, `downloader` → `storage` | **Síncrona (HTTP)**                 | Gravar novos arquivos ou ler bytes (`Range`) no VFS.                                                                                                                    |
 | **Todas as demais interações entre módulos**                    | **Assíncrona (Eventos via Outbox)** | Indexação, `ffprobe`, catálogo, legendas, metadados, tradução, imagens, _trickplay_, controle `SIGSTOP`/`SIGCONT` do transcode, `watchstate`, aquisição e notificações. |
 
 ---
@@ -105,7 +105,7 @@ flowchart TD
 
 - **Responsabilidade:** Único dono do sistema de arquivos (VFS), gerenciando localizações (`media` no MVP; `cache`, `transcodes`, `images` no pós-MVP), atribuindo `FileID` (UUIDv7) estável (com detecção de move por `inode` e, no futuro, por hash), servindo bytes via HTTP (`GET /locations/{LocationID}/files/{FileID}` com `Range` no MVP; `PUT` no pós-MVP) e executando analisadores físicos sobre os arquivos (`ffprobe` no MVP; `sha256` e `ed2k` no pós-MVP).
 - **Dados próprios (SQLite):** `locations`, `files` (`file_id`, `location_id`, `path`, `size`, `mtime`, `inode`, `expires_at`), `file_analyses` (`file_id`, `analyzer`, `version`, `payload_json`).
-- **Projeções de outros módulos:** Nenhuma (`Requires() = []`).
+- **Projeções de outros módulos:** Nenhuma.
 - **Comunicação:**
   - Recebe chamadas síncronas de escrita/leitura (`Resolve`, HTTP `GET`/`PUT`) e `Resync(LocationID)`.
   - Emite eventos `storage.file.*` sempre que arquivos são indexados, alterados, movidos, removidos ou analisados.
@@ -202,7 +202,7 @@ flowchart TD
 ### 3.11 `notification` (Notificações e Webhooks — Futuro)
 
 - **Responsabilidade:** Reagir aos eventos relevantes de todos os módulos e disparar alertas externos (Webhooks, Discord, Telegram, Push).
-- **Projeções locais (via ECST):** Projeção mínima de contas/perfis (`identity`) e títulos de itens (`library`) para formatar notificações sem fazer RPC.
+- **Projeções locais (via ECST):** Projeção mínima de contas/perfis (`identity`) e títulos de itens (`library`) para formatar notificações sem chamadas síncronas.
 
 ---
 
@@ -215,9 +215,9 @@ Todos os eventos trafegam no envelope **CloudEvents 1.0** (`queue.Envelope[T]`):
 - `type`: nome versionado do evento (também usado como tópico da fila)
 - `time`: timestamp UTC
 - `subject`: ID do recurso principal ao qual o evento se refere
-- `data`: payload JSON tipado definido no `api/` do módulo de origem
+- `data`: payload JSON tipado definido no `service/` do módulo de origem
 
-> **Importante:** Nenhum conceito ou unidade do Jellyfin (como `Ticks`, `UserData`, `SyncPlay` ou `MediaSources`) deve fazer parte dos payloads de eventos internos. Além disso, os campos exatos de `data` de cada módulo ainda não implementado são uma referência inicial e **devem ser discutidos antes** de serem definidos em código no pacote `api/` do respectivo módulo.
+> **Importante:** Nenhum conceito ou unidade do Jellyfin (como `Ticks`, `UserData`, `SyncPlay` ou `MediaSources`) deve fazer parte dos payloads de eventos internos. Além disso, os campos exatos de `data` de cada módulo ainda não implementado são uma referência inicial e **devem ser discutidos antes** de serem definidos em código no pacote `service/` do respectivo módulo.
 
 ---
 
