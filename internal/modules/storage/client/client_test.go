@@ -2,6 +2,8 @@ package client_test
 
 import (
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -89,8 +91,47 @@ func TestRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "file://" + filepath.ToSlash(filepath.Join(dir, "movie.mkv")); u != want {
+	if want := srv.URL + "/locations/" + loc.ID.String() + "/files/" + movie.ID.String(); u != want {
 		t.Errorf("Resolve = %q, want %q", u, want)
+	}
+
+	// The resolved URL serves the content, with ranges.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	req.Header.Set("Range", "bytes=2-")
+	res, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusPartialContent || string(body) != "vie.mkv" ||
+		res.Header.Get("Content-Type") != "video/x-matroska" || res.Header.Get("Accept-Ranges") != "bytes" {
+		t.Errorf("GET %s = %d %q %v", u, res.StatusCode, body, res.Header)
+	}
+
+	res, err = c.OpenFile(ctx, http.MethodGet, loc.ID, movie.ID, http.Header{
+		"Range":         {"bytes=0-4"},
+		"Authorization": {"not forwarded"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusPartialContent || string(body) != "movie" ||
+		res.Header.Get("Content-Range") != "bytes 0-4/9" {
+		t.Errorf("OpenFile range = %d %q %v", res.StatusCode, body, res.Header)
+	}
+	res, err = c.OpenFile(ctx, http.MethodHead, loc.ID, movie.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.ContentLength != 9 || res.Header.Get("Last-Modified") == "" {
+		t.Errorf("OpenFile HEAD = %d %d %v", res.StatusCode, res.ContentLength, res.Header)
+	}
+	if _, err := c.OpenFile(ctx, http.MethodGet, uuid.Must(uuid.NewV7()), movie.ID, nil); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("OpenFile in another location: got %v, want ErrNotFound", err)
 	}
 
 	if _, err := c.GetFile(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, client.ErrNotFound) {

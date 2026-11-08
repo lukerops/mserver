@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -241,8 +242,48 @@ func TestSiblingsAndResolve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "file://" + filepath.ToSlash(filepath.Join(dir, "Movie/Movie.mkv")); u != want {
+	if want := "/locations/" + loc.ID.String() + "/files/" + ids["Movie/Movie.mkv"].String(); u != want {
 		t.Errorf("Resolve = %q, want %q", u, want)
+	}
+}
+
+func TestOpenFile(t *testing.T) {
+	s := newTestService(t, t.TempDir(), memory.New())
+	dir := filepath.Join(t.TempDir(), "media")
+	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
+	writeFile(t, filepath.Join(dir, "gone.mkv"), "gone")
+	loc := createLocation(t, s, dir)
+	scan(t, s, loc.ID)
+	ids := files(t, s, loc.ID)
+
+	f, content, err := s.OpenFile(t.Context(), loc.ID, ids["movie.mkv"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := io.ReadAll(content)
+	content.Close()
+	if err != nil || string(b) != "movie" || f.Path != "movie.mkv" {
+		t.Fatalf("OpenFile = %+v, %q, %v", f, b, err)
+	}
+
+	if _, _, err := s.OpenFile(t.Context(), newID(), ids["movie.mkv"]); !errors.Is(err, ErrNotFound) {
+		t.Errorf("other location: got %v, want ErrNotFound", err)
+	}
+	if _, _, err := s.OpenFile(t.Context(), loc.ID, newID()); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown file: got %v, want ErrNotFound", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "gone.mkv")); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.OpenFile(t.Context(), loc.ID, ids["gone.mkv"]); !errors.Is(err, ErrNotFound) {
+		t.Errorf("removed file: got %v, want ErrNotFound", err)
+	}
+	// An inaccessible location (e.g. an unmounted disk) is temporary.
+	if err := os.Rename(dir, dir+".off"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.OpenFile(t.Context(), loc.ID, ids["movie.mkv"]); !errors.Is(err, ErrUnavailable) {
+		t.Errorf("inaccessible location: got %v, want ErrUnavailable", err)
 	}
 }
 

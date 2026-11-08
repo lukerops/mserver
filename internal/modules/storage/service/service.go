@@ -55,8 +55,15 @@ type Service interface {
 	// ListSiblings lists the other indexed files in the same directory
 	// (e.g. external subtitles).
 	ListSiblings(ctx context.Context, id uuid.UUID) ([]Sibling, error)
-	// Resolve returns a "file://" URL to read the file from.
+	// Resolve returns the path of the content of the file in the data
+	// plane of the storage ("/locations/{location}/files/{file}"), to be
+	// joined to the address of the storage.
 	Resolve(ctx context.Context, id uuid.UUID) (string, error)
+	// OpenFile opens the content of a file of a location. The caller
+	// closes it. It returns ErrNotFound if the file is not indexed in the
+	// location or is missing from it, and ErrUnavailable if the location
+	// is not accessible.
+	OpenFile(ctx context.Context, location, id uuid.UUID) (File, driver.File, error)
 }
 
 // Errors of the service. They are wrapped with context: use errors.Is.

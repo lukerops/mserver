@@ -1,8 +1,9 @@
 // Package router exposes the storage service as a REST API. Routes are
 // versioned (/v1) and registered at the root, which is shared with the
-// other modules. The router only converts HTTP to service calls and back;
-// the exported types are the JSON bodies of the API, suffixed with the
-// version they belong to (e.g. LocationV1).
+// other modules; the content of the files is served apart, at
+// /locations/{location_id}/files/{file_id}. The router only converts HTTP
+// to service calls and back; the exported types are the JSON bodies of
+// the API, suffixed with the version they belong to (e.g. LocationV1).
 package router
 
 import (
@@ -36,6 +37,10 @@ func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 	mux.HandleFunc("GET /v1/files/{id}", rt.getFile)
 	mux.HandleFunc("GET /v1/files/{id}/siblings", rt.listSiblings)
 	mux.HandleFunc("GET /v1/files/{id}/resolve", rt.resolve)
+
+	// The data plane: the content of the files. It is not versioned, as
+	// it is plain HTTP. GET also serves HEAD.
+	mux.HandleFunc("GET /locations/{location_id}/files/{file_id}", rt.fileContent)
 	return mux
 }
 

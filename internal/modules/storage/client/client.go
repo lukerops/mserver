@@ -109,11 +109,45 @@ func (c *Client) ListSiblings(ctx context.Context, id uuid.UUID) ([]router.Sibli
 	return resp.Siblings, err
 }
 
-// Resolve returns a "file://" URL to read the file from.
+// Resolve returns the URL to read the content of the file from, on the
+// address of the storage: "http://<host>/locations/{location_id}/files/{file_id}".
 func (c *Client) Resolve(ctx context.Context, id uuid.UUID) (string, error) {
 	var resp router.ResolveResponseV1
 	err := c.do(ctx, http.MethodGet, "/v1/files/"+id.String()+"/resolve", nil, &resp)
 	return resp.URL, err
+}
+
+// forwardedHeaders are the request headers OpenFile sends to the storage:
+// the ones of range and conditional requests.
+var forwardedHeaders = []string{"Range", "If-Range", "If-Modified-Since", "If-None-Match"}
+
+// OpenFile requests the content of a file of a location, with method GET
+// or HEAD. Only the range and conditional headers of h are sent. The
+// caller closes the body of the response, whose status may be 200, 206,
+// 304 or 416. It returns ErrInvalidArgument, ErrNotFound or ErrUnavailable
+// (or an *Error for other server errors) instead of the response.
+func (c *Client) OpenFile(ctx context.Context, method string, location, id uuid.UUID, h http.Header) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method,
+		c.baseURL+"/locations/"+location.String()+"/files/"+id.String(), nil)
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
+	}
+	for _, name := range forwardedHeaders {
+		if v := h.Values(name); len(v) > 0 {
+			req.Header[name] = v
+		}
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("storage: %w", err)
+	}
+	switch {
+	case resp.StatusCode == http.StatusBadRequest, resp.StatusCode == http.StatusNotFound,
+		resp.StatusCode >= http.StatusInternalServerError:
+		defer resp.Body.Close()
+		return nil, responseError(resp)
+	}
+	return resp, nil
 }
 
 // do sends in as the JSON body (if not nil) and decodes the response into
@@ -141,25 +175,7 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
-		var e router.ErrorV1
-		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&e)
-		if e.Error == "" {
-			e.Error = resp.Status
-		}
-		err := &Error{Status: resp.StatusCode, Message: e.Error}
-		switch resp.StatusCode {
-		case http.StatusBadRequest:
-			err.kind = ErrInvalidArgument
-		case http.StatusNotFound:
-			err.kind = ErrNotFound
-		case http.StatusConflict:
-			err.kind = ErrAlreadyExists
-		case http.StatusPreconditionFailed:
-			err.kind = ErrFailedPrecondition
-		case http.StatusServiceUnavailable:
-			err.kind = ErrUnavailable
-		}
-		return err
+		return responseError(resp)
 	}
 	if out == nil {
 		return nil
@@ -168,4 +184,27 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 		return fmt.Errorf("storage: decode response: %w", err)
 	}
 	return nil
+}
+
+// responseError reads the error of a response.
+func responseError(resp *http.Response) error {
+	var e router.ErrorV1
+	_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&e)
+	if e.Error == "" {
+		e.Error = resp.Status
+	}
+	err := &Error{Status: resp.StatusCode, Message: e.Error}
+	switch resp.StatusCode {
+	case http.StatusBadRequest:
+		err.kind = ErrInvalidArgument
+	case http.StatusNotFound:
+		err.kind = ErrNotFound
+	case http.StatusConflict:
+		err.kind = ErrAlreadyExists
+	case http.StatusPreconditionFailed:
+		err.kind = ErrFailedPrecondition
+	case http.StatusServiceUnavailable:
+		err.kind = ErrUnavailable
+	}
+	return err
 }

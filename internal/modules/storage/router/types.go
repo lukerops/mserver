@@ -64,7 +64,9 @@ type SiblingListV1 struct {
 	Siblings []SiblingV1 `json:"siblings"`
 }
 
-// ResolveResponseV1 holds the "file://" URL to read a file from.
+// ResolveResponseV1 holds the URL to read the content of a file from:
+// "http://<storage address>/locations/{location_id}/files/{file_id}",
+// which accepts GET and HEAD with Range.
 type ResolveResponseV1 struct {
 	URL string `json:"url"`
 }
