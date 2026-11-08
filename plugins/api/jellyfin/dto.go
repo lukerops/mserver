@@ -196,7 +196,8 @@ func (p *plugin) userDto(account identityrouter.AccountV1, profile identityroute
 			EnableNextEpisodeAutoPlay:  true,
 		},
 		Policy: UserPolicy{
-			IsAdministrator:                  account.IsAdmin,
+			// To Jellyfin evereone isn't admin
+			IsAdministrator:                  false,
 			IsDisabled:                       account.Disabled,
 			BlockedTags:                      []string{},
 			AllowedTags:                      []string{},

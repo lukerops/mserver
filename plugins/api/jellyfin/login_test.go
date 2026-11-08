@@ -139,7 +139,7 @@ func TestLoginAndHome(t *testing.T) {
 	c.expect("POST", "/Users/AuthenticateByName", authHeader,
 		map[string]string{"Username": "ADMIN#Lucas", "Pw": password}, &auth, http.StatusOK)
 	if auth.AccessToken == "" || auth.ServerId != public.Id || auth.User.ServerId != public.Id ||
-		auth.User.Name != "Lucas" || len(auth.User.Id) != 32 || !auth.User.Policy.IsAdministrator ||
+		auth.User.Name != "Lucas" || len(auth.User.Id) != 32 || auth.User.Policy.IsAdministrator ||
 		auth.SessionInfo.UserId != auth.User.Id || auth.SessionInfo.DeviceId != "dev-1" || auth.SessionInfo.Client != "Jellyfin Web" {
 		t.Fatalf("auth = %+v", auth)
 	}

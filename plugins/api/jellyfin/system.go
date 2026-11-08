@@ -31,7 +31,7 @@ func (p *plugin) publicInfo(r *http.Request) PublicSystemInfo {
 	}
 	return PublicSystemInfo{
 		// The address the client used to reach the plugin.
-		LocalAddress:           scheme + "://" + r.Host + basePath(r),
+		LocalAddress:           scheme + "://" + r.Host + "/plugins/jellyfin",
 		ServerName:             serverName,
 		Version:                version,
 		ProductName:            productName,

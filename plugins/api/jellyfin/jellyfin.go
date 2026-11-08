@@ -56,29 +56,29 @@ func New(dataDir string, c clients.Clients, log *slog.Logger) (*http.ServeMux, e
 	p := &plugin{identity: c.Identity, log: log, serverID: strings.TrimSpace(string(b))}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /System/Info/Public", p.publicSystemInfo)
-	mux.HandleFunc("GET /System/Info", p.systemInfo)
-	mux.HandleFunc("GET /System/Ping", p.ping)
-	mux.HandleFunc("POST /System/Ping", p.ping)
+	mux.HandleFunc("GET /system/info/public", p.publicSystemInfo)
+	mux.HandleFunc("GET /system/info", p.systemInfo)
+	mux.HandleFunc("GET /system/ping", p.ping)
+	mux.HandleFunc("POST /system/ping", p.ping)
 
-	mux.HandleFunc("GET /Branding/Configuration", p.brandingConfiguration)
-	mux.HandleFunc("GET /Branding/Css", p.brandingCss)
-	mux.HandleFunc("GET /Branding/Css.css", p.brandingCss)
-	mux.HandleFunc("GET /QuickConnect/Enabled", p.quickConnectEnabled)
+	mux.HandleFunc("GET /branding/configuration", p.brandingConfiguration)
+	mux.HandleFunc("GET /branding/css", p.brandingCss)
+	mux.HandleFunc("GET /branding/css.css", p.brandingCss)
+	mux.HandleFunc("GET /quickconnect/enabled", p.quickConnectEnabled)
 
-	mux.HandleFunc("GET /Users/Public", p.publicUsers)
-	mux.HandleFunc("POST /Users/AuthenticateByName", p.authenticateByName)
-	mux.HandleFunc("GET /Users/Me", p.currentUser)
-	mux.HandleFunc("GET /Users/{userId}", p.userByID)
+	mux.HandleFunc("GET /users/public", p.publicUsers)
+	mux.HandleFunc("POST /users/authenticatebyname", p.authenticateByName)
+	mux.HandleFunc("GET /users/me", p.currentUser)
+	mux.HandleFunc("GET /users/{userId}", p.userByID)
 
-	mux.HandleFunc("POST /Sessions/Capabilities/Full", p.capabilities)
-	mux.HandleFunc("POST /Sessions/Logout", p.logout)
+	mux.HandleFunc("POST /sessions/capabilities/full", p.capabilities)
+	mux.HandleFunc("POST /sessions/logout", p.logout)
 
-	mux.HandleFunc("GET /DisplayPreferences/{displayPreferencesId}", p.displayPreferences)
-	mux.HandleFunc("POST /DisplayPreferences/{displayPreferencesId}", p.updateDisplayPreferences)
+	mux.HandleFunc("GET /displaypreferences/{displayPreferencesId}", p.displayPreferences)
+	mux.HandleFunc("POST /displaypreferences/{displayPreferencesId}", p.updateDisplayPreferences)
 
-	mux.HandleFunc("GET /UserViews", p.userViews)
-	mux.HandleFunc("GET /UserItems/Resume", p.resumeItems)
+	mux.HandleFunc("GET /userviews", p.userViews)
+	mux.HandleFunc("GET /useritems/resume", p.resumeItems)
 
 	// Every response allows any origin: jellyfin-web is often served from
 	// another origin.
@@ -93,6 +93,12 @@ func New(dataDir string, c clients.Clients, log *slog.Logger) (*http.ServeMux, e
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+
+		// Jellyfin uses case-insensitive path
+		r.URL.Path = strings.ToLower(r.URL.Path)
+		r.URL.RawPath = strings.ToLower(r.URL.RawPath)
+
+		log.Debug(r.URL.String())
 		mux.ServeHTTP(w, r)
 	})
 	return cors, nil
