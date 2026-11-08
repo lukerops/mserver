@@ -43,32 +43,42 @@ type parsedMovie struct {
 	Year int
 }
 
+// mainVideo returns the name of the file at p without its extension, or
+// false if it is not a video or is an extra (trailer, sample...).
+func mainVideo(p string) (string, bool) {
+	ext := path.Ext(p)
+	if !videoExtensions[strings.ToLower(ext)] {
+		return "", false
+	}
+	name := strings.TrimSuffix(path.Base(p), ext)
+	lower := strings.ToLower(name)
+	if lower == "sample" || lower == "trailer" {
+		return "", false
+	}
+	for _, suffix := range extraSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return "", false
+		}
+	}
+	for d := range strings.SplitSeq(path.Dir(p), "/") {
+		if extraDirs[strings.ToLower(d)] {
+			return "", false
+		}
+	}
+	return name, true
+}
+
 // parseMovie identifies a movie from the path of a file relative to its
 // location, e.g. "Movies/Alien (1979)/Alien.mkv" or
 // "Alien.1979.1080p.BluRay.x264.mkv". It returns false for files that are
 // not movies (not videos, or extras such as trailers). Years after maxYear
 // are not years (e.g. "Blade Runner 2049").
 func parseMovie(p string, maxYear int) (parsedMovie, bool) {
-	ext := path.Ext(p)
-	if !videoExtensions[strings.ToLower(ext)] {
+	name, ok := mainVideo(p)
+	if !ok {
 		return parsedMovie{}, false
-	}
-	name := strings.TrimSuffix(path.Base(p), ext)
-	lower := strings.ToLower(name)
-	if lower == "sample" || lower == "trailer" {
-		return parsedMovie{}, false
-	}
-	for _, suffix := range extraSuffixes {
-		if strings.HasSuffix(lower, suffix) {
-			return parsedMovie{}, false
-		}
 	}
 	dir := path.Dir(p)
-	for d := range strings.SplitSeq(dir, "/") {
-		if extraDirs[strings.ToLower(d)] {
-			return parsedMovie{}, false
-		}
-	}
 
 	// A folder named "Title (Year)" names the movie better than the file
 	// inside it (e.g. "Alien (1979)/movie.mkv").
