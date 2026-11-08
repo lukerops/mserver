@@ -1,0 +1,30 @@
+info:
+  name: delete
+  type: http
+  seq: 2
+
+http:
+  method: DELETE
+  url: "{{BaseURL}}/v1/libraries/{{LibraryID}}"
+  auth: inherit
+
+runtime:
+  variables:
+    - name: LibraryID
+      value: 01a1bb6c-431b-7028-9a15-31abb60b2081
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.id
+        method: jsonq
+      variable:
+        name: LibraryID
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
