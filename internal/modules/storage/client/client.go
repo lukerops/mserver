@@ -82,6 +82,13 @@ func (c *Client) ScanLocation(ctx context.Context, id uuid.UUID) (router.ScanRes
 	return resp, err
 }
 
+// ResyncLocation publishes again the indexed event of every file of the
+// location and the analyzed event of every analysis of their current
+// content, so that consumers can rebuild their projections.
+func (c *Client) ResyncLocation(ctx context.Context, id uuid.UUID) error {
+	return c.do(ctx, http.MethodPost, "/v1/locations/"+id.String()+"/resync", nil, nil)
+}
+
 // ListFiles lists the files of a location ordered by path.
 func (c *Client) ListFiles(ctx context.Context, location uuid.UUID) ([]router.FileV1, error) {
 	var resp router.FileListV1

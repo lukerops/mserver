@@ -30,6 +30,7 @@ func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 	mux.HandleFunc("GET /v1/locations/{id}", rt.getLocation)
 	mux.HandleFunc("DELETE /v1/locations/{id}", rt.deleteLocation)
 	mux.HandleFunc("POST /v1/locations/{id}/scan", rt.scanLocation)
+	mux.HandleFunc("POST /v1/locations/{id}/resync", rt.resyncLocation)
 	mux.HandleFunc("GET /v1/locations/{id}/files", rt.listFiles)
 
 	mux.HandleFunc("GET /v1/files/{id}", rt.getFile)

@@ -32,6 +32,10 @@ type Service interface {
 	ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, error)
 	// ScanAll scans every location, logging failures.
 	ScanAll(ctx context.Context)
+	// ResyncLocation publishes again the indexed event of every file of
+	// the location and the analyzed event of every analysis of their
+	// current content, so that consumers can rebuild their projections.
+	ResyncLocation(ctx context.Context, id uuid.UUID) error
 
 	GetFile(ctx context.Context, id uuid.UUID) (File, error)
 	// ListFiles lists the files of a location ordered by path.

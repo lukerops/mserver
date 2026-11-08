@@ -78,6 +78,18 @@ func (rt *router) scanLocation(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (rt *router) resyncLocation(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := rt.svc.ResyncLocation(r.Context(), id); err != nil {
+		rt.writeError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (rt *router) listFiles(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {

@@ -104,6 +104,13 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("unknown driver: got %v, want ErrInvalidArgument", err)
 	}
 
+	if err := c.ResyncLocation(ctx, loc.ID); err != nil {
+		t.Errorf("ResyncLocation: %v", err)
+	}
+	if err := c.ResyncLocation(ctx, uuid.Must(uuid.NewV7())); !errors.Is(err, client.ErrNotFound) {
+		t.Errorf("resync of unknown location: got %v, want ErrNotFound", err)
+	}
+
 	if err := c.DeleteLocation(ctx, loc.ID); err != nil {
 		t.Fatal(err)
 	}
