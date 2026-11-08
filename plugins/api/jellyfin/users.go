@@ -1,0 +1,151 @@
+package jellyfin
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+
+	"github.com/google/uuid"
+
+	identity "github.com/lukerops/mserver/internal/modules/identity/client"
+	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
+)
+
+// publicUsers lists no user, so that jellyfin-web shows the manual login
+// form: profiles are not public.
+func (p *plugin) publicUsers(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, []UserDto{})
+}
+
+// authenticateByName logs in with "<login>#<profile>": it authenticates the
+// account, then selects the profile on the same session. The profile is
+// required.
+func (p *plugin) authenticateByName(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	var body AuthenticateUserByName
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	login, handle, ok := splitUsername(body.Username)
+	if !ok {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	a := requestAuthorization(r)
+	res, err := p.identity.Authenticate(ctx, identityrouter.AuthenticateRequestV1{
+		Login:    login,
+		Password: body.Pw,
+		Device: identityrouter.DeviceInfoV1{
+			Identifier: a.DeviceID,
+			Name:       a.Device,
+			Client:     a.Client,
+			Version:    a.Version,
+		},
+	})
+	switch {
+	case errors.Is(err, identity.ErrUnauthenticated):
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	case errors.Is(err, identity.ErrInvalidArgument):
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	case err != nil:
+		p.log.ErrorContext(ctx, "jellyfin: authenticate", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	c, err := p.selectProfile(ctx, res.Session, handle)
+	if err != nil {
+		// The account session must not outlive a failed login.
+		if err := p.identity.RevokeSession(context.WithoutCancel(ctx), res.Session.ID); err != nil {
+			p.log.ErrorContext(ctx, "jellyfin: revoke session", "session", res.Session.ID, "error", err)
+		}
+		if errors.Is(err, identity.ErrNotFound) {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		p.log.ErrorContext(ctx, "jellyfin: select profile", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, AuthenticationResult{
+		User:        p.userDto(c.account, c.profile),
+		SessionInfo: p.sessionInfoDto(c.session, c.profile, a),
+		AccessToken: res.Token,
+		ServerId:    p.serverID,
+	})
+}
+
+// splitUsername splits "<username or email>#<profile handle>" on the last
+// "#".
+func splitUsername(username string) (login, handle string, ok bool) {
+	i := strings.LastIndex(username, "#")
+	if i < 0 {
+		return "", "", false
+	}
+	login, handle = strings.TrimSpace(username[:i]), strings.TrimSpace(username[i+1:])
+	return login, handle, login != "" && handle != ""
+}
+
+// selectProfile finds the profile of the session account by handle (case
+// insensitive) and binds it to the session.
+func (p *plugin) selectProfile(ctx context.Context, session identityrouter.SessionV1, handle string) (caller, error) {
+	account, err := p.identity.GetAccount(ctx, session.AccountID)
+	if err != nil {
+		return caller{}, err
+	}
+	profiles, err := p.identity.ListProfiles(ctx, session.AccountID)
+	if err != nil {
+		return caller{}, err
+	}
+	for _, profile := range profiles {
+		if !strings.EqualFold(profile.Handle, handle) {
+			continue
+		}
+		session, err := p.identity.SelectProfile(ctx, session.ID, profile.ID)
+		if err != nil {
+			return caller{}, err
+		}
+		return caller{session: session, account: account, profile: profile}, nil
+	}
+	return caller{}, identity.ErrNotFound
+}
+
+func (p *plugin) currentUser(w http.ResponseWriter, r *http.Request) {
+	c, ok := p.authenticate(w, r)
+	if !ok {
+		return
+	}
+	writeJSON(w, http.StatusOK, p.userDto(c.account, c.profile))
+}
+
+// userByID returns a profile of the caller account. The id may come with
+// or without hyphens.
+func (p *plugin) userByID(w http.ResponseWriter, r *http.Request) {
+	c, ok := p.authenticate(w, r)
+	if !ok {
+		return
+	}
+	id, err := uuid.Parse(r.PathValue("userId"))
+	if err != nil {
+		http.Error(w, "invalid user id", http.StatusBadRequest)
+		return
+	}
+	profile, err := p.identity.GetProfile(r.Context(), id)
+	if errors.Is(err, identity.ErrNotFound) || (err == nil && profile.AccountID != c.account.ID) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		p.log.ErrorContext(r.Context(), "jellyfin: get profile", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, p.userDto(c.account, profile))
+}
