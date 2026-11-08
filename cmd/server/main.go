@@ -30,6 +30,8 @@ import (
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
 	"github.com/lukerops/mserver/internal/modules/identity"
 	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
+	"github.com/lukerops/mserver/internal/modules/library"
+	libraryclient "github.com/lukerops/mserver/internal/modules/library/client"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	storageclient "github.com/lukerops/mserver/internal/modules/storage/client"
 
@@ -93,6 +95,7 @@ func run(ctx context.Context) error {
 	c := clients.Clients{
 		Identity: identityclient.New(hc, baseURL),
 		Storage:  storageclient.New(hc, baseURL),
+		Library:  libraryclient.New(hc, baseURL),
 	}
 	bus := memory.New()
 
@@ -102,22 +105,27 @@ func run(ctx context.Context) error {
 	}
 	defer closeModule(log, "identity", ident.Close)
 
+	// Consumers before producers: the in-memory bus delivers events only
+	// to the handlers already subscribed.
+	lib, err := library.New(ctx, dataDir, bus, bus, c, log.With("module", "library"))
+	if err != nil {
+		return err
+	}
+	defer closeModule(log, "library", lib.Close)
+
 	stor, err := storage.New(ctx, dataDir, bus, c, log.With("module", "storage"))
 	if err != nil {
 		return err
 	}
 	defer closeModule(log, "storage", stor.Close)
 
-	jf, err := jellyfin.New(dataDir, c, log.With("plugin", "jellyfin"))
-	if err != nil {
-		return err
-	}
+	jf := jellyfin.New(c, log.With("plugin", "jellyfin"))
 
 	// Modules and plugins register their routes at the root. The modules
 	// share the root (every module route is under /v1); plugins are
 	// mounted under their own path.
 	mux := http.NewServeMux()
-	mux.Handle("/", modules(ident.Mux, stor.Mux))
+	mux.Handle("/", modules(ident.Mux, lib.Mux, stor.Mux))
 	mount(mux, "/plugins/jellyfin", jf)
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
