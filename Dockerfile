@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG GO_VERSION=1.27
+ARG DEBIAN_VERSION=trixie
 
 # The build always runs on the builder's native platform and cross-compiles
 # to the target one, so multi-arch images do not need QEMU emulation.
@@ -22,19 +23,22 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/mserver ./cmd/server
 
-# Empty data dir owned by the nonroot user (distroless has no shell to chown).
-RUN mkdir /out/data
+# Debian instead of distroless: the storage runs ffprobe (from the ffmpeg
+# package) to analyze the media files.
+FROM debian:${DEBIAN_VERSION}-slim
 
-FROM gcr.io/distroless/static-debian12:nonroot
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 
 COPY --from=build /out/mserver /usr/local/bin/mserver
-COPY --from=build --chown=nonroot:nonroot /out/data /data
 
 ENV MSERVER_HTTP_ADDR=:8096 \
-    MSERVER_DATA_DIR=/data
+    MSERVER_DATA_DIR=/data \
+    MSERVER_FFPROBE_PATH=/usr/bin/ffprobe
 
 VOLUME /data
 EXPOSE 8096
-USER nonroot:nonroot
 
 ENTRYPOINT ["/usr/local/bin/mserver"]
