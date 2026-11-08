@@ -109,12 +109,9 @@ func (s *Store) ListMovies(ctx context.Context, q store.MovieQuery) ([]store.Mov
 		if len(f.languages) == 0 {
 			continue
 		}
-		where = append(where, `EXISTS (SELECT 1 FROM json_each(media_info, '$.streams') AS s
-			WHERE s.value ->> '$.type' = ? AND lower(s.value ->> '$.language') IN `+placeholders(len(f.languages))+`)`)
-		args = append(args, f.typ)
-		for _, l := range f.languages {
-			args = append(args, strings.ToLower(l))
-		}
+		cond, condArgs := streamLanguageFilter("media_info", f.typ, f.languages)
+		where = append(where, cond)
+		args = append(args, condArgs...)
 	}
 	filter := ""
 	if len(where) > 0 {
@@ -169,4 +166,59 @@ func (s *Store) ListMovies(ctx context.Context, q store.MovieQuery) ([]store.Mov
 // placeholders returns "(?, ?, ...)" with n parameters; n must be positive.
 func placeholders(n int) string {
 	return "(?" + strings.Repeat(", ?", n-1) + ")"
+}
+
+// streamLanguageFilter returns the condition that selects the rows whose
+// media info (in column) has a stream of type typ in one of the languages,
+// and its arguments.
+func streamLanguageFilter(column, typ string, languages []string) (string, []any) {
+	cond := `EXISTS (SELECT 1 FROM json_each(` + column + `, '$.streams') AS s
+		WHERE s.value ->> '$.type' = ? AND lower(s.value ->> '$.language') IN ` + placeholders(len(languages)) + `)`
+	args := []any{typ}
+	for _, l := range languages {
+		args = append(args, strings.ToLower(l))
+	}
+	return cond, args
+}
+
+// idsFilter returns the condition that selects the rows whose column is
+// one of ids, and its arguments; ids must not be empty.
+func idsFilter(column string, ids []uuid.UUID) (string, []any) {
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return column + " IN " + placeholders(len(ids)), args
+}
+
+// marshalMediaInfo encodes the media info of an item, NULL until the file
+// is analyzed.
+func marshalMediaInfo(info *store.MediaInfo, item string) (any, error) {
+	if info == nil {
+		return nil, nil
+	}
+	b, err := json.Marshal(info)
+	if err != nil {
+		return nil, fmt.Errorf("store: media info of %s: %w", item, err)
+	}
+	return b, nil
+}
+
+func unmarshalMediaInfo(b []byte, item string) (*store.MediaInfo, error) {
+	if b == nil {
+		return nil, nil
+	}
+	info := new(store.MediaInfo)
+	if err := json.Unmarshal(b, info); err != nil {
+		return nil, fmt.Errorf("media info of %s: %w", item, err)
+	}
+	return info, nil
+}
+
+// limitOffset returns the LIMIT and OFFSET arguments of a page.
+func limitOffset(offset, limit int) []any {
+	if limit <= 0 {
+		limit = -1 // no limit
+	}
+	return []any{limit, max(offset, 0)}
 }
