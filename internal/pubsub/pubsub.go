@@ -1,6 +1,6 @@
-// Package queue defines the message bus used to deliver events between
+// Package pubsub defines the message bus used to deliver events between
 // modules. Implementations live in subpackages.
-package queue
+package pubsub
 
 import "context"
 
@@ -21,5 +21,5 @@ type Publisher interface {
 
 // Subscriber registers handlers for a topic.
 type Subscriber interface {
-	Subscribe(topic string, h Handler)
+	Subscribe(ctx context.Context, topic string, h Handler)
 }

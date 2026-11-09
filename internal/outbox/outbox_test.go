@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/database"
-	dbsqlite "github.com/lukerops/mserver/internal/infra/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/database"
+	dbsqlite "github.com/lukerops/mserver/internal/database/sqlite"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
 // fakePublisher records published messages and fails while failing is set.
@@ -22,13 +22,13 @@ type fakePublisher struct {
 	got     []string
 }
 
-func (p *fakePublisher) Publish(_ context.Context, msg queue.Message) error {
+func (p *fakePublisher) Publish(_ context.Context, msg pubsub.Message) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.failing {
 		return errors.New("unavailable")
 	}
-	var e queue.Envelope[string]
+	var e pubsub.Envelope[string]
 	if err := json.Unmarshal(msg.Payload, &e); err != nil {
 		return err
 	}
@@ -48,19 +48,18 @@ func (p *fakePublisher) published() []string {
 	return append([]string(nil), p.got...)
 }
 
-func newTestOutbox(t *testing.T, pub queue.Publisher) (*Outbox, *sql.DB) {
+func newTestOutbox(t *testing.T, pub pubsub.Publisher) (*Outbox, *sql.DB) {
 	t.Helper()
 	db, err := dbsqlite.Open(t.Context(), filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	o, err := New(t.Context(), db, pub, nil)
+	o, err := New(t.Context(), db, pub)
 	if err != nil {
 		t.Fatal(err)
 	}
 	o.poll = 10 * time.Millisecond
-	o.Start(t.Context())
 	t.Cleanup(o.Stop)
 	return o, db
 }
@@ -70,7 +69,7 @@ func publish(t *testing.T, o *Outbox, db *sql.DB, commit bool, events ...string)
 	rollback := errors.New("rollback")
 	err := database.WithTx(t.Context(), db, func(ctx context.Context) error {
 		for _, e := range events {
-			if err := o.Publish(ctx, queue.NewEnvelope("topic", "test", "", e)); err != nil {
+			if err := o.Publish(ctx, pubsub.NewEnvelope("topic", "test", "", e)); err != nil {
 				return err
 			}
 		}
@@ -127,10 +126,10 @@ func TestPublishManyWithoutTransaction(t *testing.T) {
 	pub := &fakePublisher{}
 	o, _ := newTestOutbox(t, pub)
 
-	events := []queue.Event{
-		queue.NewEnvelope("topic", "test", "", "a"),
-		queue.NewEnvelope("topic", "test", "", "b"),
-		queue.NewEnvelope("topic", "test", "", "c"),
+	events := []pubsub.Event{
+		pubsub.NewEnvelope("topic", "test", "", "a"),
+		pubsub.NewEnvelope("topic", "test", "", "b"),
+		pubsub.NewEnvelope("topic", "test", "", "c"),
 	}
 	if err := o.Publish(t.Context(), events...); err != nil {
 		t.Fatal(err)

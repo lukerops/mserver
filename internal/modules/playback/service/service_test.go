@@ -12,7 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
-	database "github.com/lukerops/mserver/internal/infra/database/sqlite"
+	database "github.com/lukerops/mserver/internal/database/sqlite"
 	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"

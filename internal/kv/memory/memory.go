@@ -5,11 +5,12 @@ package memory
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/kv"
+	"github.com/lukerops/mserver/internal/kv"
 )
 
 type item struct {
@@ -25,29 +26,30 @@ type Store struct {
 	now   func() time.Time
 }
 
-var _ kv.Store = (*Store)(nil)
-
 // New returns an empty store.
 func New() *Store {
-	return &Store{items: make(map[string]item), now: time.Now}
+	return &Store{
+		items: make(map[string]item),
+		now:   time.Now,
+	}
 }
 
 // get returns the live item of a key, removing it if it expired. The
 // caller holds mu.
-func (s *Store) get(key string) (item, bool) {
+func (s *Store) get(key string) (*item, bool) {
 	it, ok := s.items[key]
 	if !ok {
-		return item{}, false
+		return nil, false
 	}
 	if !it.expires.IsZero() && !s.now().Before(it.expires) {
 		delete(s.items, key)
-		return item{}, false
+		return nil, false
 	}
-	return it, true
+	return &it, true
 }
 
 func (s *Store) set(key string, value []byte, ttl time.Duration) {
-	it := item{value: clone(value)}
+	it := item{value: slices.Clone(value)}
 	if ttl > 0 {
 		it.expires = s.now().Add(ttl)
 	}
@@ -57,19 +59,23 @@ func (s *Store) set(key string, value []byte, ttl time.Duration) {
 func (s *Store) Get(_ context.Context, key string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	it, ok := s.get(key)
 	if !ok {
 		return nil, kv.ErrNotFound
 	}
-	return clone(it.value), nil
+
+	return slices.Clone(it.value), nil
 }
 
 func (s *Store) Create(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.get(key); ok {
 		return kv.ErrExists
 	}
+
 	s.set(key, value, ttl)
 	return nil
 }
@@ -77,9 +83,11 @@ func (s *Store) Create(_ context.Context, key string, value []byte, ttl time.Dur
 func (s *Store) Update(_ context.Context, key string, value []byte, ttl time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.get(key); !ok {
 		return kv.ErrNotFound
 	}
+
 	s.set(key, value, ttl)
 	return nil
 }
@@ -87,9 +95,11 @@ func (s *Store) Update(_ context.Context, key string, value []byte, ttl time.Dur
 func (s *Store) Delete(_ context.Context, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	if _, ok := s.get(key); !ok {
 		return kv.ErrNotFound
 	}
+
 	delete(s.items, key)
 	return nil
 }
@@ -97,21 +107,19 @@ func (s *Store) Delete(_ context.Context, key string) error {
 func (s *Store) List(_ context.Context, prefix string) ([]kv.Entry, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
 	var out []kv.Entry
 	for key := range s.items {
 		if !strings.HasPrefix(key, prefix) {
 			continue
 		}
+
 		if it, ok := s.get(key); ok {
-			out = append(out, kv.Entry{Key: key, Value: clone(it.value)})
+			out = append(out, kv.Entry{
+				Key:   key,
+				Value: slices.Clone(it.value),
+			})
 		}
 	}
 	return out, nil
-}
-
-func clone(b []byte) []byte {
-	if b == nil {
-		return []byte{}
-	}
-	return append([]byte(nil), b...)
 }

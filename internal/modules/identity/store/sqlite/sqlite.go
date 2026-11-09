@@ -17,8 +17,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/lukerops/mserver/internal/infra/database"
-	dbsqlite "github.com/lukerops/mserver/internal/infra/database/sqlite"
+	"github.com/lukerops/mserver/internal/database"
+	dbsqlite "github.com/lukerops/mserver/internal/database/sqlite"
 	"github.com/lukerops/mserver/internal/modules/identity/store"
 )
 

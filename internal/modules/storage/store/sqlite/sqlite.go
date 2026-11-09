@@ -14,8 +14,8 @@ import (
 	"io/fs"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/database"
-	dbsqlite "github.com/lukerops/mserver/internal/infra/database/sqlite"
+	"github.com/lukerops/mserver/internal/database"
+	dbsqlite "github.com/lukerops/mserver/internal/database/sqlite"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 

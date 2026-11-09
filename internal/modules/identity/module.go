@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 
 	"github.com/lukerops/mserver/internal/clients"
-	database "github.com/lukerops/mserver/internal/infra/database/sqlite"
+	database "github.com/lukerops/mserver/internal/database/sqlite"
 	"github.com/lukerops/mserver/internal/infra/outbox"
 	"github.com/lukerops/mserver/internal/infra/queue"
 	"github.com/lukerops/mserver/internal/modules/identity/router"

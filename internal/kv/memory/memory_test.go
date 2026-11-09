@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/kv"
+	"github.com/lukerops/mserver/internal/kv"
 )
 
 func TestOperations(t *testing.T) {

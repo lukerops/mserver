@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/database"
-	"github.com/lukerops/mserver/internal/infra/logging"
-	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/logger"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
 const (
@@ -30,8 +30,7 @@ const (
 // Outbox saves events and relays them to a publisher.
 type Outbox struct {
 	db   *sql.DB
-	pub  queue.Publisher
-	log  *slog.Logger
+	pub  pubsub.Publisher
 	poll time.Duration
 
 	cancel context.CancelFunc
@@ -39,18 +38,21 @@ type Outbox struct {
 }
 
 // New creates the outbox table in db if needed.
-func New(ctx context.Context, db *sql.DB, pub queue.Publisher, log *slog.Logger) (*Outbox, error) {
-	if log == nil {
-		log = slog.Default()
-	}
-	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS outbox (
-		id      TEXT PRIMARY KEY, -- event ID (UUIDv7): orders the events
-		topic   TEXT NOT NULL,
-		payload BLOB NOT NULL
-	)`); err != nil {
+func New(ctx context.Context, db *sql.DB, pub pubsub.Publisher) (*Outbox, error) {
+	if _, err := db.ExecContext(ctx, creationQuery); err != nil {
 		return nil, fmt.Errorf("outbox: create table: %w", err)
 	}
-	return &Outbox{db: db, pub: pub, log: log, poll: defaultPoll}, nil
+
+	outbox := &Outbox{
+		db:   db,
+		pub:  pub,
+		poll: defaultPoll,
+	}
+
+	ctx, outbox.cancel = context.WithCancel(context.WithoutCancel(ctx))
+	outbox.wg.Go(func() { outbox.relay(ctx) })
+
+	return outbox, nil
 }
 
 // Publish saves events, encoded as JSON, to be published on their topics
@@ -60,32 +62,30 @@ func New(ctx context.Context, db *sql.DB, pub queue.Publisher, log *slog.Logger)
 // atomically with the state change: they are published after the commit
 // and discarded on rollback. Without a transaction in ctx, the events are
 // saved in a transaction of their own.
-func (o *Outbox) Publish(ctx context.Context, events ...queue.Event) error {
+func (o *Outbox) Publish(ctx context.Context, events ...pubsub.Event) error {
 	return database.WithTx(ctx, o.db, func(ctx context.Context) error {
+		log := logger.FromContext(ctx)
 		conn := database.ConnFrom(ctx, o.db)
 		for _, e := range events {
 			payload, err := json.Marshal(e)
 			if err != nil {
 				return fmt.Errorf("outbox: encode %s: %w", e.Topic(), err)
 			}
-			if _, err := conn.ExecContext(ctx,
-				`INSERT INTO outbox (id, topic, payload) VALUES (?, ?, ?)`, e.EventID(), e.Topic(), payload,
-			); err != nil {
+
+			if _, err := conn.ExecContext(ctx, insertQuery, e.EventID(), e.Topic(), payload); err != nil {
 				return fmt.Errorf("outbox: save %s: %w", e.EventID(), err)
 			}
+
 			// Logged with the context of the caller: the request ID ties the
 			// event to the request that produced it. The event is published
 			// only if the transaction commits ("outbox: event published").
-			o.log.DebugContext(ctx, "outbox: event queued", "event_id", e.EventID(), "topic", e.Topic())
+			log.DebugContext(ctx, "outbox: event published",
+				slog.String("event_id", e.EventID()),
+				slog.String("topic", e.Topic()),
+			)
 		}
 		return nil
 	})
-}
-
-// Start runs the relay in the background until Stop.
-func (o *Outbox) Start(ctx context.Context) {
-	ctx, o.cancel = context.WithCancel(context.WithoutCancel(ctx))
-	o.wg.Go(func() { o.relay(ctx) })
 }
 
 // Stop stops the relay and waits for it. Pending events stay in the table
@@ -98,11 +98,15 @@ func (o *Outbox) Stop() {
 }
 
 func (o *Outbox) relay(ctx context.Context) {
+	log := logger.FromContext(ctx)
 	ticker := time.NewTicker(o.poll)
 	defer ticker.Stop()
 	for {
-		if err := o.publishPending(ctx); err != nil && ctx.Err() == nil {
-			o.log.Warn("outbox: publish failed, retrying", "in", o.poll, "error", err)
+		if err := o.publishPending(ctx); err != nil {
+			log.Warn("outbox: publish failed, retrying",
+				slog.Int64("in", int64(o.poll)),
+				slog.String("error", err.Error()),
+			)
 		}
 		select {
 		case <-ctx.Done():
@@ -117,56 +121,55 @@ func (o *Outbox) relay(ctx context.Context) {
 // is kept; the failed event is retried on the next round.
 func (o *Outbox) publishPending(ctx context.Context) error {
 	for {
-		entries, err := o.pending(ctx)
-		if err != nil || len(entries) == 0 {
+		entries, err := o.pendingJobs(ctx)
+		if err != nil {
 			return err
 		}
 		for _, e := range entries {
 			// The handlers run with the event ID as request ID: their logs,
 			// and the module calls they make, carry the ID of the event.
-			ctx := logging.WithRequestID(ctx, e.id)
+			ctx := logger.With(ctx, slog.String("event_id", e.id))
 			if err := o.pub.Publish(ctx, e.msg); err != nil {
-				return fmt.Errorf("event %s (%s): %w", e.id, e.msg.Topic, err)
+				return fmt.Errorf("outbox: failed to publish event %s (%s): %w", e.id, e.msg.Topic, err)
 			}
-			if _, err := o.db.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, e.id); err != nil {
-				return fmt.Errorf("outbox: delete %s: %w", e.id, err)
+
+			if _, err := o.db.ExecContext(ctx, deleteJob, e.id); err != nil {
+				return fmt.Errorf("outbox: failed to delete a published event (%s): %w", e.id, err)
 			}
-			o.logPublished(ctx, e)
+
+			log := logger.FromContext(ctx)
+			if log.Enabled(ctx, slog.LevelDebug) {
+				var env struct {
+					Subject string          `json:"subject"`
+					Time    time.Time       `json:"time"`
+					Data    json.RawMessage `json:"data"`
+				}
+				if err := json.Unmarshal(e.msg.Payload, &env); err != nil {
+					continue
+				}
+
+				log.Debug("outbox: event published",
+					slog.String("event_id", e.id),
+					slog.String("topic", e.msg.Topic),
+					slog.String("subject", env.Subject),
+					slog.Int64("delay", int64(time.Since(env.Time).Round(time.Millisecond))),
+					slog.Any("data", env.Data),
+				)
+			}
 		}
 	}
-}
-
-// logPublished logs a published event with its subject and data, at
-// debug level.
-func (o *Outbox) logPublished(ctx context.Context, e entry) {
-	if !o.log.Enabled(ctx, slog.LevelDebug) {
-		return
-	}
-	var env struct {
-		Subject string          `json:"subject"`
-		Time    time.Time       `json:"time"`
-		Data    json.RawMessage `json:"data"`
-	}
-	_ = json.Unmarshal(e.msg.Payload, &env)
-	attrs := []any{"event_id", e.id, "topic", e.msg.Topic, "subject", env.Subject}
-	if !env.Time.IsZero() {
-		attrs = append(attrs, "delay", time.Since(env.Time).Round(time.Millisecond))
-	}
-	attrs = append(attrs, "data", string(env.Data))
-	o.log.DebugContext(ctx, "outbox: event published", attrs...)
 }
 
 // entry is a saved event.
 type entry struct {
 	id  string
-	msg queue.Message
+	msg pubsub.Message
 }
 
-func (o *Outbox) pending(ctx context.Context) ([]entry, error) {
-	rows, err := o.db.QueryContext(ctx,
-		`SELECT id, topic, payload FROM outbox ORDER BY id LIMIT ?`, batchSize)
+func (o *Outbox) pendingJobs(ctx context.Context) ([]entry, error) {
+	rows, err := o.db.QueryContext(ctx, getPendpings, batchSize)
 	if err != nil {
-		return nil, fmt.Errorf("outbox: read: %w", err)
+		return nil, fmt.Errorf("outbox: failed to list pending jobs: %w", err)
 	}
 	defer rows.Close()
 
@@ -174,7 +177,7 @@ func (o *Outbox) pending(ctx context.Context) ([]entry, error) {
 	for rows.Next() {
 		var e entry
 		if err := rows.Scan(&e.id, &e.msg.Topic, &e.msg.Payload); err != nil {
-			return nil, fmt.Errorf("outbox: read: %w", err)
+			return nil, fmt.Errorf("outbox: failed to list pending jobs: %w", err)
 		}
 		entries = append(entries, e)
 	}
