@@ -37,7 +37,9 @@ func (s *service) AnalyzePending(ctx context.Context) (int, error) {
 			if !ok {
 				loc, err := s.store.GetLocation(ctx, f.LocationID)
 				if errors.Is(err, ErrNotFound) {
-					continue // deleted meanwhile
+					s.log.DebugContext(ctx, "storage: file skipped, location deleted",
+						"analyzer", a.Name(), "file_id", f.ID, "location_id", f.LocationID)
+					continue
 				}
 				if err != nil {
 					return analyzed, err
@@ -62,7 +64,11 @@ func (s *service) AnalyzePending(ctx context.Context) (int, error) {
 // if the analysis succeeded. Files that cannot be analyzed are recorded
 // so that they are retried only when they change.
 func (s *service) analyze(ctx context.Context, a analyzer.Analyzer, d driver.Driver, f File) error {
+	log := s.log.With("analyzer", a.Name(), "file_id", f.ID, "location_id", f.LocationID)
+	log.DebugContext(ctx, "storage: analysis started", "path", f.Path)
+	start := time.Now()
 	result, err := a.Analyze(ctx, d.LocalPath(f.Path))
+	duration := time.Since(start)
 	analysis := Analysis{
 		FileID:     f.ID,
 		Analyzer:   a.Name(),
@@ -73,11 +79,11 @@ func (s *service) analyze(ctx context.Context, a analyzer.Analyzer, d driver.Dri
 	}
 	switch {
 	case errors.Is(err, analyzer.ErrInvalidFile):
-		s.log.Warn("storage: file cannot be analyzed",
-			"analyzer", a.Name(), "file", f.ID, "path", f.Path, "error", err)
+		log.WarnContext(ctx, "storage: file cannot be analyzed",
+			"path", f.Path, "duration", duration, "error", err)
 		analysis.Error = err.Error()
 	case err != nil:
-		return fmt.Errorf("%w: analyzer %s: %w", ErrUnavailable, a.Name(), err)
+		return fmt.Errorf("%w: analyzer %s: file %s: %w", ErrUnavailable, a.Name(), f.ID, err)
 	default:
 		if analysis.Result, err = json.Marshal(result); err != nil {
 			return fmt.Errorf("analyzer %s: encode result: %w", a.Name(), err)
@@ -86,17 +92,21 @@ func (s *service) analyze(ctx context.Context, a analyzer.Analyzer, d driver.Dri
 
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
-	return s.store.WithTx(ctx, func(ctx context.Context) error {
+	var dropped string
+	err = s.store.WithTx(ctx, func(ctx context.Context) error {
+		dropped = ""
 		// The file may have been removed or changed while it was being
 		// analyzed; a changed file is analyzed again on the next round.
 		current, err := s.store.GetFile(ctx, f.ID)
 		if errors.Is(err, ErrNotFound) {
+			dropped = "file removed"
 			return nil
 		}
 		if err != nil {
 			return err
 		}
 		if current.Size != f.Size || !current.ModTime.Equal(f.ModTime) {
+			dropped = "file changed"
 			return nil
 		}
 		if err := s.store.SaveAnalysis(ctx, analysis); err != nil {
@@ -107,18 +117,28 @@ func (s *service) analyze(ctx context.Context, a analyzer.Analyzer, d driver.Dri
 		}
 		return s.outbox.Publish(ctx, fileAnalyzedEvent(f.LocationID, analysis))
 	})
+	switch {
+	case err != nil:
+		return err
+	case dropped != "":
+		log.DebugContext(ctx, "storage: analysis dropped", "reason", dropped, "duration", duration)
+	default:
+		log.DebugContext(ctx, "storage: analysis finished", "ok", analysis.Error == "", "duration", duration)
+	}
+	return nil
 }
 
 func (s *service) RunAnalysis(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
+		start := time.Now()
 		n, err := s.AnalyzePending(ctx)
 		if err != nil && ctx.Err() == nil {
-			s.log.Warn("storage: analysis interrupted", "error", err)
+			s.log.WarnContext(ctx, "storage: analysis interrupted", "analyzed", n, "error", err)
 		}
 		if n > 0 {
-			s.log.Debug("storage: files analyzed", "count", n)
+			s.log.DebugContext(ctx, "storage: files analyzed", "count", n, "duration", time.Since(start))
 		}
 		select {
 		case <-ctx.Done():

@@ -17,7 +17,7 @@ func (rt *router) listSeries(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := ParseSeriesQueryV1(r.URL.Query())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
+		badRequest(w, r, err.Error())
 		return
 	}
 	page, err := rt.svc.ListSeries(r.Context(), service.SeriesQuery{
@@ -66,7 +66,7 @@ func (rt *router) listSeasons(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := ParseSeasonQueryV1(r.URL.Query())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
+		badRequest(w, r, err.Error())
 		return
 	}
 	seasons, err := rt.svc.ListSeasons(r.Context(), service.SeasonQuery{
@@ -109,7 +109,7 @@ func (rt *router) listEpisodes(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := ParseEpisodeQueryV1(r.URL.Query())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
+		badRequest(w, r, err.Error())
 		return
 	}
 	page, err := rt.svc.ListEpisodes(r.Context(), service.EpisodeQuery{

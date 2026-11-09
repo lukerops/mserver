@@ -30,6 +30,7 @@ func (s *service) CreateLocation(ctx context.Context, req CreateLocationRequest)
 	if err := s.store.InsertLocation(ctx, loc, d.Root()); err != nil {
 		return Location{}, err
 	}
+	s.log.InfoContext(ctx, "storage: location created", "location_id", loc.ID, "driver", loc.Driver, "root", d.Root())
 	return loc, nil
 }
 
@@ -45,7 +46,8 @@ func (s *service) DeleteLocation(ctx context.Context, id uuid.UUID) error {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 
-	return s.store.WithTx(ctx, func(ctx context.Context) error {
+	var removed int
+	err := s.store.WithTx(ctx, func(ctx context.Context) error {
 		files, err := s.store.ListFiles(ctx, id)
 		if err != nil {
 			return err
@@ -57,6 +59,12 @@ func (s *service) DeleteLocation(ctx context.Context, id uuid.UUID) error {
 		for i, f := range files {
 			evs[i] = fileEvent(events.FileRemovedV1, id, f.ID, f.Path)
 		}
+		removed = len(files)
 		return s.outbox.Publish(ctx, evs...)
 	})
+	if err != nil {
+		return err
+	}
+	s.log.InfoContext(ctx, "storage: location deleted", "location_id", id, "files_removed", removed)
+	return nil
 }

@@ -2,13 +2,14 @@ package jellyfin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
 
+	"github.com/lukerops/mserver/internal/infra/logging"
 	identity "github.com/lukerops/mserver/internal/modules/identity/client"
 	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
 )
@@ -25,17 +26,26 @@ func (p *plugin) publicUsers(w http.ResponseWriter, _ *http.Request) {
 func (p *plugin) authenticateByName(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var body AuthenticateUserByName
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !p.decodeCredentials(w, r, &body) {
 		return
+	}
+	a := requestAuthorization(r)
+	// loginFailed logs a refused login, with the username typed only at
+	// debug level. The password is never logged.
+	loginFailed := func(reason string, args ...any) {
+		args = append(args, "reason", reason, "client", a.Client, "device", a.Device)
+		if p.log.Enabled(ctx, slog.LevelDebug) {
+			args = append(args, "username", body.Username)
+		}
+		p.log.InfoContext(ctx, "jellyfin: login failed", args...)
+		unauthorized(w, r, reason)
 	}
 	login, handle, ok := splitUsername(body.Username)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		loginFailed("username is not <login>#<profile>")
 		return
 	}
 
-	a := requestAuthorization(r)
 	res, err := p.identity.Authenticate(ctx, identityrouter.AuthenticateRequestV1{
 		Login:    login,
 		Password: body.Pw,
@@ -48,14 +58,14 @@ func (p *plugin) authenticateByName(w http.ResponseWriter, r *http.Request) {
 	})
 	switch {
 	case errors.Is(err, identity.ErrUnauthenticated):
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		// The identity does not tell an unknown login from a wrong password.
+		loginFailed("unknown user or wrong password")
 		return
 	case errors.Is(err, identity.ErrInvalidArgument):
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		fail(w, r, http.StatusBadRequest, err.Error(), "login rejected: "+err.Error())
 		return
 	case err != nil:
-		p.log.ErrorContext(ctx, "jellyfin: authenticate", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		p.internalError(w, r, "authenticate", err)
 		return
 	}
 
@@ -63,16 +73,19 @@ func (p *plugin) authenticateByName(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The account session must not outlive a failed login.
 		if err := p.identity.RevokeSession(context.WithoutCancel(ctx), res.Session.ID); err != nil {
-			p.log.ErrorContext(ctx, "jellyfin: revoke session", "session", res.Session.ID, "error", err)
+			p.log.ErrorContext(ctx, "jellyfin: revoke session", "session_id", res.Session.ID, "error", err)
 		}
 		if errors.Is(err, identity.ErrNotFound) {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			loginFailed("unknown profile", "account_id", res.Session.AccountID)
 			return
 		}
-		p.log.ErrorContext(ctx, "jellyfin: select profile", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		p.internalError(w, r, "select profile", err)
 		return
 	}
+
+	p.log.InfoContext(ctx, "jellyfin: user authenticated", "account_id", c.account.ID, "profile_id", c.profile.ID,
+		"session_id", c.session.ID, "client", a.Client, "device", a.Device)
+	logging.Annotate(ctx, "account_id", c.account.ID, "profile_id", c.profile.ID)
 
 	writeJSON(w, http.StatusOK, AuthenticationResult{
 		User:        p.userDto(c.account, c.profile),
@@ -134,17 +147,20 @@ func (p *plugin) userByID(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := uuid.Parse(r.PathValue("userId"))
 	if err != nil {
-		http.Error(w, "invalid user id", http.StatusBadRequest)
+		badRequest(w, r, "invalid user id")
 		return
 	}
 	profile, err := p.identity.GetProfile(r.Context(), id)
-	if errors.Is(err, identity.ErrNotFound) || (err == nil && profile.AccountID != c.account.ID) {
-		http.NotFound(w, r)
+	if errors.Is(err, identity.ErrNotFound) {
+		notFound(w, r, "user not found")
+		return
+	}
+	if err == nil && profile.AccountID != c.account.ID {
+		notFound(w, r, "user of another account")
 		return
 	}
 	if err != nil {
-		p.log.ErrorContext(r.Context(), "jellyfin: get profile", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		p.internalError(w, r, "get profile", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, p.userDto(c.account, profile))

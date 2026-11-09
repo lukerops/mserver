@@ -17,7 +17,11 @@ func (s *service) ResyncAccounts(ctx context.Context) error {
 	for _, a := range accounts {
 		evs = append(evs, accountEvent(events.AccountCreatedV1, a))
 	}
-	return s.outbox.Publish(ctx, evs...)
+	if err := s.outbox.Publish(ctx, evs...); err != nil {
+		return err
+	}
+	s.log.DebugContext(ctx, "identity: accounts resynced", "count", len(evs))
+	return nil
 }
 
 // ResyncProfiles publishes the created event of every profile.
@@ -30,5 +34,9 @@ func (s *service) ResyncProfiles(ctx context.Context) error {
 	for _, p := range profiles {
 		evs = append(evs, profileEvent(events.ProfileCreatedV1, p))
 	}
-	return s.outbox.Publish(ctx, evs...)
+	if err := s.outbox.Publish(ctx, evs...); err != nil {
+		return err
+	}
+	s.log.DebugContext(ctx, "identity: profiles resynced", "count", len(evs))
+	return nil
 }

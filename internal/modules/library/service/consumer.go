@@ -78,6 +78,8 @@ func (s *service) fileUpdated(ctx context.Context, f storageevents.FileEventV1, 
 		lib, err := s.store.LibraryOfLocation(ctx, f.LocationID)
 		switch {
 		case errors.Is(err, ErrNotFound):
+			s.log.DebugContext(ctx, "library: file ignored", "reason", "no library on the location",
+				"file_id", f.FileID, "location_id", f.LocationID, "path", f.Path)
 			if err := s.removeMovie(ctx, oldMovie, movieExists); err != nil {
 				return err
 			}
@@ -104,6 +106,8 @@ func (s *service) catalogMovie(ctx context.Context, lib Library, f storageevents
 	parsed, ok := parseMovie(f.Path, time.Now().Year()+2)
 	if !ok {
 		// E.g. a video renamed to something that is not a movie.
+		s.log.DebugContext(ctx, "library: file ignored", "reason", "not a video or an extra",
+			"library_id", lib.ID, "file_id", f.FileID, "path", f.Path)
 		return s.removeMovie(ctx, old, exists)
 	}
 
@@ -127,6 +131,8 @@ func (s *service) catalogMovie(ctx context.Context, lib Library, f storageevents
 			m.MediaInfo = old.MediaInfo
 		}
 		if sameMovie(old, m) {
+			s.log.DebugContext(ctx, "library: file ignored", "reason", "unchanged",
+				"movie_id", m.ID, "file_id", f.FileID, "path", f.Path)
 			return nil // a duplicate or a resync
 		}
 		event = events.MovieUpdatedV1
@@ -134,6 +140,13 @@ func (s *service) catalogMovie(ctx context.Context, lib Library, f storageevents
 	if err := s.store.SaveMovie(ctx, m); err != nil {
 		return err
 	}
+	msg := "library: movie identified"
+	if exists {
+		msg = "library: movie updated"
+	}
+	s.log.DebugContext(ctx, msg, "movie_id", m.ID, "title", m.Title, "year", m.Year,
+		"library_id", lib.ID, "file_id", f.FileID, "location_id", f.LocationID, "path", f.Path,
+		"media_info_kept", m.MediaInfo != nil)
 	return s.outbox.Publish(ctx, movieEvent(event, m))
 }
 
@@ -144,13 +157,21 @@ func (s *service) catalogMovie(ctx context.Context, lib Library, f storageevents
 func (s *service) catalogEpisode(ctx context.Context, lib Library, f storageevents.FileEventV1, old Episode, exists, contentChanged bool) error {
 	parsed, ok := parseEpisode(f.Path, time.Now().Year()+2)
 	if !ok {
+		reason := "no series name in the path"
+		if _, video := mainVideo(f.Path); !video {
+			reason = "not a video or an extra"
+		}
+		s.log.DebugContext(ctx, "library: file ignored", "reason", reason,
+			"library_id", lib.ID, "file_id", f.FileID, "path", f.Path)
 		return s.removeEpisode(ctx, old, exists)
 	}
 
 	now := time.Now().UTC()
 	var evs []queue.Event
+	var newSeries, newSeason bool
 	series, err := s.store.FindSeries(ctx, lib.ID, seriesKey(parsed.SeriesTitle), parsed.SeriesYear)
 	if errors.Is(err, ErrNotFound) {
+		newSeries = true
 		series = Series{
 			ID:        newID(),
 			LibraryID: lib.ID,
@@ -169,6 +190,7 @@ func (s *service) catalogEpisode(ctx context.Context, lib Library, f storageeven
 	}
 	season, err := s.store.FindSeason(ctx, series.ID, parsed.Season)
 	if errors.Is(err, ErrNotFound) {
+		newSeason = true
 		season = Season{
 			ID:        newID(),
 			SeriesID:  series.ID,
@@ -209,6 +231,8 @@ func (s *service) catalogEpisode(ctx context.Context, lib Library, f storageeven
 			e.MediaInfo = old.MediaInfo
 		}
 		if sameEpisode(old, e) {
+			s.log.DebugContext(ctx, "library: file ignored", "reason", "unchanged",
+				"episode_id", e.ID, "file_id", f.FileID, "path", f.Path)
 			return nil // a duplicate or a resync
 		}
 		event = events.EpisodeUpdatedV1
@@ -217,6 +241,16 @@ func (s *service) catalogEpisode(ctx context.Context, lib Library, f storageeven
 		return err
 	}
 	evs = append(evs, episodeEvent(event, e))
+	msg := "library: episode identified"
+	if exists {
+		msg = "library: episode updated"
+	}
+	s.log.DebugContext(ctx, msg, "episode_id", e.ID, "title", e.Title,
+		"series_id", series.ID, "series_title", series.Title, "series_year", series.Year, "new_series", newSeries,
+		"season_id", season.ID, "season_number", season.Number, "new_season", newSeason,
+		"episode_number", intAttr(e.Number), "episode_end_number", intAttr(e.EndNumber),
+		"library_id", lib.ID, "file_id", f.FileID, "location_id", f.LocationID, "path", f.Path,
+		"media_info_kept", e.MediaInfo != nil)
 
 	if exists && old.SeasonID != e.SeasonID {
 		pruned, err := s.prune(ctx, old.SeasonID, old.SeriesID)
@@ -241,8 +275,20 @@ func (s *service) fileRemoved(ctx context.Context, file uuid.UUID) error {
 		if err != nil {
 			return err
 		}
+		if !movieExists && !episodeExists {
+			s.log.DebugContext(ctx, "library: file ignored", "reason", "not cataloged", "file_id", file)
+			return nil
+		}
 		return s.removeEpisode(ctx, e, episodeExists)
 	})
+}
+
+// intAttr is the value of n for the logs, nil when n is nil.
+func intAttr(n *int) any {
+	if n == nil {
+		return nil
+	}
+	return *n
 }
 
 // findMovie returns the movie of a file and whether it exists.
@@ -271,6 +317,8 @@ func (s *service) removeMovie(ctx context.Context, m Movie, exists bool) error {
 	if err := s.store.DeleteMovie(ctx, m.ID); err != nil {
 		return err
 	}
+	s.log.DebugContext(ctx, "library: movie removed", "movie_id", m.ID, "title", m.Title,
+		"library_id", m.LibraryID, "file_id", m.FileID, "path", m.Path)
 	return s.outbox.Publish(ctx, movieRemovedEvent(m))
 }
 
@@ -283,6 +331,9 @@ func (s *service) removeEpisode(ctx context.Context, e Episode, exists bool) err
 	if err := s.store.DeleteEpisode(ctx, e.ID); err != nil {
 		return err
 	}
+	s.log.DebugContext(ctx, "library: episode removed", "episode_id", e.ID,
+		"series_id", e.SeriesID, "season_id", e.SeasonID, "library_id", e.LibraryID,
+		"file_id", e.FileID, "path", e.Path)
 	// The outbox orders events by ID, given as they are created.
 	removed := episodeRemovedEvent(e)
 	pruned, err := s.prune(ctx, e.SeasonID, e.SeriesID)
@@ -305,6 +356,8 @@ func (s *service) prune(ctx context.Context, seasonID, seriesID uuid.UUID) ([]qu
 		if err := s.store.DeleteSeason(ctx, season.ID); err != nil {
 			return nil, err
 		}
+		s.log.DebugContext(ctx, "library: empty season removed",
+			"season_id", season.ID, "series_id", season.SeriesID, "season_number", season.Number)
 		evs = append(evs, seasonEvent(events.SeasonRemovedV1, season))
 	}
 	series, err := s.store.GetSeries(ctx, seriesID)
@@ -317,6 +370,8 @@ func (s *service) prune(ctx context.Context, seasonID, seriesID uuid.UUID) ([]qu
 		if err := s.store.DeleteSeries(ctx, series.ID); err != nil {
 			return nil, err
 		}
+		s.log.DebugContext(ctx, "library: empty series removed",
+			"series_id", series.ID, "title", series.Title)
 		evs = append(evs, seriesRemovedEvent(series))
 	}
 	return evs, nil
@@ -327,27 +382,35 @@ func (s *service) prune(ctx context.Context, seasonID, seriesID uuid.UUID) ([]qu
 // not cataloged are ignored.
 func (s *service) fileAnalyzed(ctx context.Context, a storageevents.FileAnalyzedEventV1) error {
 	if a.Analyzer != storageevents.AnalyzerFFprobe {
+		s.log.DebugContext(ctx, "library: analysis ignored", "reason", "unsupported analyzer",
+			"analyzer", a.Analyzer, "file_id", a.FileID)
 		return nil
 	}
 	if a.Version != 1 {
 		s.log.WarnContext(ctx, "library: unsupported analysis version",
-			"analyzer", a.Analyzer, "version", a.Version, "file", a.FileID)
+			"analyzer", a.Analyzer, "version", a.Version, "file_id", a.FileID)
 		return nil
 	}
 	var result storageevents.FFprobeResultV1
 	if err := json.Unmarshal(a.Result, &result); err != nil {
 		s.log.WarnContext(ctx, "library: invalid analysis dropped",
-			"analyzer", a.Analyzer, "file", a.FileID, "error", err)
+			"analyzer", a.Analyzer, "file_id", a.FileID, "error", err)
 		return nil
 	}
 	info := mediaInfo(result)
+	logAttrs := []any{"file_id", a.FileID, "streams", len(info.Streams),
+		"container", info.Container, "duration_ms", info.DurationMs}
 
 	return s.store.WithTx(ctx, func(ctx context.Context) error {
-		m, exists, err := s.findMovie(ctx, a.FileID)
+		m, movieExists, err := s.findMovie(ctx, a.FileID)
 		if err != nil {
 			return err
 		}
-		if exists && !reflect.DeepEqual(m.MediaInfo, info) {
+		switch {
+		case movieExists && reflect.DeepEqual(m.MediaInfo, info):
+			s.log.DebugContext(ctx, "library: analysis ignored", "reason", "unchanged",
+				"movie_id", m.ID, "file_id", a.FileID)
+		case movieExists:
 			m.MediaInfo = info
 			m.UpdatedAt = time.Now().UTC()
 			if err := s.store.SaveMovie(ctx, m); err != nil {
@@ -356,13 +419,22 @@ func (s *service) fileAnalyzed(ctx context.Context, a storageevents.FileAnalyzed
 			if err := s.outbox.Publish(ctx, movieEvent(events.MovieUpdatedV1, m)); err != nil {
 				return err
 			}
+			s.log.DebugContext(ctx, "library: analysis applied", append([]any{"movie_id", m.ID}, logAttrs...)...)
 		}
 
-		e, exists, err := s.findEpisode(ctx, a.FileID)
+		e, episodeExists, err := s.findEpisode(ctx, a.FileID)
 		if err != nil {
 			return err
 		}
-		if !exists || reflect.DeepEqual(e.MediaInfo, info) {
+		switch {
+		case !episodeExists:
+			if !movieExists {
+				s.log.DebugContext(ctx, "library: analysis ignored", "reason", "not cataloged", "file_id", a.FileID)
+			}
+			return nil
+		case reflect.DeepEqual(e.MediaInfo, info):
+			s.log.DebugContext(ctx, "library: analysis ignored", "reason", "unchanged",
+				"episode_id", e.ID, "file_id", a.FileID)
 			return nil
 		}
 		e.MediaInfo = info
@@ -370,7 +442,11 @@ func (s *service) fileAnalyzed(ctx context.Context, a storageevents.FileAnalyzed
 		if err := s.store.SaveEpisode(ctx, e); err != nil {
 			return err
 		}
-		return s.outbox.Publish(ctx, episodeEvent(events.EpisodeUpdatedV1, e))
+		if err := s.outbox.Publish(ctx, episodeEvent(events.EpisodeUpdatedV1, e)); err != nil {
+			return err
+		}
+		s.log.DebugContext(ctx, "library: analysis applied", append([]any{"episode_id", e.ID}, logAttrs...)...)
+		return nil
 	})
 }
 

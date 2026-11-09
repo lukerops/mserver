@@ -30,6 +30,7 @@ func unauthenticated() error {
 func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (AuthenticateResult, error) {
 	login := strings.TrimSpace(req.Login)
 	if login == "" || req.Password == "" {
+		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", "missing credentials")
 		return AuthenticateResult{}, unauthenticated()
 	}
 	dev := req.Device
@@ -41,6 +42,7 @@ func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (Au
 	account, hash, err := s.store.FindAccountByLogin(ctx, login)
 	if errors.Is(err, ErrNotFound) {
 		_, _ = verifyPassword(dummyHash(), req.Password)
+		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", "unknown login")
 		return AuthenticateResult{}, unauthenticated()
 	}
 	if err != nil {
@@ -51,6 +53,11 @@ func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (Au
 		return AuthenticateResult{}, err
 	}
 	if !ok || account.Disabled {
+		reason := "wrong password"
+		if ok {
+			reason = "account disabled"
+		}
+		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", reason, "account_id", account.ID)
 		return AuthenticateResult{}, unauthenticated()
 	}
 
@@ -65,6 +72,7 @@ func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (Au
 		CreatedAt: now,
 	}
 
+	var revoked []Session
 	err = s.store.WithTx(ctx, func(ctx context.Context) error {
 		device, err := s.store.UpsertDevice(ctx, Device{
 			ID:         newID(),
@@ -96,11 +104,18 @@ func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (Au
 		if err := s.store.InsertSession(ctx, session, tokenHash); err != nil {
 			return err
 		}
+		revoked = previous
 		return s.outbox.Publish(ctx, events...)
 	})
 	if err != nil {
 		return AuthenticateResult{}, err
 	}
+	for _, p := range revoked {
+		s.log.InfoContext(ctx, "identity: session revoked", "session_id", p.ID,
+			"account_id", p.AccountID, "device_id", p.DeviceID, "reason", "new login on the device")
+	}
+	s.log.InfoContext(ctx, "identity: session authenticated", "session_id", session.ID,
+		"account_id", session.AccountID, "device_id", session.DeviceID, "client", dev.Client)
 	return AuthenticateResult{Session: session, Token: token}, nil
 }
 
@@ -116,6 +131,8 @@ func (s *service) SelectProfile(ctx context.Context, id, profileID uuid.UUID) (S
 			return err
 		}
 		if profile.AccountID != session.AccountID {
+			s.log.DebugContext(ctx, "identity: profile rejected, not of the session account",
+				"session_id", id, "account_id", session.AccountID, "profile_id", profileID)
 			return fmt.Errorf("%w: profile %s", ErrNotFound, profileID)
 		}
 		session.ProfileID = profile.ID
@@ -124,24 +141,34 @@ func (s *service) SelectProfile(ctx context.Context, id, profileID uuid.UUID) (S
 	if err != nil {
 		return Session{}, err
 	}
+	s.log.DebugContext(ctx, "identity: profile selected", "session_id", session.ID,
+		"account_id", session.AccountID, "profile_id", session.ProfileID)
 	return session, nil
 }
 
 func (s *service) ValidateToken(ctx context.Context, token string) (Session, error) {
 	if token == "" {
+		s.log.DebugContext(ctx, "identity: token rejected", "reason", "missing")
 		return Session{}, fmt.Errorf("%w: missing token", ErrUnauthenticated)
 	}
 	session, err := s.store.FindSessionByToken(ctx, hashToken(token))
 	if errors.Is(err, ErrNotFound) {
+		s.log.DebugContext(ctx, "identity: token rejected", "reason", "unknown or revoked")
 		return Session{}, fmt.Errorf("%w: invalid token", ErrUnauthenticated)
 	}
-	return session, err
+	if err != nil {
+		return Session{}, err
+	}
+	s.log.DebugContext(ctx, "identity: token validated", "session_id", session.ID,
+		"account_id", session.AccountID, "profile_id", session.ProfileID)
+	return session, nil
 }
 
 func (s *service) RevokeSession(ctx context.Context, id uuid.UUID) error {
-	return s.store.WithTx(ctx, func(ctx context.Context) error {
-		session, err := s.store.GetSession(ctx, id)
-		if err != nil {
+	var session Session
+	err := s.store.WithTx(ctx, func(ctx context.Context) error {
+		var err error
+		if session, err = s.store.GetSession(ctx, id); err != nil {
 			return err
 		}
 		if err := s.store.DeleteSession(ctx, id); err != nil {
@@ -149,4 +176,10 @@ func (s *service) RevokeSession(ctx context.Context, id uuid.UUID) error {
 		}
 		return s.outbox.Publish(ctx, sessionRevokedEvent(session, time.Now().UTC()))
 	})
+	if err != nil {
+		return err
+	}
+	s.log.InfoContext(ctx, "identity: session revoked", "session_id", session.ID,
+		"account_id", session.AccountID, "device_id", session.DeviceID)
+	return nil
 }

@@ -21,9 +21,10 @@ func (p *plugin) logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := p.identity.RevokeSession(r.Context(), c.session.ID); err != nil {
-		p.log.ErrorContext(r.Context(), "jellyfin: logout", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		p.internalError(w, r, "logout", err)
 		return
 	}
+	p.log.InfoContext(r.Context(), "jellyfin: user logged out", "account_id", c.account.ID,
+		"profile_id", c.profile.ID, "session_id", c.session.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

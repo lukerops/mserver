@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lukerops/mserver/internal/infra/logging"
 	"github.com/lukerops/mserver/internal/modules/library/service"
 )
 
@@ -50,7 +51,7 @@ func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 // response is already written.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid body: " + err.Error()})
+		badRequest(w, r, "invalid body: "+err.Error())
 		return false
 	}
 	return true
@@ -70,7 +71,7 @@ func pathUUID(w http.ResponseWriter, r *http.Request, name string, wildcard bool
 	}
 	id, err := uuid.Parse(s)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid " + name + " " + s})
+		badRequest(w, r, "invalid "+name+" "+s)
 		return uuid.Nil, false
 	}
 	return id, true
@@ -96,6 +97,13 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// badRequest answers 400 with msg, which is also the error of the access
+// log line of the request.
+func badRequest(w http.ResponseWriter, r *http.Request, msg string) {
+	logging.Annotate(r.Context(), "error", msg)
+	writeJSON(w, http.StatusBadRequest, ErrorV1{Error: msg})
+}
+
 // writeError maps a service error to its status code.
 func (rt *router) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	var status int
@@ -116,5 +124,6 @@ func (rt *router) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		writeJSON(w, http.StatusInternalServerError, ErrorV1{Error: "internal error"})
 		return
 	}
+	logging.Annotate(r.Context(), "error", err.Error())
 	writeJSON(w, status, ErrorV1{Error: err.Error()})
 }

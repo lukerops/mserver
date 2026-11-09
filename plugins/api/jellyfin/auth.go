@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lukerops/mserver/internal/infra/logging"
 	identity "github.com/lukerops/mserver/internal/modules/identity/client"
 	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
 )
@@ -104,29 +105,47 @@ type caller struct {
 // response is already written and ok is false.
 func (p *plugin) authenticate(w http.ResponseWriter, r *http.Request) (c caller, ok bool) {
 	ctx := r.Context()
+	token := requestAuthorization(r).Token
 	var err error
-	c.session, err = p.identity.ValidateToken(ctx, requestAuthorization(r).Token)
-	if err == nil && c.session.ProfileID == uuid.Nil {
-		err = identity.ErrUnauthenticated
+	c.session, err = p.identity.ValidateToken(ctx, token)
+	if err != nil {
+		switch {
+		case token == "" && errors.Is(err, identity.ErrUnauthenticated):
+			unauthorized(w, r, "missing token")
+		case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
+			unauthorized(w, r, "invalid token: "+err.Error())
+		default:
+			p.internalError(w, r, "validate token", err)
+		}
+		return caller{}, false
 	}
-	if err == nil {
-		c.account, err = p.identity.GetAccount(ctx, c.session.AccountID)
-	}
-	if err == nil && c.account.Disabled {
-		err = identity.ErrUnauthenticated
-	}
-	if err == nil {
-		c.profile, err = p.identity.GetProfile(ctx, c.session.ProfileID)
+	if c.session.ProfileID == uuid.Nil {
+		unauthorized(w, r, "session has no profile selected")
+		return caller{}, false
 	}
 
+	c.account, err = p.identity.GetAccount(ctx, c.session.AccountID)
 	switch {
-	case err == nil:
-		return c, true
 	case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-	default:
-		p.log.ErrorContext(ctx, "jellyfin: authenticate", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		unauthorized(w, r, "account not found")
+		return caller{}, false
+	case err != nil:
+		p.internalError(w, r, "get account", err)
+		return caller{}, false
+	case c.account.Disabled:
+		unauthorized(w, r, "account disabled")
+		return caller{}, false
 	}
-	return caller{}, false
+
+	c.profile, err = p.identity.GetProfile(ctx, c.session.ProfileID)
+	switch {
+	case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
+		unauthorized(w, r, "profile not found")
+		return caller{}, false
+	case err != nil:
+		p.internalError(w, r, "get profile", err)
+		return caller{}, false
+	}
+	logging.Annotate(ctx, "account_id", c.account.ID, "profile_id", c.profile.ID)
+	return c, true
 }

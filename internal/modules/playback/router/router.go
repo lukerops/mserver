@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lukerops/mserver/internal/infra/logging"
 	"github.com/lukerops/mserver/internal/modules/playback/service"
 )
 
@@ -139,6 +140,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any, optional bool) bool {
 	if err == nil || (optional && errors.Is(err, io.EOF)) {
 		return true
 	}
+	logging.Annotate(r.Context(), "error", "invalid body: "+err.Error())
 	writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid body: " + err.Error()})
 	return false
 }
@@ -148,6 +150,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any, optional bool) bool {
 func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
+		logging.Annotate(r.Context(), "error", "invalid id: "+err.Error())
 		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid id " + r.PathValue("id")})
 		return uuid.Nil, false
 	}
@@ -174,5 +177,6 @@ func (rt *router) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		writeJSON(w, http.StatusInternalServerError, ErrorV1{Error: "internal error"})
 		return
 	}
+	logging.Annotate(r.Context(), "error", err.Error())
 	writeJSON(w, status, ErrorV1{Error: err.Error()})
 }

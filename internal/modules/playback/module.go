@@ -68,7 +68,11 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, st kv.Store, 
 	svc := service.New(st, ob, log, timeout)
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	m := &Module{Mux: router.New(svc, log), db: db, outbox: ob, cancel: cancel}
-	m.wg.Go(func() { svc.RunReaper(runCtx, min(reaperInterval, timeout)) })
+	interval := min(reaperInterval, timeout)
+	m.wg.Go(func() { svc.RunReaper(runCtx, interval) })
+	log.InfoContext(ctx, "playback: started",
+		"db_file", filepath.Join(dataDir, "playback.db"), "session_timeout", timeout,
+		"reaper_interval", interval, "key_ttl", 2*timeout)
 	return m, nil
 }
 

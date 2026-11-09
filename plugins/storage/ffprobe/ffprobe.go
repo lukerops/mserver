@@ -7,8 +7,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/lukerops/mserver/internal/infra/ffmpeg"
 	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
@@ -33,14 +35,22 @@ var videoExtensions = map[string]bool{
 // Analyzer runs ffprobe on video files.
 type Analyzer struct {
 	prober ffmpeg.Prober
+	log    *slog.Logger
 }
 
 var _ analyzer.Analyzer = (*Analyzer)(nil)
 
+// maxErrorLen bounds the ffprobe output kept in errors, which end up in
+// logs and in the saved analyses.
+const maxErrorLen = 512
+
 // New returns the analyzer. binary is the ffprobe executable; empty means
-// "ffprobe" from PATH.
-func New(binary string) *Analyzer {
-	return &Analyzer{prober: ffmpeg.Prober{Path: binary}}
+// "ffprobe" from PATH. log may be nil.
+func New(binary string, log *slog.Logger) *Analyzer {
+	if log == nil {
+		log = slog.New(slog.DiscardHandler)
+	}
+	return &Analyzer{prober: ffmpeg.Prober{Path: binary}, log: log}
 }
 
 func (*Analyzer) Name() string { return Name }
@@ -51,15 +61,39 @@ func (*Analyzer) Accepts(p string) bool {
 }
 
 func (a *Analyzer) Analyze(ctx context.Context, localPath string) (any, error) {
+	start := time.Now()
 	p, err := a.prober.Probe(ctx, localPath)
+	a.log.DebugContext(ctx, "storage: ffprobe run", "binary", a.binary(), "file", localPath,
+		"duration", time.Since(start), "ok", err == nil)
 	if errors.Is(err, ffmpeg.ErrInvalidMedia) {
-		return nil, fmt.Errorf("%w: %w", analyzer.ErrInvalidFile, err)
+		return nil, fmt.Errorf("%w: %w", analyzer.ErrInvalidFile, truncatedError{err})
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ffprobe %s: %w", a.binary(), truncatedError{err})
 	}
 	return toResult(p), nil
 }
+
+func (a *Analyzer) binary() string {
+	if a.prober.Path == "" {
+		return "ffprobe"
+	}
+	return a.prober.Path
+}
+
+// truncatedError shortens the message of an error carrying the ffprobe
+// output to maxErrorLen bytes, keeping it for errors.Is.
+type truncatedError struct{ err error }
+
+func (e truncatedError) Error() string {
+	msg := strings.Join(strings.Fields(e.err.Error()), " ")
+	if len(msg) <= maxErrorLen {
+		return msg
+	}
+	return strings.ToValidUTF8(msg[:maxErrorLen], "") + "..."
+}
+
+func (e truncatedError) Unwrap() error { return e.err }
 
 func toResult(p ffmpeg.Probe) events.FFprobeResultV1 {
 	r := events.FFprobeResultV1{

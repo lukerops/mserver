@@ -57,6 +57,8 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, sub queue.Sub
 	for _, topic := range service.StorageTopics {
 		sub.Subscribe(topic, svc.HandleStorageEvent)
 	}
+	log.InfoContext(ctx, "library: started",
+		"db_file", filepath.Join(dataDir, "library.db"), "topics", service.StorageTopics)
 	return &Module{Mux: router.New(svc, log), db: db, outbox: ob}, nil
 }
 

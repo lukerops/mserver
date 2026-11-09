@@ -954,6 +954,7 @@ mserver/
 │   │   ├── cache/memory/
 │   │   ├── kv/                          # interface kv.Store (Get/Create/Update/Delete/List com TTL)
 │   │   │   └── memory/                  # implementação em memória (Valkey no futuro)
+│   │   ├── logging/                     # logger (slog), log de acesso HTTP, request_id propagado entre módulos
 │   │   ├── queue/                       # interfaces Publisher/Subscriber e Envelope CloudEvents
 │   │   │   └── memory/                  # barramento em memória
 │   │   ├── outbox/                      # outbox transacional reutilizável (tabela + relay)

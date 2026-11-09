@@ -65,8 +65,11 @@ func (s *service) OpenFile(ctx context.Context, location, id uuid.UUID) (File, d
 		// The file is gone, or the whole location is (e.g. an unmounted
 		// disk): only the latter is temporary.
 		if checkErr := d.Check(ctx); checkErr != nil {
+			s.log.WarnContext(ctx, "storage: location unavailable", "location_id", location, "file_id", id, "error", checkErr)
 			return File{}, nil, fmt.Errorf("%w: location %s: %w", ErrUnavailable, location, checkErr)
 		}
+		s.log.DebugContext(ctx, "storage: indexed file missing on disk",
+			"location_id", location, "file_id", id, "path", f.Path)
 		return File{}, nil, fmt.Errorf("%w: file %s: %w", ErrNotFound, id, err)
 	}
 	if err != nil {

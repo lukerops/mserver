@@ -169,7 +169,20 @@ func (s *service) Start(ctx context.Context, req StartRequest) (Session, error) 
 	if err := s.outbox.Publish(ctx, startedEvent(sess)); err != nil {
 		return Session{}, err
 	}
+	s.log.InfoContext(ctx, "playback: session started",
+		"playback_session_id", sess.ID, "account_id", sess.AccountID, "profile_id", sess.ProfileID,
+		"device_id", sess.DeviceID, "item_id", sess.ItemID, "file_id", sess.FileID,
+		"play_method", sess.PlayMethod, "position_ms", sess.PositionMs, "is_paused", sess.Paused)
 	return sess, nil
+}
+
+// warnNotFound logs a report (op) of a client for a session that does
+// not exist, or no longer does (stopped or expired).
+func (s *service) warnNotFound(ctx context.Context, id uuid.UUID, op string, err error) {
+	if errors.Is(err, ErrNotFound) {
+		s.log.WarnContext(ctx, "playback: report for unknown session",
+			"playback_session_id", id, "op", op)
+	}
 }
 
 func (s *service) Get(ctx context.Context, id uuid.UUID) (Session, error) {
@@ -244,6 +257,7 @@ func (s *service) Progress(ctx context.Context, id uuid.UUID, req ProgressReques
 	defer s.mu.Unlock()
 	sess, err := s.Get(ctx, id)
 	if err != nil {
+		s.warnNotFound(ctx, id, "progress", err)
 		return Session{}, err
 	}
 
@@ -265,10 +279,21 @@ func (s *service) Progress(ctx context.Context, id uuid.UUID, req ProgressReques
 		}
 	}
 	if err := s.update(ctx, sess); err != nil {
+		s.warnNotFound(ctx, id, "progress", err)
 		return Session{}, err
 	}
 	if err := s.outbox.Publish(ctx, evs...); err != nil {
 		return Session{}, err
+	}
+	s.log.DebugContext(ctx, "playback: progress reported",
+		"playback_session_id", sess.ID, "position_ms", sess.PositionMs,
+		"is_paused", sess.Paused, "sequence", sess.Sequence)
+	if sess.Paused != wasPaused {
+		msg := "playback: session resumed"
+		if sess.Paused {
+			msg = "playback: session paused"
+		}
+		s.log.DebugContext(ctx, msg, "playback_session_id", sess.ID, "position_ms", sess.PositionMs)
 	}
 	return sess, nil
 }
@@ -278,10 +303,17 @@ func (s *service) Heartbeat(ctx context.Context, id uuid.UUID) error {
 	defer s.mu.Unlock()
 	sess, err := s.Get(ctx, id)
 	if err != nil {
+		s.warnNotFound(ctx, id, "heartbeat", err)
 		return err
 	}
 	touch(&sess, s.now().UTC())
-	return s.update(ctx, sess)
+	if err := s.update(ctx, sess); err != nil {
+		s.warnNotFound(ctx, id, "heartbeat", err)
+		return err
+	}
+	s.log.DebugContext(ctx, "playback: heartbeat",
+		"playback_session_id", sess.ID, "watched_duration_ms", sess.WatchedMs)
+	return nil
 }
 
 func (s *service) Stop(ctx context.Context, id uuid.UUID, req StopRequest) error {
@@ -292,6 +324,7 @@ func (s *service) Stop(ctx context.Context, id uuid.UUID, req StopRequest) error
 	defer s.mu.Unlock()
 	sess, err := s.Get(ctx, id)
 	if err != nil {
+		s.warnNotFound(ctx, id, "stop", err)
 		return err
 	}
 	now := s.now().UTC()
@@ -299,7 +332,11 @@ func (s *service) Stop(ctx context.Context, id uuid.UUID, req StopRequest) error
 	if req.PositionMs != nil {
 		sess.PositionMs = *req.PositionMs
 	}
-	return s.end(ctx, sess, now, events.StopReasonUser)
+	if err := s.end(ctx, sess, now, events.StopReasonUser); err != nil {
+		s.warnNotFound(ctx, id, "stop", err)
+		return err
+	}
+	return nil
 }
 
 // end deletes a session and publishes its stopped event. Of the
@@ -314,7 +351,14 @@ func (s *service) end(ctx context.Context, sess Session, now time.Time, reason s
 		return fmt.Errorf("playback: delete session: %w", err)
 	}
 	sess.Sequence++
-	return s.outbox.Publish(ctx, stoppedEvent(sess, now, reason))
+	if err := s.outbox.Publish(ctx, stoppedEvent(sess, now, reason)); err != nil {
+		return err
+	}
+	s.log.InfoContext(ctx, "playback: session stopped",
+		"playback_session_id", sess.ID, "profile_id", sess.ProfileID, "device_id", sess.DeviceID,
+		"item_id", sess.ItemID, "file_id", sess.FileID, "reason", reason,
+		"position_ms", sess.PositionMs, "watched_duration_ms", sess.WatchedMs)
+	return nil
 }
 
 func (s *service) ExpireIdle(ctx context.Context) (int, error) {
@@ -336,6 +380,8 @@ func (s *service) ExpireIdle(ctx context.Context) (int, error) {
 			return expired, err
 		}
 	}
+	s.log.DebugContext(ctx, "playback: idle sessions checked",
+		"count", len(sessions), "expired", expired, "timeout", s.timeout)
 	return expired, nil
 }
 
@@ -370,10 +416,7 @@ func (s *service) RunReaper(ctx context.Context, interval time.Duration) {
 		case <-ticker.C:
 			n, err := s.ExpireIdle(ctx)
 			if err != nil && ctx.Err() == nil {
-				s.log.ErrorContext(ctx, "playback: expire idle sessions", "error", err)
-			}
-			if n > 0 {
-				s.log.InfoContext(ctx, "playback: idle sessions stopped", "count", n)
+				s.log.ErrorContext(ctx, "playback: expire idle sessions", "error", err, "expired", n)
 			}
 		}
 	}

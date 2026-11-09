@@ -2,7 +2,6 @@ package jellyfin
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/lukerops/mserver/internal/infra/kv"
+	"github.com/lukerops/mserver/internal/infra/logging"
 
 	playback "github.com/lukerops/mserver/internal/modules/playback/client"
 	playbackrouter "github.com/lukerops/mserver/internal/modules/playback/router"
@@ -45,7 +45,7 @@ func (p *plugin) lookupVideo(w http.ResponseWriter, r *http.Request) (video, boo
 		e := ref.episode
 		return video{item: p.episodeItem(*e, true), locationID: e.LocationID, fileID: e.FileID}, true
 	}
-	http.NotFound(w, r)
+	notFound(w, r, "item is not a movie or an episode")
 	return video{}, false
 }
 
@@ -59,13 +59,8 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var info PlaybackInfoDto
-	if r.Method == http.MethodPost {
-		err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&info)
-		if err != nil && !errors.Is(err, io.EOF) {
-			p.log.WarnContext(r.Context(), "jellyfin: playback info: invalid body", "error", err)
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
+	if r.Method == http.MethodPost && !p.decodeBody(w, r, &info) {
+		return
 	}
 	audioIndex := info.AudioStreamIndex.intPtr()
 	if audioIndex == nil {
@@ -78,13 +73,25 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
 	res := PlaybackInfoResponse{
 		MediaSources:  []MediaSourceInfo{},
 		PlaySessionId: jellyfinID(uuid.NewString()),
 	}
 	for _, source := range v.item.MediaSources {
-		if info.DeviceProfile != nil && !directPlayable(info.DeviceProfile.DirectPlayProfiles, source, audioIndex) {
-			continue
+		if info.DeviceProfile == nil {
+			p.log.DebugContext(ctx, "jellyfin: playback info: direct play", "item_id", v.item.Id,
+				"source_id", source.Id, "container", source.Container, "reason", "no device profile")
+		} else {
+			d := directPlay(info.DeviceProfile.DirectPlayProfiles, source, audioIndex)
+			args := []any{"item_id", v.item.Id, "source_id", source.Id, "container", source.Container,
+				"video_codec", d.videoCodec, "audio_codec", d.audioCodec, "direct_playable", d.profile >= 0}
+			if d.profile < 0 {
+				p.log.DebugContext(ctx, "jellyfin: playback info: source rejected",
+					append(args, "reason", d.rejected, "profiles", len(info.DeviceProfile.DirectPlayProfiles))...)
+				continue
+			}
+			p.log.DebugContext(ctx, "jellyfin: playback info: direct play", append(args, "profile", d.profile)...)
 		}
 		source.SupportsDirectPlay = true
 		source.SupportsDirectStream = true
@@ -94,36 +101,66 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(res.MediaSources) == 0 {
 		res.ErrorCode = "NoCompatibleStream"
+		logging.Annotate(ctx, "playback_error", res.ErrorCode)
 	}
+	p.log.DebugContext(ctx, "jellyfin: play session created", "item_id", v.item.Id,
+		"play_session_id", res.PlaySessionId, "sources", len(res.MediaSources))
 	writeJSON(w, http.StatusOK, res)
 }
 
-// directPlayable reports whether a video direct play profile accepts the
+// directPlayResult is the decision of directPlay for a media source.
+type directPlayResult struct {
+	// profile is the index of the first direct play profile that accepts
+	// the source, or -1.
+	profile                int
+	videoCodec, audioCodec string
+	// rejected tells why no profile accepts the source.
+	rejected string
+}
+
+// directPlay finds the first video direct play profile that accepts the
 // container, the video codec and the audio codec (of the audio stream
-// asked, or the default one) of a source. The bitrate is not checked.
-// Unknown codecs (a file not analyzed yet) are accepted.
-func directPlayable(profiles []DirectPlayProfile, source MediaSourceInfo, audioIndex *int) bool {
-	var videoCodec, audioCodec string
+// asked, or the default one) of a source, and tells why none does. The
+// bitrate is not checked. Unknown codecs (a file not analyzed yet) are
+// accepted.
+func directPlay(profiles []DirectPlayProfile, source MediaSourceInfo, audioIndex *int) directPlayResult {
+	d := directPlayResult{profile: -1}
 	if audioIndex == nil {
 		audioIndex = source.DefaultAudioStreamIndex
 	}
 	for _, s := range source.MediaStreams {
 		switch {
-		case s.Type == "Video" && videoCodec == "":
-			videoCodec = s.Codec
+		case s.Type == "Video" && d.videoCodec == "":
+			d.videoCodec = s.Codec
 		case s.Type == "Audio" && audioIndex != nil && s.Index == *audioIndex:
-			audioCodec = s.Codec
+			d.audioCodec = s.Codec
 		}
 	}
-	for _, dp := range profiles {
-		if strings.EqualFold(dp.Type, "Video") &&
-			listAccepts(dp.Container, source.Container) &&
-			listAccepts(dp.VideoCodec, videoCodec) &&
-			listAccepts(dp.AudioCodec, audioCodec) {
-			return true
+	// The furthest check a profile passes tells why the source is rejected.
+	furthest := 0
+	for i, dp := range profiles {
+		passed := 0
+		switch {
+		case !strings.EqualFold(dp.Type, "Video"):
+		case !listAccepts(dp.Container, source.Container):
+			passed = 1
+		case !listAccepts(dp.VideoCodec, d.videoCodec):
+			passed = 2
+		case !listAccepts(dp.AudioCodec, d.audioCodec):
+			passed = 3
+		default:
+			d.profile = i
+			return d
 		}
+		furthest = max(furthest, passed)
 	}
-	return false
+	d.rejected = [...]string{
+		"no video direct play profile",
+		"container not supported",
+		"video codec not supported",
+		"audio codec not supported",
+	}[furthest]
+	return d
 }
 
 // listAccepts reports whether a comma-separated list of a profile
@@ -140,7 +177,7 @@ func listAccepts(list, value string) bool {
 // Range requests (seeking). The content comes from the storage.
 func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	if file := r.PathValue("file"); file != "stream" && !strings.HasPrefix(file, "stream.") {
-		http.NotFound(w, r)
+		notFound(w, r, "unsupported stream file name")
 		return
 	}
 	if _, ok := p.authenticate(w, r); !ok {
@@ -151,25 +188,37 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.storage == nil {
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		unavailable(w, r, "no storage module")
 		return
 	}
 
-	resp, err := p.storage.OpenFile(r.Context(), r.Method, v.locationID, v.fileID, r.Header)
+	ctx := r.Context()
+	p.log.DebugContext(ctx, "jellyfin: stream: storage request", "item_id", v.item.Id,
+		"location_id", v.locationID, "file_id", v.fileID, "range", r.Header.Get("Range"))
+	resp, err := p.storage.OpenFile(ctx, r.Method, v.locationID, v.fileID, r.Header)
 	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		p.log.DebugContext(ctx, "jellyfin: stream: client went away", "error", err)
+		logging.Annotate(ctx, "error", "client went away")
+		return
 	case errors.Is(err, storage.ErrNotFound):
-		http.NotFound(w, r)
+		p.log.WarnContext(ctx, "jellyfin: stream: file not found in storage",
+			"location_id", v.locationID, "file_id", v.fileID, "error", err)
+		notFound(w, r, "file not found in storage")
 		return
 	case errors.Is(err, storage.ErrUnavailable):
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		p.log.WarnContext(ctx, "jellyfin: stream: storage unavailable",
+			"location_id", v.locationID, "file_id", v.fileID, "error", err)
+		unavailable(w, r, "storage unavailable")
 		return
-	case err != nil:
-		if r.Context().Err() == nil {
-			p.internalError(w, r, "open file", err)
-		}
+	default:
+		p.internalError(w, r, "open file", err)
 		return
 	}
 	defer resp.Body.Close()
+	p.log.DebugContext(ctx, "jellyfin: stream: storage response", "status", resp.StatusCode,
+		"content_length", resp.ContentLength, "content_range", resp.Header.Get("Content-Range"))
 
 	h := w.Header()
 	for _, name := range []string{
@@ -180,48 +229,69 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	if r.Method != http.MethodHead {
-		// A failed copy is the player going away (e.g. seeking).
-		_, _ = io.Copy(w, resp.Body)
+	if r.Method == http.MethodHead {
+		return
+	}
+	n, err := io.Copy(w, resp.Body)
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		// The player went away, e.g. to seek.
+		p.log.DebugContext(ctx, "jellyfin: stream: client disconnected", "bytes", n)
+	default:
+		p.log.WarnContext(ctx, "jellyfin: stream: copy", "bytes", n, "error", err)
+		logging.Annotate(ctx, "error", "stream copy: "+err.Error())
 	}
 }
 
 // playing reports the start of a playback.
 func (p *plugin) playing(w http.ResponseWriter, r *http.Request) {
-	p.playbackReport(w, r, false)
+	p.playbackReport(w, r, reportStart)
 }
 
 // progress reports the position of a playback.
 func (p *plugin) progress(w http.ResponseWriter, r *http.Request) {
-	p.playbackReport(w, r, false)
+	p.playbackReport(w, r, reportProgress)
 }
 
 // stopped reports the end of a playback.
 func (p *plugin) stopped(w http.ResponseWriter, r *http.Request) {
-	p.playbackReport(w, r, true)
+	p.playbackReport(w, r, reportStop)
 }
+
+// Kinds of playback reports.
+const (
+	reportStart    = "start"
+	reportProgress = "progress"
+	reportStop     = "stop"
+)
 
 // playbackReport handles the start, progress and stop reports. They map
 // to a playback session through the PlaySessionId, remembered in the kv
 // store; a start or progress report for a play session without a live
 // playback session starts one. Reports for items that cannot be played
 // are ignored.
-func (p *plugin) playbackReport(w http.ResponseWriter, r *http.Request, stop bool) {
+func (p *plugin) playbackReport(w http.ResponseWriter, r *http.Request, kind string) {
 	c, ok := p.authenticate(w, r)
 	if !ok {
 		return
 	}
 	var report PlaybackReport
-	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&report)
-	if err != nil && !errors.Is(err, io.EOF) {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+	if !p.decodeBody(w, r, &report) {
 		return
 	}
-	if p.playback != nil {
-		if stop {
-			err = p.stopPlayback(r.Context(), c, report)
+	ctx := r.Context()
+	p.log.DebugContext(ctx, "jellyfin: playback report", "kind", kind, "item_id", report.ItemId,
+		"play_session_id", report.PlaySessionId, "position_ms", positionMs(report),
+		"paused", report.IsPaused, "play_method", report.PlayMethod)
+	if p.playback == nil {
+		p.log.DebugContext(ctx, "jellyfin: playback report ignored", "reason", "no playback module")
+	} else {
+		var err error
+		if kind == reportStop {
+			err = p.stopPlayback(ctx, c, report)
 		} else {
-			err = p.reportPlayback(r.Context(), c, report)
+			err = p.reportPlayback(ctx, c, report, kind)
 		}
 		if err != nil {
 			p.internalError(w, r, "playback report", err)
@@ -238,11 +308,23 @@ func (p *plugin) pingPlayback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.playback != nil {
-		key := playSessionKey(c, lowerQuery(r)["playsessionid"])
-		id, found, err := p.mappedSession(r.Context(), key)
-		if err == nil && found {
-			if err = p.playback.Heartbeat(r.Context(), id); err == nil {
-				err = p.renewMapping(r.Context(), key, id)
+		ctx := r.Context()
+		playSessionID := lowerQuery(r)["playsessionid"]
+		key := playSessionKey(c, playSessionID)
+		id, found, err := p.mappedSession(ctx, key)
+		switch {
+		case err != nil:
+		case !found:
+			p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", "ping",
+				"play_session_id", playSessionID)
+		default:
+			p.log.DebugContext(ctx, "jellyfin: playback ping", "play_session_id", playSessionID,
+				"playback_session_id", id)
+			if err = p.playback.Heartbeat(ctx, id); err == nil {
+				err = p.renewMapping(ctx, key, id)
+			} else if errors.Is(err, playback.ErrNotFound) {
+				p.log.DebugContext(ctx, "jellyfin: playback session expired", "play_session_id", playSessionID,
+					"playback_session_id", id)
 			}
 		}
 		if err != nil && !errors.Is(err, playback.ErrNotFound) {
@@ -301,13 +383,15 @@ func positionMs(report PlaybackReport) int64 {
 
 // reportPlayback reports the position of the playback session of a play
 // session, starting one if there is none (or it was stopped).
-func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackReport) error {
+func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackReport, kind string) error {
 	key := playSessionKey(c, report.PlaySessionId)
 	id, found, err := p.mappedSession(ctx, key)
 	if err != nil {
 		return err
 	}
 	if found {
+		p.log.DebugContext(ctx, "jellyfin: play session found", "play_session_id", report.PlaySessionId,
+			"playback_session_id", id)
 		_, err := p.playback.Progress(ctx, id, playbackrouter.ProgressRequestV1{
 			PositionMs: positionMs(report),
 			Paused:     report.IsPaused,
@@ -319,6 +403,11 @@ func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackRe
 			return p.renewMapping(ctx, key, id)
 		}
 		// The playback session timed out: start another one.
+		p.log.DebugContext(ctx, "jellyfin: playback session expired", "play_session_id", report.PlaySessionId,
+			"playback_session_id", id)
+	} else if kind != reportStart {
+		p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", kind,
+			"play_session_id", report.PlaySessionId, "item_id", report.ItemId)
 	}
 
 	sess, ok, err := p.startPlayback(ctx, c, report)
@@ -326,17 +415,25 @@ func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackRe
 		return err
 	}
 	if found {
+		p.log.DebugContext(ctx, "jellyfin: play session mapped", "play_session_id", report.PlaySessionId,
+			"playback_session_id", sess.ID, "replaces", id)
 		return p.renewMapping(ctx, key, sess.ID)
 	}
 	err = p.kv.Create(ctx, key, []byte(sess.ID.String()), playSessionTTL)
 	if errors.Is(err, kv.ErrExists) {
 		// A concurrent report of the same play session started its own
 		// playback session first: keep that one.
+		p.log.DebugContext(ctx, "jellyfin: play session mapped concurrently", "play_session_id", report.PlaySessionId,
+			"dropped_playback_session_id", sess.ID)
 		if err := p.playback.Stop(ctx, sess.ID, playbackrouter.StopRequestV1{}); err != nil &&
 			!errors.Is(err, playback.ErrNotFound) {
 			return err
 		}
-		return p.reportPlayback(ctx, c, report)
+		return p.reportPlayback(ctx, c, report, kind)
+	}
+	if err == nil {
+		p.log.DebugContext(ctx, "jellyfin: play session mapped", "play_session_id", report.PlaySessionId,
+			"playback_session_id", sess.ID)
 	}
 	return err
 }
@@ -344,9 +441,17 @@ func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackRe
 // startPlayback starts a playback session for the item of a report. It
 // returns false if the item is not a movie or an episode.
 func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackReport) (playbackrouter.PlaybackSessionV1, bool, error) {
-	itemID, err := uuid.Parse(report.ItemId)
-	if err != nil || p.library == nil {
+	ignored := func(reason string) (playbackrouter.PlaybackSessionV1, bool, error) {
+		p.log.DebugContext(ctx, "jellyfin: playback report ignored", "reason", reason,
+			"item_id", report.ItemId, "play_session_id", report.PlaySessionId)
 		return playbackrouter.PlaybackSessionV1{}, false, nil
+	}
+	itemID, err := uuid.Parse(report.ItemId)
+	if err != nil {
+		return ignored("invalid ItemId")
+	}
+	if p.library == nil {
+		return ignored("no library module")
 	}
 	ref, err := p.findItem(ctx, itemID)
 	if err != nil {
@@ -359,7 +464,7 @@ func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackRep
 	case ref.episode != nil:
 		fileID = ref.episode.FileID
 	default:
-		return playbackrouter.PlaybackSessionV1{}, false, nil
+		return ignored("item is not a movie or an episode")
 	}
 	sess, err := p.playback.CreateSession(ctx, playbackrouter.CreatePlaybackSessionRequestV1{
 		AccountID: c.session.AccountID,
@@ -380,9 +485,16 @@ func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackRep
 func (p *plugin) stopPlayback(ctx context.Context, c caller, report PlaybackReport) error {
 	key := playSessionKey(c, report.PlaySessionId)
 	id, found, err := p.mappedSession(ctx, key)
-	if err != nil || !found {
+	if err != nil {
 		return err
 	}
+	if !found {
+		p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", reportStop,
+			"play_session_id", report.PlaySessionId, "item_id", report.ItemId)
+		return nil
+	}
+	p.log.DebugContext(ctx, "jellyfin: play session stopped", "play_session_id", report.PlaySessionId,
+		"playback_session_id", id)
 	req := playbackrouter.StopRequestV1{}
 	if report.PositionTicks != nil {
 		pos := positionMs(report)
@@ -423,7 +535,7 @@ func (p *plugin) bitrateTest(w http.ResponseWriter, r *http.Request) {
 	if s := lowerQuery(r)["size"]; s != "" {
 		n, err := strconv.ParseInt(s, 10, 64)
 		if err != nil || n < 1 || n > bitrateTestMaxSize {
-			http.Error(w, "invalid size", http.StatusBadRequest)
+			badRequest(w, r, "invalid size")
 			return
 		}
 		size = n

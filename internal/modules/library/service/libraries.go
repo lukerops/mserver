@@ -50,6 +50,8 @@ func (s *service) CreateLibrary(ctx context.Context, req CreateLibraryRequest) (
 	if err := s.store.InsertLibrary(ctx, lib); err != nil {
 		return Library{}, err
 	}
+	s.log.InfoContext(ctx, "library: library created", "library_id", lib.ID, "name", lib.Name,
+		"media_type", lib.MediaType, "location_ids", lib.LocationIDs)
 
 	// The files of the locations are cataloged from the events of the
 	// resync. A failed resync is not fatal: the library exists, and the
@@ -57,7 +59,10 @@ func (s *service) CreateLibrary(ctx context.Context, req CreateLibraryRequest) (
 	for _, loc := range lib.LocationIDs {
 		if err := s.resyncLocation(ctx, loc); err != nil {
 			s.log.WarnContext(ctx, "library: resync of location failed",
-				"library", lib.ID, "location", loc, "error", err)
+				"library_id", lib.ID, "location_id", loc, "error", err)
+		} else {
+			s.log.InfoContext(ctx, "library: resync of location requested",
+				"library_id", lib.ID, "location_id", loc)
 		}
 	}
 	return lib, nil
@@ -72,7 +77,7 @@ func (s *service) resyncLocation(ctx context.Context, loc uuid.UUID) error {
 			return nil
 		}
 		s.log.DebugContext(ctx, "library: resync of location failed, retrying",
-			"location", loc, "in", wait, "error", err)
+			"location_id", loc, "in", wait, "error", err)
 		timer := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
@@ -87,6 +92,10 @@ func (s *service) resyncLocation(ctx context.Context, loc uuid.UUID) error {
 
 func (s *service) DeleteLibrary(ctx context.Context, id uuid.UUID) error {
 	return s.store.WithTx(ctx, func(ctx context.Context) error {
+		lib, err := s.store.GetLibrary(ctx, id)
+		if err != nil {
+			return err
+		}
 		movies, _, err := s.store.ListMovies(ctx, MovieQuery{LibraryID: id})
 		if err != nil {
 			return err
@@ -112,7 +121,13 @@ func (s *service) DeleteLibrary(ctx context.Context, id uuid.UUID) error {
 		for _, sr := range series {
 			evs = append(evs, seriesRemovedEvent(sr))
 		}
-		return s.outbox.Publish(ctx, evs...)
+		if err := s.outbox.Publish(ctx, evs...); err != nil {
+			return err
+		}
+		s.log.InfoContext(ctx, "library: library deleted", "library_id", lib.ID, "name", lib.Name,
+			"media_type", lib.MediaType, "location_ids", lib.LocationIDs, "movies", len(movies),
+			"series", len(series), "seasons", len(seasons), "episodes", len(episodes))
+		return nil
 	})
 }
 
@@ -151,7 +166,12 @@ func (s *service) ResyncLibrary(ctx context.Context, id uuid.UUID) error {
 		for _, e := range episodes {
 			evs = append(evs, episodeEvent(events.EpisodeAddedV1, e))
 		}
-		return s.outbox.Publish(ctx, evs...)
+		if err := s.outbox.Publish(ctx, evs...); err != nil {
+			return err
+		}
+		s.log.InfoContext(ctx, "library: resync requested", "library_id", id, "movies", len(movies),
+			"series", len(series), "seasons", len(seasons), "episodes", len(episodes))
+		return nil
 	})
 }
 

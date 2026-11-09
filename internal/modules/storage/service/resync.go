@@ -36,5 +36,10 @@ func (s *service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
 	for _, a := range analyses {
 		evs = append(evs, fileAnalyzedEvent(id, a))
 	}
-	return s.outbox.Publish(ctx, evs...)
+	if err := s.outbox.Publish(ctx, evs...); err != nil {
+		return err
+	}
+	s.log.DebugContext(ctx, "storage: location resynced", "location_id", id,
+		"files", len(files), "analyses", len(analyses), "count", len(evs))
+	return nil
 }

@@ -63,12 +63,12 @@ func (rt *router) resolve(w http.ResponseWriter, r *http.Request) {
 func (rt *router) fileContent(w http.ResponseWriter, r *http.Request) {
 	location, err := uuid.Parse(r.PathValue("location_id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid location id " + r.PathValue("location_id")})
+		badRequest(w, r, "invalid location id "+r.PathValue("location_id"))
 		return
 	}
 	id, err := uuid.Parse(r.PathValue("file_id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid file id " + r.PathValue("file_id")})
+		badRequest(w, r, "invalid file id "+r.PathValue("file_id"))
 		return
 	}
 	f, content, err := rt.svc.OpenFile(r.Context(), location, id)

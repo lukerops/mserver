@@ -8,7 +8,7 @@ import (
 )
 
 func TestAccepts(t *testing.T) {
-	a := New("")
+	a := New("", nil)
 	for p, want := range map[string]bool{
 		"Movie (1999)/Movie.mkv": true,
 		"movie.MP4":              true,

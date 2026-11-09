@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"slices"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -16,6 +18,7 @@ import (
 func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, error) {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
+	start := time.Now()
 
 	loc, err := s.store.GetLocation(ctx, id)
 	if err != nil {
@@ -47,6 +50,8 @@ func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, e
 
 	changes, evs := diff(id, known, found)
 	if len(evs) == 0 {
+		s.log.InfoContext(ctx, "storage: location scanned", "location_id", id,
+			"files", len(found), "changes", 0, "duration", time.Since(start))
 		return ScanResult{}, nil
 	}
 	if err := s.store.WithTx(ctx, func(ctx context.Context) error {
@@ -57,8 +62,36 @@ func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, e
 	}); err != nil {
 		return ScanResult{}, err
 	}
+	s.logFileChanges(ctx, evs)
 	s.kickAnalysis()
-	return scanResult(evs), nil
+	result := scanResult(evs)
+	s.log.InfoContext(ctx, "storage: location scanned", "location_id", id,
+		"files", len(found), "changes", len(evs), "added", result.Added, "changed", result.Changed,
+		"moved", result.Moved, "removed", result.Removed, "duration", time.Since(start))
+	return result, nil
+}
+
+// fileChangeMessages are the log messages of the file events of a scan.
+var fileChangeMessages = map[string]string{
+	events.FileIndexedV1: "storage: file indexed",
+	events.FileChangedV1: "storage: file updated",
+	events.FileMovedV1:   "storage: file moved",
+	events.FileRemovedV1: "storage: file removed",
+}
+
+// logFileChanges logs, at debug, each file change saved by a scan.
+func (s *service) logFileChanges(ctx context.Context, evs []queue.Event) {
+	if !s.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	for _, e := range evs {
+		env, ok := e.(queue.Envelope[events.FileEventV1])
+		if !ok {
+			continue
+		}
+		s.log.DebugContext(ctx, fileChangeMessages[e.Topic()],
+			"file_id", env.Data.FileID, "location_id", env.Data.LocationID, "path", env.Data.Path)
+	}
 }
 
 // diff compares the index of a location with the files found on disk and
@@ -141,19 +174,24 @@ func scanResult(evs []queue.Event) ScanResult {
 }
 
 func (s *service) ScanAll(ctx context.Context) {
+	start := time.Now()
 	locations, err := s.store.ListLocations(ctx)
 	if err != nil {
-		s.log.Error("storage: list locations", "error", err)
+		if ctx.Err() == nil {
+			s.log.ErrorContext(ctx, "storage: list locations", "error", err)
+		}
 		return
 	}
+	failed := 0
 	for _, loc := range locations {
-		result, err := s.ScanLocation(ctx, loc.ID)
-		if err != nil {
-			if ctx.Err() == nil {
-				s.log.Warn("storage: scan failed", "location", loc.ID, "error", err)
+		if _, err := s.ScanLocation(ctx, loc.ID); err != nil {
+			if ctx.Err() != nil {
+				return
 			}
-			continue
+			failed++
+			s.log.WarnContext(ctx, "storage: scan failed", "location_id", loc.ID, "error", err)
 		}
-		s.log.Debug("storage: scan finished", "location", loc.ID, "result", result)
 	}
+	s.log.DebugContext(ctx, "storage: all locations scanned",
+		"count", len(locations), "failed", failed, "duration", time.Since(start))
 }

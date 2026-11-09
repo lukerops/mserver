@@ -58,8 +58,13 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	if err != nil {
 		return nil, err
 	}
-	analyzers := newAnalyzers(log)
-	db, err := database.Open(ctx, filepath.Join(dataDir, "storage.db"))
+	ffprobePath := os.Getenv("MSERVER_FFPROBE_PATH")
+	if ffprobePath == "" {
+		ffprobePath = "ffprobe"
+	}
+	analyzers := newAnalyzers(ctx, ffprobePath, log)
+	dataFile := filepath.Join(dataDir, "storage.db")
+	db, err := database.Open(ctx, dataFile)
 	if err != nil {
 		return nil, err
 	}
@@ -78,26 +83,25 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	m := &Module{Mux: router.New(svc, log), db: db, outbox: ob, cancel: cancel}
 	m.wg.Go(func() { scanLoop(runCtx, svc, interval) })
 	m.wg.Go(func() { svc.RunAnalysis(runCtx, analysisInterval) })
+	log.InfoContext(ctx, "storage: module started", "data_file", dataFile,
+		"scan_interval", interval, "analysis_interval", analysisInterval,
+		"stable_after", service.StableAfter, "ffprobe_path", ffprobePath)
 	return m, nil
 }
 
 // newAnalyzers creates the analyzer plugins:
 //
-//   - ffprobe (plugins/storage/ffprobe), with the executable
-//     MSERVER_FFPROBE_PATH (default "ffprobe" from PATH).
+//   - ffprobe (plugins/storage/ffprobe), with the executable ffprobePath
+//     (MSERVER_FFPROBE_PATH, default "ffprobe" from PATH).
 //
 // A missing executable is not fatal: the files wait to be analyzed until
 // it is installed.
-func newAnalyzers(log *slog.Logger) []analyzer.Analyzer {
-	ffprobePath := os.Getenv("MSERVER_FFPROBE_PATH")
-	if ffprobePath == "" {
-		ffprobePath = "ffprobe"
-	}
+func newAnalyzers(ctx context.Context, ffprobePath string, log *slog.Logger) []analyzer.Analyzer {
 	if _, err := exec.LookPath(ffprobePath); err != nil {
-		log.Warn("storage: ffprobe not found, video files will not be analyzed",
+		log.WarnContext(ctx, "storage: ffprobe not found, video files will not be analyzed",
 			"path", ffprobePath, "error", err)
 	}
-	return []analyzer.Analyzer{ffprobe.New(ffprobePath)}
+	return []analyzer.Analyzer{ffprobe.New(ffprobePath, log)}
 }
 
 // scanInterval parses the value of MSERVER_STORAGE_SCAN_INTERVAL. An empty

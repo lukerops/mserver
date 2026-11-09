@@ -36,7 +36,8 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	if log == nil {
 		log = slog.Default()
 	}
-	db, err := database.Open(ctx, filepath.Join(dataDir, "identity.db"))
+	dataFile := filepath.Join(dataDir, "identity.db")
+	db, err := database.Open(ctx, dataFile)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +52,7 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	ob.Start(ctx)
 
 	svc := service.New(st, ob, log)
+	log.InfoContext(ctx, "identity: module started", "data_file", dataFile)
 	return &Module{Mux: router.New(svc, log), db: db, outbox: ob}, nil
 }
 

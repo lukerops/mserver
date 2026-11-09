@@ -10,6 +10,10 @@
 //	MSERVER_LOG_LEVEL      debug, info, warn or error (default info)
 //	MSERVER_LOG_FORMAT     text or json (default text)
 //
+// Every request is logged (internal/infra/logging): successes at debug,
+// client errors at info and server errors at error, with an ID shared by
+// the calls between modules. At debug level, the events are logged too.
+//
 // Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
 // and MSERVER_FFPROBE_PATH in the storage, MSERVER_PLAYBACK_SESSION_TIMEOUT
 // in the playback).
@@ -32,6 +36,7 @@ import (
 
 	"github.com/lukerops/mserver/internal/clients"
 	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
+	"github.com/lukerops/mserver/internal/infra/logging"
 	"github.com/lukerops/mserver/internal/infra/queue/memory"
 	"github.com/lukerops/mserver/internal/modules/identity"
 	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
@@ -65,22 +70,12 @@ func run(ctx context.Context) error {
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	var level slog.Level
-	if v := os.Getenv("MSERVER_LOG_LEVEL"); v != "" {
-		if err := level.UnmarshalText([]byte(v)); err != nil {
-			return fmt.Errorf("MSERVER_LOG_LEVEL: unknown level %q", v)
-		}
+	logLevel, logFormat := os.Getenv("MSERVER_LOG_LEVEL"), os.Getenv("MSERVER_LOG_FORMAT")
+	log, err := logging.New(os.Stderr, logLevel, logFormat)
+	if err != nil {
+		return fmt.Errorf("MSERVER_LOG_LEVEL/MSERVER_LOG_FORMAT: %w", err)
 	}
-	opts := &slog.HandlerOptions{Level: level}
-	var log *slog.Logger
-	switch v := os.Getenv("MSERVER_LOG_FORMAT"); v {
-	case "", "text":
-		log = slog.New(slog.NewTextHandler(os.Stderr, opts))
-	case "json":
-		log = slog.New(slog.NewJSONHandler(os.Stderr, opts))
-	default:
-		return fmt.Errorf("MSERVER_LOG_FORMAT: unknown format %q", v)
-	}
+	log.Info("mserver: starting", "addr", addr, "data_dir", dataDir)
 
 	// Listen first: the modules call each other on this address. Requests
 	// wait in the backlog until the server starts serving.
@@ -92,20 +87,21 @@ func run(ctx context.Context) error {
 	baseURL := localURL(ln.Addr())
 
 	// One HTTP client for every module client, so that connections are
-	// reused. It never uses a proxy (the calls are internal).
-	hc := &http.Client{Transport: &http.Transport{
+	// reused. It never uses a proxy (the calls are internal), and it
+	// forwards the request ID so that the module logs the same ID.
+	hc := &http.Client{Transport: logging.Transport{Base: &http.Transport{
 		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 		IdleConnTimeout:     90 * time.Second,
-	}}
+	}}}
 	c := clients.Clients{
 		Identity: identityclient.New(hc, baseURL),
 		Storage:  storageclient.New(hc, baseURL),
 		Library:  libraryclient.New(hc, baseURL),
 		Playback: playbackclient.New(hc, baseURL),
 	}
-	bus := memory.New()
+	bus := memory.New(memory.WithLogger(log.With("component", "queue")))
 
 	ident, err := identity.New(ctx, dataDir, bus, c, log.With("module", "identity"))
 	if err != nil {
@@ -142,7 +138,11 @@ func run(ctx context.Context) error {
 	mux.Handle("/", modules(ident.Mux, lib.Mux, stor.Mux, pb.Mux))
 	mount(mux, "/plugins/jellyfin", jf)
 
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           logging.Handler(log.With("component", "http"), mux),
+		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          slog.NewLogLogger(log.With("component", "http").Handler(), slog.LevelWarn),
+	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
 	log.Info("mserver: listening", "addr", ln.Addr().String(), "modules", baseURL)

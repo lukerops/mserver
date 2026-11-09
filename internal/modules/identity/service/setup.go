@@ -70,6 +70,6 @@ func (s *service) Setup(ctx context.Context, req SetupRequest) (SetupResult, err
 	if err != nil {
 		return SetupResult{}, err
 	}
-	s.log.Info("identity: setup done", "account", account.ID, "profile", profile.ID)
+	s.log.InfoContext(ctx, "identity: setup done", "account_id", account.ID, "profile_id", profile.ID)
 	return SetupResult{Account: account, Profile: profile}, nil
 }

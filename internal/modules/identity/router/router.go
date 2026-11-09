@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/lukerops/mserver/internal/infra/logging"
 	"github.com/lukerops/mserver/internal/modules/identity/service"
 )
 
@@ -45,7 +46,7 @@ func New(svc service.Service, log *slog.Logger) *http.ServeMux {
 // response is already written.
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid body: " + err.Error()})
+		badRequest(w, r, "invalid body: "+err.Error())
 		return false
 	}
 	return true
@@ -56,10 +57,16 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 func pathID(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
 	id, err := uuid.Parse(r.PathValue("id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: "invalid id " + r.PathValue("id")})
+		badRequest(w, r, "invalid id "+r.PathValue("id"))
 		return uuid.Nil, false
 	}
 	return id, true
+}
+
+// badRequest answers 400 with msg, also added to the access log.
+func badRequest(w http.ResponseWriter, r *http.Request, msg string) {
+	logging.Annotate(r.Context(), "error", msg)
+	writeJSON(w, http.StatusBadRequest, ErrorV1{Error: msg})
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -86,5 +93,6 @@ func (rt *router) writeError(w http.ResponseWriter, r *http.Request, err error) 
 		writeJSON(w, http.StatusInternalServerError, ErrorV1{Error: "internal error"})
 		return
 	}
+	logging.Annotate(r.Context(), "error", err.Error())
 	writeJSON(w, status, ErrorV1{Error: err.Error()})
 }

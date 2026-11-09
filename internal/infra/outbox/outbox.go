@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/lukerops/mserver/internal/infra/database"
+	"github.com/lukerops/mserver/internal/infra/logging"
 	"github.com/lukerops/mserver/internal/infra/queue"
 )
 
@@ -72,6 +73,10 @@ func (o *Outbox) Publish(ctx context.Context, events ...queue.Event) error {
 			); err != nil {
 				return fmt.Errorf("outbox: save %s: %w", e.EventID(), err)
 			}
+			// Logged with the context of the caller: the request ID ties the
+			// event to the request that produced it. The event is published
+			// only if the transaction commits ("outbox: event published").
+			o.log.DebugContext(ctx, "outbox: event queued", "event_id", e.EventID(), "topic", e.Topic())
 		}
 		return nil
 	})
@@ -97,7 +102,7 @@ func (o *Outbox) relay(ctx context.Context) {
 	defer ticker.Stop()
 	for {
 		if err := o.publishPending(ctx); err != nil && ctx.Err() == nil {
-			o.log.Warn("outbox: publish", "error", err)
+			o.log.Warn("outbox: publish failed, retrying", "in", o.poll, "error", err)
 		}
 		select {
 		case <-ctx.Done():
@@ -117,14 +122,38 @@ func (o *Outbox) publishPending(ctx context.Context) error {
 			return err
 		}
 		for _, e := range entries {
+			// The handlers run with the event ID as request ID: their logs,
+			// and the module calls they make, carry the ID of the event.
+			ctx := logging.WithRequestID(ctx, e.id)
 			if err := o.pub.Publish(ctx, e.msg); err != nil {
-				return fmt.Errorf("%s: %w", e.msg.Topic, err)
+				return fmt.Errorf("event %s (%s): %w", e.id, e.msg.Topic, err)
 			}
 			if _, err := o.db.ExecContext(ctx, `DELETE FROM outbox WHERE id = ?`, e.id); err != nil {
 				return fmt.Errorf("outbox: delete %s: %w", e.id, err)
 			}
+			o.logPublished(ctx, e)
 		}
 	}
+}
+
+// logPublished logs a published event with its subject and data, at
+// debug level.
+func (o *Outbox) logPublished(ctx context.Context, e entry) {
+	if !o.log.Enabled(ctx, slog.LevelDebug) {
+		return
+	}
+	var env struct {
+		Subject string          `json:"subject"`
+		Time    time.Time       `json:"time"`
+		Data    json.RawMessage `json:"data"`
+	}
+	_ = json.Unmarshal(e.msg.Payload, &env)
+	attrs := []any{"event_id", e.id, "topic", e.msg.Topic, "subject", env.Subject}
+	if !env.Time.IsZero() {
+		attrs = append(attrs, "delay", time.Since(env.Time).Round(time.Millisecond))
+	}
+	attrs = append(attrs, "data", string(env.Data))
+	o.log.DebugContext(ctx, "outbox: event published", attrs...)
 }
 
 // entry is a saved event.

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strconv"
@@ -109,8 +110,12 @@ func (p *plugin) findItem(ctx context.Context, id uuid.UUID) (itemRef, error) {
 // it answers 404 and returns false.
 func (p *plugin) lookupItem(w http.ResponseWriter, r *http.Request) (itemRef, bool) {
 	id, err := uuid.Parse(r.PathValue("itemId"))
-	if err != nil || p.library == nil {
-		http.NotFound(w, r)
+	if err != nil {
+		notFound(w, r, "invalid itemId")
+		return itemRef{}, false
+	}
+	if p.library == nil {
+		notFound(w, r, "item not found: no library module")
 		return itemRef{}, false
 	}
 	ref, err := p.findItem(r.Context(), id)
@@ -119,7 +124,7 @@ func (p *plugin) lookupItem(w http.ResponseWriter, r *http.Request) (itemRef, bo
 		return itemRef{}, false
 	}
 	if !ref.exists() {
-		http.NotFound(w, r)
+		notFound(w, r, "item not found")
 		return itemRef{}, false
 	}
 	return ref, true
@@ -132,7 +137,7 @@ func (p *plugin) lookupItem(w http.ResponseWriter, r *http.Request) (itemRef, bo
 func (p *plugin) parentScope(w http.ResponseWriter, r *http.Request, parent string) (itemRef, bool, bool) {
 	id, err := uuid.Parse(parent)
 	if err != nil {
-		http.Error(w, "invalid parentId", http.StatusBadRequest)
+		badRequest(w, r, "invalid parentId")
 		return itemRef{}, false, false
 	}
 	ref, err := p.findItem(r.Context(), id)
@@ -173,11 +178,16 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 	start, okStart := intParam(q, "startindex")
 	limit, okLimit := intParam(q, "limit")
 	if !okStart || !okLimit {
-		http.Error(w, "invalid startIndex or limit", http.StatusBadRequest)
+		badRequest(w, r, "invalid startIndex or limit")
 		return
 	}
 	empty := BaseItemDtoQueryResult{Items: []any{}, StartIndex: start}
-	if p.library == nil || unsupportedFilter(q) {
+	if p.library == nil {
+		writeJSON(w, http.StatusOK, empty)
+		return
+	}
+	if f := unsupportedFilter(q); f != "" {
+		p.log.DebugContext(r.Context(), "jellyfin: items: unsupported filter, empty result", "filter", f)
 		writeJSON(w, http.StatusOK, empty)
 		return
 	}
@@ -187,7 +197,7 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 		for part := range strings.SplitSeq(s, ",") {
 			id, err := uuid.Parse(strings.TrimSpace(part))
 			if err != nil {
-				http.Error(w, "invalid ids", http.StatusBadRequest)
+				badRequest(w, r, "invalid ids")
 				return
 			}
 			iq.ids = append(iq.ids, id)
@@ -196,7 +206,7 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 	for _, s := range list(q["years"]) {
 		y, err := strconv.Atoi(s)
 		if err != nil || y <= 0 {
-			http.Error(w, "invalid years", http.StatusBadRequest)
+			badRequest(w, r, "invalid years")
 			return
 		}
 		iq.years = append(iq.years, y)
@@ -248,10 +258,12 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var sources []source
+	var sourceKinds []string
 	for _, kind := range kinds {
 		if !includesType(q, kind) {
 			continue
 		}
+		n := len(sources)
 		switch kind {
 		case "Movie":
 			sources = append(sources, p.movieSource(iq))
@@ -268,6 +280,16 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 				sources = append(sources, p.episodeSource(iq))
 			}
 		}
+		if len(sources) > n {
+			sourceKinds = append(sourceKinds, kind)
+		}
+	}
+	if ctx := r.Context(); p.log.Enabled(ctx, slog.LevelDebug) {
+		p.log.DebugContext(ctx, "jellyfin: items query",
+			"parent_id", q["parentid"], "recursive", recursive, "types", sourceKinds,
+			"ids", len(iq.ids), "years", iq.years, "audio_languages", iq.audio,
+			"subtitle_languages", iq.subtitle, "sort_by", iq.sortBy, "descending", iq.descending,
+			"start_index", start, "limit", limit, "ignored_params", ignoredParams(q))
 	}
 	res, err := collect(r.Context(), sources, start, limit)
 	if err != nil {
@@ -439,7 +461,7 @@ func (p *plugin) latestItems(w http.ResponseWriter, r *http.Request) {
 	q := lowerQuery(r)
 	limit, ok := intParam(q, "limit")
 	if !ok {
-		http.Error(w, "invalid limit", http.StatusBadRequest)
+		badRequest(w, r, "invalid limit")
 		return
 	}
 	if limit == 0 {
@@ -821,11 +843,6 @@ func (p *plugin) emptyItemList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, []BaseItemDto{})
 }
 
-func (p *plugin) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
-	p.log.ErrorContext(r.Context(), "jellyfin: "+op, "error", err)
-	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-}
-
 // lowerQuery returns the query parameters keyed by the lower-case name:
 // Jellyfin parameter names are case insensitive (jellyfin-web sends
 // "ParentId", the OpenAPI says "parentId"). Repeated parameters
@@ -857,6 +874,30 @@ func intParam(q map[string]string, name string) (int, bool) {
 }
 
 func isTrue(s string) bool { return strings.EqualFold(s, "true") }
+
+// itemsParams are the query parameters /Items understands, or knowingly
+// ignores because they only shape the response (images, user data...).
+var itemsParams = map[string]bool{
+	"startindex": true, "limit": true, "ids": true, "years": true, "audiolanguages": true,
+	"subtitlelanguages": true, "sortby": true, "sortorder": true, "fields": true, "recursive": true,
+	"parentid": true, "includeitemtypes": true, "excludeitemtypes": true, "mediatypes": true,
+	"filters": true, "userid": true, "api_key": true, "apikey": true, "enableimages": true,
+	"enableimagetypes": true, "imagetypelimit": true, "enableuserdata": true,
+	"enabletotalrecordcount": true,
+}
+
+// ignoredParams lists, sorted, the parameters of an /Items query that the
+// plugin does not handle: what a client asks that is silently ignored.
+func ignoredParams(q map[string]string) []string {
+	var out []string
+	for k := range q {
+		if !itemsParams[k] && !slices.Contains(unsupportedBoolParams, k) && !slices.Contains(unsupportedValueParams, k) {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
 
 // list splits a comma-separated parameter into lower-case values.
 func list(s string) []string {
@@ -891,34 +932,41 @@ func wantsField(q map[string]string, field string) bool {
 	return contains(q["fields"], field)
 }
 
-// unsupportedFilter reports whether the query filters on something no
-// item has yet: user state (until watchstate) or metadata (until
+// Filters no item matches yet: user state (until watchstate) or metadata
+// (until metadata).
+var (
+	unsupportedBoolParams  = []string{"isfavorite", "isplayed", "isresumable", "islocked", "isplaceholder", "ismissing"}
+	unsupportedValueParams = []string{
+		"searchterm", "genres", "genreids", "personids", "person", "persontypes", "studios",
+		"studioids", "tags", "officialratings", "artistids", "albumids", "namestartswith",
+		"namestartswithorgreater", "namelessthan", "minpremieredate", "maxpremieredate",
+	}
+)
+
+// unsupportedFilter returns the filter of the query that no item matches
+// yet, if any: user state (until watchstate) or metadata (until
 // metadata).
-func unsupportedFilter(q map[string]string) bool {
-	for _, name := range []string{"isfavorite", "isplayed", "isresumable", "islocked", "isplaceholder", "ismissing"} {
+func unsupportedFilter(q map[string]string) string {
+	for _, name := range unsupportedBoolParams {
 		if isTrue(q[name]) {
-			return true
+			return name
 		}
 	}
 	for _, f := range list(q["filters"]) {
 		switch f {
 		case "isfavorite", "isplayed", "isresumable", "likes", "dislikes", "isfavoriteorlikes", "isfolder":
-			return true
+			return "filters=" + f
 		}
 	}
-	for _, name := range []string{
-		"searchterm", "genres", "genreids", "personids", "person", "persontypes", "studios",
-		"studioids", "tags", "officialratings", "artistids", "albumids", "namestartswith",
-		"namestartswithorgreater", "namelessthan", "minpremieredate", "maxpremieredate",
-	} {
+	for _, name := range unsupportedValueParams {
 		if q[name] != "" {
-			return true
+			return name
 		}
 	}
 	if mediaTypes := q["mediatypes"]; mediaTypes != "" && !contains(mediaTypes, "Video") {
-		return true
+		return "mediatypes=" + mediaTypes
 	}
-	return false
+	return ""
 }
 
 // movieSort maps the Jellyfin sort (the first of sortBy and sortOrder) to

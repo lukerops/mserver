@@ -149,11 +149,15 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 			return
 		}
 
+		a := requestAuthorization(r)
+		annotateClient(r, a)
+
 		// Jellyfin uses case-insensitive path
+		path := r.URL.Path
 		r.URL.Path = strings.ToLower(r.URL.Path)
 		r.URL.RawPath = strings.ToLower(r.URL.RawPath)
 
-		log.Debug(r.URL.String())
+		p.checkRoute(mux, r, path, a)
 		mux.ServeHTTP(w, r)
 	})
 	return cors

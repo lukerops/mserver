@@ -18,7 +18,7 @@ func (rt *router) listMovies(w http.ResponseWriter, r *http.Request) {
 	}
 	q, err := ParseMovieQueryV1(r.URL.Query())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorV1{Error: err.Error()})
+		badRequest(w, r, err.Error())
 		return
 	}
 	page, err := rt.svc.ListMovies(r.Context(), service.MovieQuery{

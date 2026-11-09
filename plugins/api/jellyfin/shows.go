@@ -15,13 +15,17 @@ import (
 // none, it answers 404 and returns false.
 func (p *plugin) lookupSeries(w http.ResponseWriter, r *http.Request) (libraryrouter.SeriesV1, bool) {
 	id, err := uuid.Parse(r.PathValue("seriesId"))
-	if err != nil || p.library == nil {
-		http.NotFound(w, r)
+	if err != nil {
+		notFound(w, r, "invalid seriesId")
+		return libraryrouter.SeriesV1{}, false
+	}
+	if p.library == nil {
+		notFound(w, r, "series not found: no library module")
 		return libraryrouter.SeriesV1{}, false
 	}
 	s, err := p.library.GetSeries(r.Context(), uuid.Nil, id)
 	if errors.Is(err, library.ErrNotFound) {
-		http.NotFound(w, r)
+		notFound(w, r, "series not found")
 		return libraryrouter.SeriesV1{}, false
 	}
 	if err != nil {
@@ -77,7 +81,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	start, okStart := intParam(q, "startindex")
 	limit, okLimit := intParam(q, "limit")
 	if !okStart || !okLimit {
-		http.Error(w, "invalid startIndex or limit", http.StatusBadRequest)
+		badRequest(w, r, "invalid startIndex or limit")
 		return
 	}
 	empty := BaseItemDtoQueryResult{Items: []any{}, StartIndex: start}
@@ -91,14 +95,14 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	case q["seasonid"] != "":
 		id, err := uuid.Parse(q["seasonid"])
 		if err != nil {
-			http.Error(w, "invalid seasonId", http.StatusBadRequest)
+			badRequest(w, r, "invalid seasonId")
 			return
 		}
 		seasonID = id
 	case q["season"] != "":
 		number, err := strconv.Atoi(q["season"])
 		if err != nil {
-			http.Error(w, "invalid season", http.StatusBadRequest)
+			badRequest(w, r, "invalid season")
 			return
 		}
 		seasons, err := p.library.ListSeasons(r.Context(), series.LibraryID, series.ID, libraryrouter.SeasonQueryV1{})
@@ -130,7 +134,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	if s := q["startitemid"]; s != "" {
 		id, err := uuid.Parse(s)
 		if err != nil {
-			http.Error(w, "invalid startItemId", http.StatusBadRequest)
+			badRequest(w, r, "invalid startItemId")
 			return
 		}
 		for i, e := range episodes {
@@ -142,6 +146,8 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	full := wantsField(q, "MediaSources") || wantsField(q, "MediaStreams")
+	p.log.DebugContext(r.Context(), "jellyfin: episodes query", "series_id", series.ID, "season_id", seasonID,
+		"start_item_id", q["startitemid"], "start_index", start, "limit", limit, "total", len(episodes))
 	res := BaseItemDtoQueryResult{Items: []any{}, TotalRecordCount: len(episodes), StartIndex: start}
 	for _, e := range paginate(episodes, start, limit) {
 		res.Items = append(res.Items, p.episodeItem(e, full))
