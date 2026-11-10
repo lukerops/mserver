@@ -8,27 +8,28 @@ Este documento define o plano de entregas incrementais (fatias verticais) para a
 
 ### 1.1 Objetivo do MVP
 
-Permitir que o cliente oficial **`jellyfin-web`** se conecte ao `mserver`, autentique usando `<username ou email>#<profile>`, navegue pelo catálogo local de **Filmes** e **Séries** e reproduza mídia via **Direct Play** com **legendas externas `.srt`**, operando 100% sobre a arquitetura definitiva do projeto.
+Permitir que o cliente oficial **`jellyfin-web`** se conecte ao `mserver`, autentique usando `<username ou email>#<profile>`, navegue pelo catálogo local de **Filmes** e **Séries** e reproduza mídia via **Direct Play** com **legendas externas `.srt`**, operando 100% sobre a arquitetura definitiva do projeto (monolito autossuficiente e pronto para microserviços).
 
 ### 1.2 Regras Arquiteturais desde a Entrega 1
 
 1. **Isolamento Total do Jellyfin e Governança de Escopo (Inegociável):**
    - **Todas as regras de negócio, conceitos, DTOs, unidades (`Ticks`), fluxos e adaptações referentes ao Jellyfin devem estar 100% isoladas dentro do plugin `plugins/api/jellyfin`.**
    - **Nenhum conceito que não foi discutido deve existir fora do plugin do Jellyfin.**
-   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos módulos de domínio, contratos REST dos módulos ou infraestrutura) deve ser discutido antes.**
-2. **Arquitetura ECST (Event-Carried State Transfer) completa:**
-   - 1 banco SQLite isolado por módulo (`<MSERVER_DATA_DIR>/<modulo>.db`) com migrations embutidas (`go:embed`).
-   - Transação propagada pelo contexto (`database.WithTx` / `database.ConnFrom`).
-   - `outbox` transacional (`internal/infra/outbox`) gravando eventos na mesma transação de negócio com chave `UUIDv7` monótona.
-   - Barramento de eventos em memória (`internal/infra/queue/memory`) trafegando envelopes **CloudEvents 1.0** (`queue.Envelope[T]`).
-   - Operação universal `Resync(ctx, escopo)` em todos os módulos produtores de estado (`identity`, `storage`, `library`, `subtitles`).
-3. **Fronteiras estritas entre módulos (HTTP REST):**
-   - Toda comunicação síncrona entre módulos passa pelas rotas REST do módulo de destino, inclusive no monolito (`http://127.0.0.1:<porta>/`). Nenhum módulo importa `service/` ou `store/` de outro: apenas os pacotes `client/` (DTOs JSON e erros tipados) e `events/` (tipos e payloads versionados dos eventos).
+   - **Tudo o que for preciso adicionar fora de `plugins/api/jellyfin` (nos módulos de domínio, contratos `.proto` dos módulos ou infraestrutura) deve ser discutido antes.**
+2. **Arquitetura ECST (Event-Carried State Transfer) sem Outbox:**
+   - 1 banco isolado por módulo (`<MSERVER_DATA_DIR>/<módulo>.db` no SQLite ou `SCHEMA <módulo>` no Postgres) com uma única implementação de queries SQL manuais diretamente em `store/` (queries base constantes em `store/queries.go`, placeholders `$1, $2`) e migrations embutidas (`go:embed`) separadas por dialeto (`store/migrations/sqlite` e `store/migrations/postgres`).
+   - Publicação de eventos diretamente no `pubsub.Publisher` após o commit no banco, trafegando envelopes **CloudEvents 1.0** (`pubsub.Envelope[T]`) com `Message.ID` (`UUIDv7`).
+   - `pubsub.Subscriber` identificando o grupo consumidor (`Subscribe(ctx, consumer, topic, handler)`).
+   - Operação universal `Resync` em todos os módulos produtores de estado (`identity`, `storage`, `library`, `subtitles`) para _cold start_, autocura pós-queda abrupta e reconciliação periódica (`MSERVER_RESYNC_INTERVAL=24h`).
+3. **Fronteiras estritas entre módulos (ConnectRPC + Protobuf):**
+   - Contratos síncronos de todos os módulos definidos em `proto/<módulo>/v1/<módulo>.proto` e gerados via `buf` em `internal/gen/<módulo>/v1`.
+   - No modo monolito (`MSERVER_<MÓDULO>_URL` vazio), chamadas entre módulos usam o **`In-process transport` (`connectinprocess`) com Zero-Copy** (trafegando por ponteiros de memória, sem rede e sem serialização). No modo microserviços (`MSERVER_<MÓDULO>_URL` definido), usam o cliente ConnectRPC sobre HTTP/2 (`h2c`) no protocolo padrão do Connect.
+   - Nenhum módulo importa `service/`, `store/` ou `handler/` de outro: apenas as interfaces geradas em `internal/gen/...` (via `clients.Clients`) e os tipos de eventos em `events/`.
    - Apenas o módulo `storage` acessa o sistema de arquivos físico (confinado por `os.Root`). O restante do sistema referencia arquivos exclusivamente por `FileID` (`UUIDv7`).
-4. **Separação estrita de Surfaces:**
-   - **API do Projeto (APIs REST dos módulos em `/v1`):** cada módulo registra suas rotas na raiz do listener, todas sob o mesmo `/v1` e sem prefixo de módulo (ex.: `/v1/setup`, `/v1/accounts`, `/v1/locations`). Os DTOs carregam o sufixo da versão (`AccountV1`, `LocationV1`). Qualquer rota ou contrato fora do que já foi acordado deve ser discutido antes.
-   - **`plugins/api/jellyfin` (Plugin Surface Jellyfin):** concentra **100% das rotas e regras de negócio da API Jellyfin 12.4.0** (incluindo parse de `<username ou email>#<profile>`, `QuickConnect`, tradução para `BaseItemDto`/`MediaSources`/`MediaStreams`/`DeliveryUrl`, avaliação de `DeviceProfile`/`PlaybackInfo`, conversão para `Ticks` e stubs de compatibilidade). Nenhuma rota ou regra do Jellyfin existe fora desse plugin.
-   - **`storage` HTTP Data Plane:** expõe apenas `GET /locations/{LocationID}/files/{FileID}` (com suporte a `Range`). Nas rotas de streaming de vídeo e legenda do Jellyfin, o plugin `plugins/api/jellyfin` atua como **proxy reverso em streaming** para o `storage`.
+4. **Separação estrita de Surfaces e Plano de Dados:**
+   - **API do Projeto (Serviços ConnectRPC dos módulos):** cada módulo registra seu handler ConnectRPC no servidor (aceitando tanto gRPC/Protobuf binário quanto `POST` HTTP com JSON para administração via `curl`/Bruno). Qualquer método ou contrato fora do que já foi acordado deve ser discutido antes.
+   - **`plugins/api/jellyfin` (Plugin Surface Jellyfin):** concentra **100% das rotas e regras de negócio da API Jellyfin 12.4.0** (incluindo parse de `<username ou email>#<profile>`, `QuickConnect`, tradução para `BaseItemDto`/`MediaSources`/`MediaStreams`/`DeliveryUrl`, avaliação de `DeviceProfile`/`PlaybackInfo`, conversão para `Ticks` e stubs de compatibilidade).
+   - **`storage` HTTP Data Plane:** expõe `GET /locations/{LocationID}/files/{FileID}` em **HTTP puro** (com suporte a `Range` via `http.ServeContent` / `sendfile`). Nas rotas de streaming de vídeo e legenda do Jellyfin, o plugin `plugins/api/jellyfin` atua como **proxy reverso em streaming** para o `storage`.
 5. **Autenticação Jellyfin (`CustomAuthentication` — isolada em `plugins/api/jellyfin`):**
    - O middleware do `plugins/api/jellyfin` extrai o token tanto do header `Authorization` / `X-Emby-Authorization` (`MediaBrowser Client="...", Device="...", DeviceId="...", Version="...", Token="..."`) quanto da query string (`?api_key=<token>` ou `?ApiKey=<token>`), usada pelo navegador nas tags `<video>` e requisições de legenda.
 
@@ -50,20 +51,19 @@ flowchart LR
 
 #### Escopo Técnico
 
-- **Infraestrutura e Bootstrap (`cmd/server`, `internal/infra`, `internal/clients`):**
+- **Infraestrutura e Bootstrap (`cmd/server`, `internal/database`, `internal/pubsub`, `internal/kv`, `internal/clients`, `proto/`):**
   - Variáveis de ambiente (`MSERVER_*`) lidas explicitamente pelo nome completo.
-  - Logging estruturado (`slog`), abertura de SQLite por módulo com runner de migrations, `database.WithTx`/`ConnFrom`.
-  - `queue` (`Envelope[T]` CloudEvents 1.0 + implementação `queue/memory`) e `outbox` transacional (tabela `outbox` + relay assíncrono ordenado por `UUIDv7`).
-  - Módulos com `service/`, `router/`, `events/`, `store/`, `client/` e `module.go` (apenas `New`/`Close`, expondo um `*http.ServeMux` e inicializando os próprios plugins), sem gerência de dependências. O `cmd/server` cria o `http.Client` central e os clients de todos os módulos e monta os muxes de módulos e surfaces em um único listener (`MSERVER_HTTP_ADDR`), exposto via API gateway/reverse proxy. As rotas dos módulos (`/v1`) não têm autenticação por enquanto (a segurança será definida no futuro).
-- **Módulo `identity` (`internal/modules/identity`):**
+  - Logging estruturado (`slog`), abertura de banco por módulo com runner de migrations (`migrations/sqlite` e `migrations/postgres`), `database.WithTx`/`ConnFrom` e `database.IsUniqueViolation`, usando queries SQL com placeholders `$1, $2`.
+  - `pubsub` (`Envelope[T]` CloudEvents 1.0, `Message` com `ID` UUIDv7, `Subscriber` com `consumer` e implementação `pubsub/memory` com retry assíncrono).
+  - Configuração do `buf` (`buf.yaml`, `buf.gen.yaml`) gerando código Protobuf + ConnectRPC em `internal/gen/`.
+  - Módulos com `service/`, `handler/`, `events/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, expondo `Mux`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` (_Zero-Copy_) quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`h2c`, protocolo padrão) quando definido.
+- **Módulo `identity` (`internal/modules/identity` + `proto/identity/v1/identity.proto`):**
   - Separação entre **Conta (`Account`)** e **Perfil (`Profile`)**:
-    - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id/bcrypt), `is_admin`, `disabled`, `created_at`.
+    - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id), `is_admin`, `disabled`, `created_at`.
     - `Profile`: `profile_id` (UUIDv7), `account_id`, `handle` (identificador curto único na conta), `display_name`, `created_at`.
   - Sessões e tokens de acesso vinculados a `(AccountID, ProfileID, DeviceID)`.
   - Autenticação no domínio recebendo conta (`username` ou `email`), `handle` do perfil e senha de forma estruturada (o parse da string concatenada `<username ou email>#<profile>` pertence exclusivamente ao `plugins/api/jellyfin`).
-  - Emissão de eventos via `outbox` (`identity.account.created.v1`, `identity.account.updated.v1`, `identity.account.deleted.v1`, `identity.profile.created.v1`, `identity.profile.updated.v1`, `identity.profile.deleted.v1`, `identity.session.revoked.v1`) e operações `Resync` por contexto (`POST /v1/accounts/resync`, `POST /v1/profiles/resync`).
-
-> **Nota sobre a API do projeto:** Na Entrega 1, a única rota administrativa é `POST /v1/setup` do `identity`. Novos endpoints administrativos para gerenciamento de contas, perfis, localizações e bibliotecas devem ser discutidos antes de serem adicionados.
+  - Emissão de eventos no `pubsub` (`identity.account.created.v1`, `identity.account.updated.v1`, `identity.account.deleted.v1`, `identity.profile.created.v1`, `identity.profile.updated.v1`, `identity.profile.deleted.v1`, `identity.session.revoked.v1`) e operações `ResyncAccounts` e `ResyncProfiles`.
 
 #### Endpoints Jellyfin (`plugins/api/jellyfin`) — Validados no OpenAPI 12.4.0
 
@@ -88,7 +88,7 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 
 #### Critério de Aceite (Entrega 1)
 
-1. Executar `POST /v1/setup` criando a conta `admin` e o perfil `lucas` (e verificar que uma segunda chamada a `/v1/setup` retorna `409 Conflict`).
+1. Executar `Setup` no `identity` criando a conta `admin` e o perfil `lucas` (e verificar que uma segunda chamada retorna `CodeAlreadyExists`).
 2. Abrir o `jellyfin-web`, conectar ao servidor em `http://<host>:<porta>/plugins/jellyfin`, fazer login com `admin#lucas` + senha e carregar a tela inicial do `jellyfin-web` sem erros.
 
 ---
@@ -97,21 +97,21 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 
 #### Escopo Técnico
 
-- **Wrapper `ffprobe` (`internal/infra/ffmpeg`):**
+- **Wrapper `ffprobe` (`internal/ffmpeg`):**
   - Execução via `os/exec` e parsing do JSON de container, duração, bitrate e streams (`video`, `audio`, `subtitle`) em tipos de domínio agnósticos (conversão para `Ticks` e `MediaStreams` ocorre apenas em `plugins/api/jellyfin`).
-- **Módulo `storage` (`internal/modules/storage`) + Plugin `plugins/storage/ffprobe`:**
+- **Módulo `storage` (`internal/modules/storage` + `proto/storage/v1/storage.proto`) + Plugin `plugins/storage/ffprobe`:**
   - Driver `local` confinado com `os.Root`.
   - Cadastro de localizações (`LocationID`, validação impedindo sobreposição de diretórios).
   - Indexação em 2 fases:
-    1. Registro rápido: gera `FileID` (`UUIDv7`), grava tamanho, `mtime` e `inode`, detecta renomeações/movimentações pelo `inode` e emite `storage.file.indexed.v1`, `storage.file.changed.v1`, `storage.file.moved.v1`, `storage.file.removed.v1` via `outbox`.
-    2. Análise assíncrona: executa o plugin `ffprobe` em arquivos de vídeo estáveis e emite `storage.file.analyzed.v1` via `outbox`.
-  - Operação `Resync(ctx, LocationID)` republicando `FileIndexed` e `FileAnalyzed` de todos os arquivos da localização.
-- **Módulo `library` (`internal/modules/library` — Escopo Filmes):**
-  - Cadastro (com nova tentativa do `Resync` dentro da própria requisição em caso de falha), listagem, consulta e remoção (`DELETE /v1/libraries/{id}`, que remove os filmes e libera as localizações) de bibliotecas (`LibraryID`, nome, tipo de mídia filmes, vínculo com um ou mais `LocationID`s; cada localização pertence a no máximo uma biblioteca).
-  - Ao cadastrar uma biblioteca, invoca `storage.Resync(ctx, LocationID)`.
-  - Consome eventos `storage.file.*`, aplica o parser regex de filmes (`Título (Ano)`) sobre o caminho relativo e gera `MovieID` determinístico (derivado do `FileID`).
-  - Consolida as informações técnicas das faixas no modelo de domínio da `library` ao receber `storage.file.analyzed.v1` (a tradução para `MediaSources` e `MediaStreams` do Jellyfin fica isolada em `plugins/api/jellyfin`).
-  - Emite `library.movie.added.v1`, `library.movie.updated.v1`, `library.movie.removed.v1` via `outbox` e implementa `Resync(ctx, LibraryID)`.
+    1. Registro rápido: gera `FileID` (`UUIDv7`), grava tamanho, `mtime` e `inode`, detecta renomeações/movimentações pelo `inode` e emite `storage.file.indexed.v1`, `storage.file.changed.v1`, `storage.file.moved.v1`, `storage.file.removed.v1` no `pubsub`.
+    2. Análise assíncrona: executa o plugin `ffprobe` em arquivos de vídeo estáveis e emite `storage.file.analyzed.v1` no `pubsub`.
+  - Operação `ResyncLocation(ctx, LocationID)` republicando `FileIndexed` e `FileAnalyzed` de todos os arquivos da localização.
+- **Módulo `library` (`internal/modules/library` + `proto/library/v1/library.proto` — Escopo Filmes):**
+  - Cadastro, listagem, consulta e remoção de bibliotecas (`LibraryID`, nome, tipo de mídia filmes, vínculo com um ou mais `LocationID`s; cada localização pertence a no máximo uma biblioteca).
+  - Ao cadastrar uma biblioteca, invoca `storage.ResyncLocation` via ConnectRPC.
+  - Consome eventos `storage.file.*` (consumer `"library"`), aplica o parser regex de filmes (`Título (Ano)`) sobre o caminho relativo e gera `MovieID` determinístico (UUIDv5 derivado do `FileID`).
+  - Consolida as informações técnicas das faixas no modelo de domínio da `library` ao receber `storage.file.analyzed.v1`.
+  - Emite `library.movie.added.v1`, `library.movie.updated.v1`, `library.movie.removed.v1` no `pubsub` e implementa `ResyncLibrary`.
 
 #### Endpoints Jellyfin (`plugins/api/jellyfin`) — Validados no OpenAPI 12.4.0
 
@@ -152,7 +152,7 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
     - Suporte a numeração absoluta de anime (`Serie - 105.mkv` → temporada única + número absoluto).
     - Suporte a episódios sem número identificado (`IndexNumber` nulo) e ordenação natural (`ep2` antes de `ep10`).
   - `EpisodeID` determinístico (**UUIDv5 derivado do `FileID`**); `SeriesID` e `SeasonID` gerados com **UUIDv7** (remoção automática de temporadas e séries que ficarem sem episódios).
-  - Emissão dos eventos `library.series.*`, `library.season.*` e `library.episode.*` via `outbox`.
+  - Emissão dos eventos `library.series.*`, `library.season.*` e `library.episode.*` no `pubsub`.
 
 #### Endpoints Jellyfin (`plugins/api/jellyfin`) — Validados no OpenAPI 12.4.0
 
@@ -177,23 +177,21 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 #### Escopo Técnico
 
 - **Servidor HTTP de Dados do `storage` (`internal/modules/storage`):**
-  - Implementa `GET /locations/{LocationID}/files/{FileID}` e `HEAD /locations/{LocationID}/files/{FileID}`.
-  - Serve o arquivo físico a partir do driver `local` (`os.Root`) com suporte completo a `Range` (`206 Partial Content`, `Accept-Ranges: bytes`, `Content-Length`, `Content-Type`, `Last-Modified`).
-  - `GET /v1/files/{FileID}/resolve` passa a devolver sempre a URL HTTP `http://<host>/locations/{LocationID}/files/{FileID}` (a resolução para `file://` foi removida).
-- **Módulo `playback` (`internal/modules/playback`):**
+  - Implementa `GET /locations/{LocationID}/files/{FileID}` e `HEAD /locations/{LocationID}/files/{FileID}` em **HTTP puro**.
+  - Serve o arquivo físico a partir do driver `local` (`os.Root`) usando `http.ServeContent` (suporte completo a `Range` / `206 Partial Content` e `sendfile` zero-copy no kernel).
+  - O método `ResolveFile` no serviço ConnectRPC do `storage` devolve a URL HTTP `http://<host>/locations/{LocationID}/files/{FileID}`.
+- **Módulo `playback` (`internal/modules/playback` + `proto/playback/v1/playback.proto`):**
   - Gerenciamento das sessões de reprodução ativas (início, progresso, pausa, retomada, heartbeat e encerramento) operando sobre tipos de domínio próprios (sem conhecer `DeviceProfile` ou `Ticks` do Jellyfin).
-  - Estado das sessões guardado na abstração `internal/infra/kv` (`kv.Store`), e não na memória do módulo: chave `sessions/{PlaybackSessionID}` com valor JSON e TTL de 2× o timeout (apenas proteção contra lixo). A implementação do MVP é `kv/memory`; trocar por `kv/valkey` permite escalar o `playback` horizontalmente sem mudar o módulo. Sem scripts Lua nem CAS: `Create` (`SET NX`), `Update` (`SET XX`), `Delete` e `List` por prefixo, com "último a escrever vence".
+  - Estado das sessões guardado exclusivamente na abstração `internal/kv` (`kv.Store`), sem banco SQLite no módulo `playback`: chave `sessions/{PlaybackSessionID}` com valor JSON e TTL de 2× o timeout.
   - Detecção de timeout por inatividade feita por um _reaper_ periódico (`MSERVER_PLAYBACK_SESSION_TIMEOUT`, padrão `5m`), que relê a sessão antes de removê-la; apenas quem efetivamente remove emite `playback.session.stopped.v1` (`reason: "timeout"`).
-  - API REST `/v1/playback/sessions`: `POST` (o ID da sessão é sempre gerado pelo servidor), `GET` (lista), `GET /{id}`, `POST /{id}/progress`, `POST /{id}/heartbeat` e `POST /{id}/stop`.
-  - No MVP o `playback` não consulta a `library`: `ItemID`/`FileID` chegam do plugin. O `playback.db` (SQLite) guarda apenas a `outbox`.
-  - Emissão de eventos via `outbox`: `playback.session.started.v1`, `playback.session.progressed.v1`, `playback.session.paused.v1`, `playback.session.resumed.v1` e `playback.session.stopped.v1`.
+  - Serviço ConnectRPC `playback.v1.PlaybackService`: `StartSession`, `ListSessions`, `GetSession`, `ReportProgress`, `HeartbeatSession` e `StopSession`.
+  - Emissão de eventos diretamente no `pubsub`: `playback.session.started.v1`, `playback.session.progressed.v1`, `playback.session.paused.v1`, `playback.session.resumed.v1` e `playback.session.stopped.v1`.
 - **Regras de `PlaybackInfo` e Proxy de Streaming isoladas no `plugins/api/jellyfin`:**
-  - Avalia o `DeviceProfile` enviado pelo cliente Jellyfin em `POST/GET /Items/{itemId}/PlaybackInfo` frente às informações técnicas do item na `library`, montando `PlaybackInfoResponse` (`MediaSources` com `SupportsDirectPlay: true`, `SupportsDirectStream: true`, `SupportsTranscoding: false`, `Protocol: "File"`, `PlaySessionId` ou `ErrorCode: "NoCompatibleStream"`).
-  - `maxStreamingBitrate` é ignorado no MVP (só há Direct Play).
-  - O `PlaySessionId` do Jellyfin é mapeado para o `PlaybackSessionID` do `playback` em um `kv.Store` próprio do plugin (chave `playsessions/{ProfileID}/{PlaySessionId}`), permitindo que várias instâncias do plugin compartilhem o mapeamento.
-  - Nas rotas `GET/HEAD /Videos/{itemId}/stream` e `/Videos/{itemId}/stream.{container}`, valida o token (via header ou query `api_key`), resolve o `(LocationID, FileID)` do item e faz **proxy reverso em streaming** para `GET /locations/{LocationID}/files/{FileID}` no `storage`, preservando `Range` na ida e `Content-Range`, `Content-Length`, `Accept-Ranges` e status `200`/`206` na volta.
+  - Avalia o `DeviceProfile` enviado pelo cliente Jellyfin em `POST/GET /Items/{itemId}/PlaybackInfo` frente às informações técnicas do item na `library`.
+  - O `PlaySessionId` do Jellyfin é mapeado para o `PlaybackSessionID` do `playback` em um `kv.Store` próprio do plugin (`playsessions/{ProfileID}/{PlaySessionId}`).
+  - Nas rotas `GET/HEAD /Videos/{itemId}/stream` e `/Videos/{itemId}/stream.{container}`, valida o token (via header ou query `api_key`), resolve o `(LocationID, FileID)` do item e faz **proxy reverso em streaming** para `GET /locations/{LocationID}/files/{FileID}` no `storage`.
 
-#### Endpoints do `storage` (Plano de Dados Interno)
+#### Endpoints do `storage` (Plano de Dados Interno — HTTP Puro)
 
 | Método        | Rota                                     | Descrição                                                                            |
 | :------------ | :--------------------------------------- | :----------------------------------------------------------------------------------- |
@@ -222,11 +220,11 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 
 #### Escopo Técnico
 
-- **Módulo `subtitles` (`internal/modules/subtitles`):**
-  - Escuta `storage.file.indexed.v1`, `storage.file.moved.v1` e `storage.file.removed.v1` filtrando arquivos `.srt` (extraindo nome base, código de idioma BCP-47 como `pt-BR`/`en` e flags `forced`/`sdh`/`hi` via regex).
-  - Escuta `library.movie.added.v1`, `library.movie.updated.v1`, `library.movie.removed.v1` e `library.episode.added.v1`, `library.episode.updated.v1`, `library.episode.removed.v1` para manter sua projeção local de itens de mídia.
+- **Módulo `subtitles` (`internal/modules/subtitles` + `proto/subtitles/v1/subtitles.proto`):**
+  - Escuta `storage.file.indexed.v1`, `storage.file.moved.v1` e `storage.file.removed.v1` (consumer `"subtitles"`) filtrando arquivos `.srt` (extraindo nome base, código de idioma BCP-47 como `pt-BR`/`en` e flags `forced`/`sdh`/`hi` via regex).
+  - Escuta `library.movie.*` e `library.episode.*` para manter sua projeção local de itens de mídia.
   - Realiza o **match bidirecional** (tanto quando o `.srt` é indexado antes do vídeo quanto quando é indexado depois).
-  - Emite `subtitles.subtitle.added.v1` e `subtitles.subtitle.removed.v1` via `outbox`, além de implementar `Resync(ctx)`.
+  - Emite `subtitles.subtitle.added.v1` e `subtitles.subtitle.removed.v1` no `pubsub`, além de implementar `ResyncSubtitles`.
 - **Consolidação na `library` e exposição isolada no `plugins/api/jellyfin`:**
   - A `library` consome `subtitles.subtitle.added.v1` / `removed.v1` e vincula as legendas externas `.srt` ao item em seu modelo de domínio próprio.
   - O plugin `plugins/api/jellyfin` traduz essas legendas para `MediaStreams` do Jellyfin (`Type: "Subtitle"`, `Codec: "srt"`, `IsExternal: true`, `SupportsExternalStream: true`, `DeliveryMethod: "External"`, `DeliveryUrl: "/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/Stream.srt"`) e serve as rotas de legenda fazendo **proxy em streaming** para `GET /locations/{LocationID}/files/{FileID}` do arquivo `.srt` no `storage`.
@@ -249,22 +247,25 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 
 Após a conclusão das 5 entregas do MVP, a evolução segue com:
 
-1. **Módulo `watchstate`:**
+1. **Infraestrutura Distribuída e Escala Horizontal:**
+   - Suporte a `MSERVER_DB_DRIVER=postgres` (1 schema por módulo + migrations em `migrations/postgres/`).
+   - Implementação `internal/pubsub/nats` (**NATS JetStream** com deduplicação por `Nats-Msg-Id` e _Durable Consumers / Queue Groups_ por módulo).
+   - Implementação `internal/kv/valkey` (Valkey/Redis usando comandos nativos `GET`, `SET NX PX`, `SET XX PX`, `DEL`, `SCAN`).
+   - Topologia distribuída permitindo rodar apenas `MSERVER_MODULES=storage` no NAS e escalar os demais módulos em outras máquinas.
+2. **Módulo `watchstate`:**
    - Projeção da topologia do catálogo via eventos da `library` e consumo dos eventos `playback.session.*`.
-   - Persistência de estado por `ProfileID` (assistido, favorito, posição, contagem de reproduções), filas de continuar assistindo e próximos episódios, contadores de itens não assistidos e histórico completo de visualizações. (A tradução para `UserData`, `GET /UserItems/Resume`, `GET /Shows/NextUp`, `/UserPlayedItems/{itemId}` e `/UserFavoriteItems/{itemId}` fica isolada em `plugins/api/jellyfin`).
-2. **Módulo `transcoder` + Localizações de Sistema no `storage`:**
+   - Persistência de estado por `ProfileID` (assistido, favorito, posição, contagem de reproduções), filas de continuar assistindo e próximos episódios, contadores de itens não assistidos e histórico completo de visualizações.
+3. **Módulo `transcoder` + Localizações de Sistema no `storage`:**
    - Localizações de sistema (`cache`, `transcodes`, `images`) no `storage` com `PUT`, TTL e URLs assinadas.
    - Conversão de legendas (`.srt`, `.ass`, `.ssa` → `.vtt` emitindo `transcoder.subtitle.converted.v1`).
    - Transcode de áudio HLS (`-c:v copy`) iniciado via `StartTranscode` e controlado via `SIGSTOP`/`SIGCONT`/`SIGTERM` pelos eventos do `playback`.
-3. **Expansão de Clientes e Recursos no `plugins/api/jellyfin`:**
+4. **Expansão de Clientes e Recursos no `plugins/api/jellyfin`:**
    - Homologação nos clientes `jellyfin-android` e `jellyfin-tizen`.
-   - Fluxo de `QuickConnect` (`/QuickConnect/*` e `POST /Users/AuthenticateWithQuickConnect`) isolado em `plugins/api/jellyfin`, e SSO via OIDC no `identity`.
+   - Fluxo de `QuickConnect` e SSO via OIDC no `identity`.
    - Protocolo `SyncPlay` (`/SyncPlay/*` + WebSocket `/socket`) em `plugins/api/jellyfin` sobre as salas compartilhadas do `playback`.
-   - Extração de capítulos no `ffprobe` e segmentos de mídia expostos em `GET /MediaSegments/{itemId}` pelo `plugins/api/jellyfin`.
-4. **Enriquecimento, Aquisição e Infraestrutura Distribuída:**
+   - Extração de capítulos no `ffprobe` e segmentos de mídia expostos em `GET /MediaSegments/{itemId}`.
+5. **Enriquecimento e Aquisição:**
    - Analisadores de hash (`sha256`, `ed2k`) e `fsnotify` no `storage`.
    - Módulo `metadata` (TMDB, TVDB, AniDB, AniSkip, IntroDB) e imagens (`/Items/{itemId}/Images/{imageType}`).
    - Jobs em background no `transcoder` (thumbnails, imagens de capítulos, _trickplay_, detecção de abertura/créditos por `chromaprint`).
    - Pipeline de aquisição (`indexer`, `downloader`, `acquisition`), `translation` e `notification`.
-   - Execução distribuída: um binário por módulo, com a URL base de cada módulo remoto configurada por variável de ambiente.
-   - Implementação `internal/infra/kv/valkey` (Valkey/Redis usando apenas comandos nativos — `SET NX`/`SET XX` com `PX`, `GET`, `DEL`, `SCAN` — sem scripts Lua) e barramento de eventos distribuído, permitindo escalar `playback` e `plugins/api/jellyfin` horizontalmente.
