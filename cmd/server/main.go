@@ -1,25 +1,17 @@
-// Command server runs mserver as a monolith: every module and API plugin
-// is served by the same HTTP server, and the modules talk to each other
-// through their REST APIs on that same server. The module routes (/v1)
-// have no authentication yet; the plugin routes have their own.
+// Command server runs mserver. It serves the ConnectRPC services of the
+// modules over HTTP/1.1 and HTTP/2 cleartext (h2c) on the same port, so
+// gRPC and Connect clients, curl and the other mserver instances can all
+// reach it.
+//
+// The modules are disabled while they are migrated to ConnectRPC: the
+// server starts without any service registered.
 //
 // Variables:
 //
-//	MSERVER_HTTP_ADDR      HTTP listen address (default ":8096")
-//	MSERVER_DATA_DIR       directory of the databases (default "data")
-//	MSERVER_LOG_LEVEL      debug, info, warn or error (default info)
-//	MSERVER_LOG_FORMAT     text or json (default text)
-//
-// Every request is logged (internal/infra/logging): successes at debug,
-// client errors at info and server errors at error, with an ID shared by
-// the calls between modules. At debug level, the events are logged too.
-//
-// Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
-// and MSERVER_FFPROBE_PATH in the storage, MSERVER_PLAYBACK_SESSION_TIMEOUT
-// in the playback).
-//
-// The shared state of the playback module and of the Jellyfin plugin
-// lives in memory (internal/infra/kv/memory), so a single instance runs.
+//	MSERVER_HTTP_ADDR   HTTP listen address (default ":8096")
+//	MSERVER_DATA_DIR    directory of the databases (default "data")
+//	MSERVER_LOG_LEVEL   debug, info, warn or error (default info)
+//	MSERVER_LOG_FORMAT  text or json (default text)
 package main
 
 import (
@@ -34,20 +26,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lukerops/mserver/internal/clients"
-	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
-	"github.com/lukerops/mserver/internal/infra/logging"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/identity"
-	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
-	"github.com/lukerops/mserver/internal/modules/library"
-	libraryclient "github.com/lukerops/mserver/internal/modules/library/client"
-	"github.com/lukerops/mserver/internal/modules/playback"
-	playbackclient "github.com/lukerops/mserver/internal/modules/playback/client"
-	"github.com/lukerops/mserver/internal/modules/storage"
-	storageclient "github.com/lukerops/mserver/internal/modules/storage/client"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connecthttp"
 
-	"github.com/lukerops/mserver/plugins/api/jellyfin"
+	"github.com/lukerops/mserver/internal/logger"
+	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
 func main() {
@@ -61,7 +44,6 @@ func main() {
 }
 
 func run(ctx context.Context) error {
-
 	addr := os.Getenv("MSERVER_HTTP_ADDR")
 	if addr == "" {
 		addr = ":8096"
@@ -70,82 +52,38 @@ func run(ctx context.Context) error {
 	if dataDir == "" {
 		dataDir = "data"
 	}
-	logLevel, logFormat := os.Getenv("MSERVER_LOG_LEVEL"), os.Getenv("MSERVER_LOG_FORMAT")
-	log, err := logging.New(os.Stderr, logLevel, logFormat)
-	if err != nil {
+
+	if err := logger.InitGlobal(os.Getenv("MSERVER_LOG_LEVEL"), os.Getenv("MSERVER_LOG_FORMAT")); err != nil {
 		return fmt.Errorf("MSERVER_LOG_LEVEL/MSERVER_LOG_FORMAT: %w", err)
 	}
+	log := slog.Default()
 	log.Info("mserver: starting", "addr", addr, "data_dir", dataDir)
 
-	// Listen first: the modules call each other on this address. Requests
-	// wait in the backlog until the server starts serving.
+	bus := memory.New()
+	defer func() {
+		if err := bus.Close(); err != nil {
+			log.Error("mserver: close pubsub", "error", err)
+		}
+	}()
+
+	// The modules register their services here (e.g.
+	// identityv1connect.RegisterIdentityServiceHandler(rpc, h)) once they
+	// are migrated.
+	rpc := connect.NewServer()
+
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, rpc)
+
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
-	baseURL := localURL(ln.Addr())
 
-	// One HTTP client for every module client, so that connections are
-	// reused. It never uses a proxy (the calls are internal), and it
-	// forwards the request ID so that the module logs the same ID.
-	hc := &http.Client{Transport: logging.Transport{Base: &http.Transport{
-		DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 100,
-		IdleConnTimeout:     90 * time.Second,
-	}}}
-	c := clients.Clients{
-		Identity: identityclient.New(hc, baseURL),
-		Storage:  storageclient.New(hc, baseURL),
-		Library:  libraryclient.New(hc, baseURL),
-		Playback: playbackclient.New(hc, baseURL),
-	}
-	bus := memory.New(memory.WithLogger(log.With("component", "queue")))
-
-	ident, err := identity.New(ctx, dataDir, bus, c, log.With("module", "identity"))
-	if err != nil {
-		return err
-	}
-	defer closeModule(log, "identity", ident.Close)
-
-	// Consumers before producers: the in-memory bus delivers events only
-	// to the handlers already subscribed.
-	lib, err := library.New(ctx, dataDir, bus, bus, c, log.With("module", "library"))
-	if err != nil {
-		return err
-	}
-	defer closeModule(log, "library", lib.Close)
-
-	stor, err := storage.New(ctx, dataDir, bus, c, log.With("module", "storage"))
-	if err != nil {
-		return err
-	}
-	defer closeModule(log, "storage", stor.Close)
-
-	pb, err := playback.New(ctx, dataDir, bus, kvmemory.New(), c, log.With("module", "playback"))
-	if err != nil {
-		return err
-	}
-	defer closeModule(log, "playback", pb.Close)
-
-	jf := jellyfin.New(c, kvmemory.New(), log.With("plugin", "jellyfin"))
-
-	// Modules and plugins register their routes at the root. The modules
-	// share the root (every module route is under /v1); plugins are
-	// mounted under their own path.
-	mux := http.NewServeMux()
-	mux.Handle("/", modules(ident.Mux, lib.Mux, stor.Mux, pb.Mux))
-	mount(mux, "/plugins/jellyfin", jf)
-
-	srv := &http.Server{
-		Handler:           logging.Handler(log.With("component", "http"), mux),
-		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          slog.NewLogLogger(log.With("component", "http").Handler(), slog.LevelWarn),
-	}
+	srv := newHTTPServer(mux, log)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	log.Info("mserver: listening", "addr", ln.Addr().String(), "modules", baseURL)
+	log.Info("mserver: listening", "addr", ln.Addr().String())
 
 	select {
 	case err := <-serveErr:
@@ -162,37 +100,17 @@ func run(ctx context.Context) error {
 	return nil
 }
 
-// localURL is the URL to reach the listener from this process: a
-// wildcard address is reached on the loopback.
-func localURL(addr net.Addr) string {
-	host, port, err := net.SplitHostPort(addr.String())
-	if ip := net.ParseIP(host); err != nil || ip == nil || ip.IsUnspecified() {
-		host = "127.0.0.1"
-	}
-	return "http://" + net.JoinHostPort(host, port)
-}
+// newHTTPServer returns a server that accepts HTTP/1.1 and HTTP/2
+// without TLS (h2c) on the same listener.
+func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
 
-// modules serves every request with the first module mux that has a
-// route for it, or 404 when none has.
-func modules(muxes ...*http.ServeMux) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, m := range muxes {
-			if _, pattern := m.Handler(r); pattern != "" {
-				m.ServeHTTP(w, r)
-				return
-			}
-		}
-		http.NotFound(w, r)
-	})
-}
-
-// mount serves h under prefix, with the prefix removed from the path.
-func mount(mux *http.ServeMux, prefix string, h http.Handler) {
-	mux.Handle(prefix+"/", http.StripPrefix(prefix, h))
-}
-
-func closeModule(log *slog.Logger, name string, closeFn func() error) {
-	if err := closeFn(); err != nil {
-		log.Error("mserver: close module", "module", name, "error", err)
+	return &http.Server{
+		Handler:           h,
+		Protocols:         &protocols,
+		ReadHeaderTimeout: 10 * time.Second,
+		ErrorLog:          slog.NewLogLogger(log.With("component", "http").Handler(), slog.LevelWarn),
 	}
 }
