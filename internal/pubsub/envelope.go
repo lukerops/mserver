@@ -10,10 +10,10 @@ import (
 const SpecVersion = "1.0"
 
 // Envelope is an event in the CloudEvents 1.0 JSON format. Data holds the
-// event-specific payload, defined in the api package of the module that
+// event-specific payload, defined in the events package of the module that
 // publishes it.
 type Envelope[T any] struct {
-	// ID is a UUIDv7. Consumers use it to drop duplicates.
+	// ID is a UUIDv7, used for ordering and deduplication.
 	ID string `json:"id"`
 	// Type is the versioned event name, e.g. "storage.file.indexed.v1".
 	// It is also the topic the event is published on.
@@ -39,15 +39,3 @@ func NewEnvelope[T any](typ, source, subject string, data T) Envelope[T] {
 		Data:        data,
 	}
 }
-
-// Event is an envelope of any data type.
-type Event interface {
-	EventID() string
-	Topic() string
-}
-
-// EventID returns the ID of the event.
-func (e Envelope[T]) EventID() string { return e.ID }
-
-// Topic returns the topic the event is published on: its type.
-func (e Envelope[T]) Topic() string { return e.Type }
