@@ -182,10 +182,11 @@ func (b *Bus) Publish(ctx context.Context, msg pubsub.Message) error {
 	return nil
 }
 
-// deliver hands msg to a replica of consumer, retrying on failure.
+// deliver hands msg to a replica of consumer: one attempt, then one retry
+// per backoff. Close interrupts the wait between attempts.
 func (b *Bus) deliver(ctx context.Context, consumer string, msg pubsub.Message) {
 	var err error
-	for _, backoff := range b.backoff {
+	for attempt := 0; attempt <= len(b.backoff); attempt++ {
 		sub := b.pick(msg.Topic, consumer)
 		if sub == nil || sub.ctx.Err() != nil {
 			return // the consumer is gone
@@ -199,7 +200,11 @@ func (b *Bus) deliver(ctx context.Context, consumer string, msg pubsub.Message) 
 		if err == nil {
 			return
 		}
+		if attempt == len(b.backoff) {
+			break
+		}
 
+		backoff := b.backoff[attempt]
 		b.log.WarnContext(ctx, "pubsub: handler failed, will retry",
 			slog.String("consumer", consumer),
 			slog.String("topic", msg.Topic),
@@ -208,7 +213,13 @@ func (b *Bus) deliver(ctx context.Context, consumer string, msg pubsub.Message) 
 			slog.String("error", err.Error()),
 		)
 
-		time.Sleep(backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-b.ctx.Done():
+			timer.Stop()
+			return
+		}
 	}
 
 	b.log.ErrorContext(ctx, "pubsub: event given up",
