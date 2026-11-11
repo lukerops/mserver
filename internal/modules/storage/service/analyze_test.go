@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
+	"github.com/lukerops/mserver/internal/events"
 	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
-	"github.com/lukerops/mserver/internal/modules/storage/events"
+	"github.com/lukerops/mserver/internal/pubsub"
+	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
 // fakeAnalyzer accepts .mkv files. Files whose content is "bad" are
@@ -72,7 +72,7 @@ func writeStableFile(t *testing.T, path, content string, age time.Duration) {
 	}
 }
 
-func analyzePending(t *testing.T, s Service) int {
+func analyzePending(t *testing.T, s *Service) int {
 	t.Helper()
 	n, err := s.AnalyzePending(t.Context())
 	if err != nil {
@@ -82,44 +82,48 @@ func analyzePending(t *testing.T, s Service) int {
 }
 
 // subscribe collects the payloads published on topic.
-func subscribe(bus *memory.Bus, topic string) <-chan []byte {
-	got := make(chan []byte, 100)
-	bus.Subscribe(topic, func(_ context.Context, msg queue.Message) error {
-		got <- msg.Payload
+func subscribe(t *testing.T, bus *memory.Bus, topic string) <-chan pubsub.Message {
+	t.Helper()
+	got := make(chan pubsub.Message, 100)
+	err := bus.Subscribe(t.Context(), "test", topic, func(_ context.Context, msg pubsub.Message) error {
+		got <- msg
 		return nil
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	return got
 }
 
-func nextAnalyzed(t *testing.T, got <-chan []byte) queue.Envelope[events.FileAnalyzedEventV1] {
+func nextAnalyzed(t *testing.T, got <-chan pubsub.Message) pubsub.Envelope[events.FileAnalyzedEventV1] {
 	t.Helper()
 	select {
-	case p := <-got:
-		var e queue.Envelope[events.FileAnalyzedEventV1]
-		if err := json.Unmarshal(p, &e); err != nil {
+	case msg := <-got:
+		e, err := pubsub.Decode[events.FileAnalyzedEventV1](msg)
+		if err != nil {
 			t.Fatal(err)
 		}
 		return e
 	case <-time.After(5 * time.Second):
 		t.Fatal("no analyzed event")
-		return queue.Envelope[events.FileAnalyzedEventV1]{}
+		return pubsub.Envelope[events.FileAnalyzedEventV1]{}
 	}
 }
 
-func noMoreEvents(t *testing.T, got <-chan []byte) {
+func noMoreEvents(t *testing.T, got <-chan pubsub.Message) {
 	t.Helper()
 	select {
-	case p := <-got:
-		t.Fatalf("unexpected event %s", p)
+	case msg := <-got:
+		t.Fatalf("unexpected event %s", msg.Payload)
 	case <-time.After(100 * time.Millisecond):
 	}
 }
 
 func TestAnalyzePending(t *testing.T) {
 	bus := memory.New()
-	analyzed := subscribe(bus, events.FileAnalyzedV1)
+	analyzed := subscribe(t, bus, events.FileAnalyzedV1)
 	a := &fakeAnalyzer{}
-	s := newTestService(t, t.TempDir(), bus, a)
+	s := newTestService(t, bus, a)
 
 	dir := t.TempDir()
 	writeStableFile(t, filepath.Join(dir, "good.mkv"), "good", time.Hour)
@@ -167,7 +171,7 @@ func TestAnalyzePending(t *testing.T) {
 
 func TestAnalyzerFailureIsRetried(t *testing.T) {
 	a := &fakeAnalyzer{broken: true}
-	s := newTestService(t, t.TempDir(), memory.New(), a)
+	s := newTestService(t, memory.New(), a)
 	dir := t.TempDir()
 	writeStableFile(t, filepath.Join(dir, "movie.mkv"), "movie", time.Hour)
 	loc := createLocation(t, s, dir)
@@ -187,9 +191,9 @@ func TestAnalyzerFailureIsRetried(t *testing.T) {
 
 func TestResyncLocation(t *testing.T) {
 	bus := memory.New()
-	indexed := subscribe(bus, events.FileIndexedV1)
-	analyzed := subscribe(bus, events.FileAnalyzedV1)
-	s := newTestService(t, t.TempDir(), bus, &fakeAnalyzer{})
+	indexed := subscribe(t, bus, events.FileIndexedV1)
+	analyzed := subscribe(t, bus, events.FileAnalyzedV1)
+	s := newTestService(t, bus, &fakeAnalyzer{})
 
 	dir := t.TempDir()
 	writeStableFile(t, filepath.Join(dir, "a.mkv"), "a", time.Hour)
@@ -209,9 +213,9 @@ func TestResyncLocation(t *testing.T) {
 	paths := make(map[string]bool)
 	for range 2 {
 		select {
-		case p := <-indexed:
-			var e queue.Envelope[events.FileEventV1]
-			if err := json.Unmarshal(p, &e); err != nil {
+		case msg := <-indexed:
+			e, err := pubsub.Decode[events.FileEventV1](msg)
+			if err != nil {
 				t.Fatal(err)
 			}
 			paths[e.Data.Path] = true

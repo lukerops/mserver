@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -14,37 +13,25 @@ import (
 
 	"github.com/google/uuid"
 
-	database "github.com/lukerops/mserver/internal/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/outbox"
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/events"
 	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
-	"github.com/lukerops/mserver/internal/modules/storage/events"
-	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
+	"github.com/lukerops/mserver/internal/modules/storage/store"
+	"github.com/lukerops/mserver/internal/pubsub"
+	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
-// newTestService returns a service over a SQLite database in dataDir,
+// newTestService returns a service over an in-memory SQLite database,
 // publishing its events on pub.
-func newTestService(t *testing.T, dataDir string, pub queue.Publisher, analyzers ...analyzer.Analyzer) Service {
+func newTestService(t *testing.T, pub pubsub.Publisher, analyzers ...analyzer.Analyzer) *Service {
 	t.Helper()
-	ctx := t.Context()
-	log := slog.Default()
-	db, err := database.Open(ctx, filepath.Join(dataDir, "storage.db"))
+	cfg := database.Config{Driver: database.SQLite, DataDir: ":memory:"}
+	db, err := database.Open(t.Context(), cfg, "storage", store.Migrations)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	ob, err := outbox.New(ctx, db, pub, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, err := sqlite.New(ctx, db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ob.Start(ctx)
-	t.Cleanup(ob.Stop)
-	return New(st, ob, log, analyzers...)
+	return New(store.New(db), pub, slog.Default(), analyzers...)
 }
 
 func writeFile(t *testing.T, path, content string) {
@@ -57,9 +44,9 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
-func createLocation(t *testing.T, s Service, dir string) Location {
+func createLocation(t *testing.T, s *Service, dir string) *Location {
 	t.Helper()
-	loc, err := s.CreateLocation(t.Context(), CreateLocationRequest{
+	loc, err := s.CreateLocation(t.Context(), &CreateLocationRequest{
 		Driver:  "local",
 		Options: map[string]string{"dir": dir},
 	})
@@ -69,7 +56,7 @@ func createLocation(t *testing.T, s Service, dir string) Location {
 	return loc
 }
 
-func scan(t *testing.T, s Service, id uuid.UUID) ScanResult {
+func scan(t *testing.T, s *Service, id uuid.UUID) *ScanResult {
 	t.Helper()
 	result, err := s.ScanLocation(t.Context(), id)
 	if err != nil {
@@ -79,33 +66,33 @@ func scan(t *testing.T, s Service, id uuid.UUID) ScanResult {
 }
 
 // files returns the file IDs of a location by path.
-func files(t *testing.T, s Service, id uuid.UUID) map[string]uuid.UUID {
+func files(t *testing.T, s *Service, id uuid.UUID) map[string]uuid.UUID {
 	t.Helper()
-	list, err := s.ListFiles(t.Context(), id)
+	list, err := s.ListFiles(t.Context(), id, Page{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out := make(map[string]uuid.UUID)
-	for _, f := range list {
-		out[f.Path] = f.ID
+	for i := range list {
+		out[list[i].Path] = list[i].ID
 	}
 	return out
 }
 
 func TestScanLifecycle(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Show/ep1.mkv"), "episode 1")
 	writeFile(t, filepath.Join(dir, "Show/ep2.mkv"), "episode 2")
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	loc := createLocation(t, s, dir)
 
-	if got := scan(t, s, loc.ID); got != (ScanResult{Added: 3}) {
+	if got := scan(t, s, loc.ID); *got != (ScanResult{Added: 3}) {
 		t.Fatalf("first scan = %+v", got)
 	}
 	before := files(t, s, loc.ID)
 
-	if got := scan(t, s, loc.ID); got != (ScanResult{}) {
+	if got := scan(t, s, loc.ID); *got != (ScanResult{}) {
 		t.Fatalf("second scan = %+v", got)
 	}
 
@@ -122,7 +109,7 @@ func TestScanLifecycle(t *testing.T) {
 	}
 
 	want := ScanResult{Changed: 1, Moved: 1, Removed: 1}
-	if got := scan(t, s, loc.ID); got != want {
+	if got := scan(t, s, loc.ID); *got != want {
 		t.Fatalf("third scan = %+v, want %+v", got, want)
 	}
 
@@ -139,8 +126,8 @@ func TestScanLifecycle(t *testing.T) {
 }
 
 func TestInvalidLocationsAreRejected(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
-	for _, req := range []CreateLocationRequest{
+	s := newTestService(t, memory.New())
+	for _, req := range []*CreateLocationRequest{
 		{Driver: "nfs", Options: map[string]string{"dir": t.TempDir()}},
 		{Driver: "local", Options: map[string]string{"dir": "relative"}},
 	} {
@@ -150,7 +137,7 @@ func TestInvalidLocationsAreRejected(t *testing.T) {
 	}
 
 	missing := filepath.Join(t.TempDir(), "missing")
-	_, err := s.CreateLocation(t.Context(), CreateLocationRequest{
+	_, err := s.CreateLocation(t.Context(), &CreateLocationRequest{
 		Driver:  "local",
 		Options: map[string]string{"dir": missing},
 	})
@@ -160,7 +147,7 @@ func TestInvalidLocationsAreRejected(t *testing.T) {
 }
 
 func TestOverlappingLocationsAreRejected(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "Series"), 0o755); err != nil {
 		t.Fatal(err)
@@ -168,7 +155,7 @@ func TestOverlappingLocationsAreRejected(t *testing.T) {
 	createLocation(t, s, filepath.Join(dir, "Series"))
 
 	for _, d := range []string{dir, filepath.Join(dir, "Series")} {
-		_, err := s.CreateLocation(t.Context(), CreateLocationRequest{
+		_, err := s.CreateLocation(t.Context(), &CreateLocationRequest{
 			Driver:  "local",
 			Options: map[string]string{"dir": d},
 		})
@@ -179,7 +166,7 @@ func TestOverlappingLocationsAreRejected(t *testing.T) {
 }
 
 func TestInaccessibleLocationKeepsIndex(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "disk")
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
@@ -199,7 +186,7 @@ func TestInaccessibleLocationKeepsIndex(t *testing.T) {
 }
 
 func TestDeleteLocation(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	loc := createLocation(t, s, dir)
@@ -220,7 +207,7 @@ func TestDeleteLocation(t *testing.T) {
 }
 
 func TestSiblingsAndResolve(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "Movie/Movie.mkv"), "movie")
 	writeFile(t, filepath.Join(dir, "Movie/Movie.en.srt"), "subtitle")
@@ -248,7 +235,7 @@ func TestSiblingsAndResolve(t *testing.T) {
 }
 
 func TestOpenFile(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	dir := filepath.Join(t.TempDir(), "media")
 	writeFile(t, filepath.Join(dir, "movie.mkv"), "movie")
 	writeFile(t, filepath.Join(dir, "gone.mkv"), "gone")
@@ -288,7 +275,7 @@ func TestOpenFile(t *testing.T) {
 }
 
 func TestScanAll(t *testing.T) {
-	s := newTestService(t, t.TempDir(), memory.New())
+	s := newTestService(t, memory.New())
 	first, second := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(first, "movie.mkv"), "movie")
 	writeFile(t, filepath.Join(second, "show.mkv"), "show")
@@ -304,24 +291,27 @@ func TestScanAll(t *testing.T) {
 
 func TestFileEventsArePublished(t *testing.T) {
 	bus := memory.New()
-	got := make(chan queue.Envelope[events.FileEventV1], 10)
+	got := make(chan pubsub.Envelope[events.FileEventV1], 10)
 	for _, typ := range []string{events.FileIndexedV1, events.FileChangedV1, events.FileMovedV1, events.FileRemovedV1} {
-		bus.Subscribe(typ, func(_ context.Context, msg queue.Message) error {
-			var e queue.Envelope[events.FileEventV1]
-			if err := json.Unmarshal(msg.Payload, &e); err != nil {
+		err := bus.Subscribe(t.Context(), "test", typ, func(_ context.Context, msg pubsub.Message) error {
+			e, err := pubsub.Decode[events.FileEventV1](msg)
+			if err != nil {
 				t.Error(err)
 			}
 			got <- e
 			return nil
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
-	s := newTestService(t, t.TempDir(), bus)
+	s := newTestService(t, bus)
 
 	next := func(want, path string) events.FileEventV1 {
 		t.Helper()
 		select {
 		case e := <-got:
-			ok := e.Type == want && e.Source == events.Source && e.SpecVersion == queue.SpecVersion &&
+			ok := e.Type == want && e.Source == events.SourceStorage && e.SpecVersion == pubsub.SpecVersion &&
 				e.ID != "" && !e.Time.IsZero() && e.Subject == e.Data.FileID.String() &&
 				e.Data.Path == path && e.Data.LocationID != uuid.Nil
 			if !ok {

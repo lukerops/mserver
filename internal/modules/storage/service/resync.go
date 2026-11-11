@@ -2,17 +2,18 @@ package service
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/google/uuid"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/storage/events"
+	"github.com/lukerops/mserver/internal/events"
+	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
 // ResyncLocation publishes the indexed event of every file of the
 // location, followed by the analyzed event of every successful analysis
 // of their current content.
-func (s *service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
+func (s *Service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
 	// No scan or analysis changes the index while it is read.
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
@@ -20,7 +21,7 @@ func (s *service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
 	if _, err := s.store.GetLocation(ctx, id); err != nil {
 		return err
 	}
-	files, err := s.store.ListFiles(ctx, id)
+	files, err := s.store.ListFiles(ctx, id, store.Page{})
 	if err != nil {
 		return err
 	}
@@ -29,17 +30,22 @@ func (s *service) ResyncLocation(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 
-	evs := make([]queue.Event, 0, len(files)+len(analyses))
-	for _, f := range files {
-		evs = append(evs, fileEvent(events.FileIndexedV1, id, f.ID, f.Path))
+	changes := make([]fileChange, len(files))
+	for i := range files {
+		changes[i] = fileChange{Type: events.FileIndexedV1, ID: files[i].ID, Path: files[i].Path}
 	}
-	for _, a := range analyses {
-		evs = append(evs, fileAnalyzedEvent(id, a))
-	}
-	if err := s.outbox.Publish(ctx, evs...); err != nil {
+	if err := s.publishFileChanges(ctx, id, changes); err != nil {
 		return err
 	}
-	s.log.DebugContext(ctx, "storage: location resynced", "location_id", id,
-		"files", len(files), "analyses", len(analyses), "count", len(evs))
+	for i := range analyses {
+		if err := s.publishAnalysis(ctx, id, &analyses[i]); err != nil {
+			return err
+		}
+	}
+	s.log.DebugContext(ctx, "storage: location resynced",
+		slog.String("location_id", id.String()),
+		slog.Int("files", len(files)),
+		slog.Int("analyses", len(analyses)),
+	)
 	return nil
 }

@@ -9,33 +9,34 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/events"
 	"github.com/lukerops/mserver/internal/modules/storage/driver"
-	"github.com/lukerops/mserver/internal/modules/storage/events"
 	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
-func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, error) {
+// ScanLocation synchronizes the index with the files of the location. If the
+// location is not accessible, the index is left untouched.
+func (s *Service) ScanLocation(ctx context.Context, id uuid.UUID) (*ScanResult, error) {
 	s.scanMu.Lock()
 	defer s.scanMu.Unlock()
 	start := time.Now()
 
 	loc, err := s.store.GetLocation(ctx, id)
 	if err != nil {
-		return ScanResult{}, err
+		return nil, err
 	}
 	d, err := newDriver(loc.Driver, loc.Options)
 	if err != nil {
-		return ScanResult{}, err
+		return nil, err
 	}
 
-	files, err := s.store.ListFiles(ctx, id)
+	files, err := s.store.ListFiles(ctx, id, store.Page{})
 	if err != nil {
-		return ScanResult{}, err
+		return nil, err
 	}
-	known := make(map[string]File, len(files))
-	for _, f := range files {
-		known[f.Path] = f
+	known := make(map[string]*File, len(files))
+	for i := range files {
+		known[files[i].Path] = &files[i]
 	}
 
 	var found []driver.FileInfo
@@ -45,33 +46,42 @@ func (s *service) ScanLocation(ctx context.Context, id uuid.UUID) (ScanResult, e
 	})
 	if err != nil {
 		// Unmounted disk or unreadable directory: keep the index untouched.
-		return ScanResult{}, fmt.Errorf("%w: scan of location %s failed: %w", ErrUnavailable, id, err)
+		return nil, fmt.Errorf("%w: scan of location %s failed: %w", ErrUnavailable, id, err)
 	}
 
-	changes, evs := diff(id, known, found)
-	if len(evs) == 0 {
-		s.log.InfoContext(ctx, "storage: location scanned", "location_id", id,
-			"files", len(found), "changes", 0, "duration", time.Since(start))
-		return ScanResult{}, nil
+	scanChanges, changes := diff(known, found)
+	if len(changes) == 0 {
+		s.log.InfoContext(ctx, "storage: location scanned",
+			slog.String("location_id", id.String()),
+			slog.Int("files", len(found)),
+			slog.Int("changes", 0),
+			slog.Int64("duration", int64(time.Since(start))),
+		)
+		return &ScanResult{}, nil
 	}
-	if err := s.store.WithTx(ctx, func(ctx context.Context) error {
-		if err := s.store.ApplyScan(ctx, id, changes); err != nil {
-			return err
-		}
-		return s.outbox.Publish(ctx, evs...)
-	}); err != nil {
-		return ScanResult{}, err
+	if err := s.store.ApplyScan(ctx, id, scanChanges); err != nil {
+		return nil, err
 	}
-	s.logFileChanges(ctx, evs)
+	if err := s.publishFileChanges(ctx, id, changes); err != nil {
+		s.logPublishError(ctx, err)
+	}
+	s.logFileChanges(ctx, id, changes)
 	s.kickAnalysis()
-	result := scanResult(evs)
-	s.log.InfoContext(ctx, "storage: location scanned", "location_id", id,
-		"files", len(found), "changes", len(evs), "added", result.Added, "changed", result.Changed,
-		"moved", result.Moved, "removed", result.Removed, "duration", time.Since(start))
+	result := scanResult(changes)
+	s.log.InfoContext(ctx, "storage: location scanned",
+		slog.String("location_id", id.String()),
+		slog.Int("files", len(found)),
+		slog.Int("changes", len(changes)),
+		slog.Int("added", result.Added),
+		slog.Int("changed", result.Changed),
+		slog.Int("moved", result.Moved),
+		slog.Int("removed", result.Removed),
+		slog.Int64("duration", int64(time.Since(start))),
+	)
 	return result, nil
 }
 
-// fileChangeMessages are the log messages of the file events of a scan.
+// fileChangeMessages are the log messages of the file changes of a scan.
 var fileChangeMessages = map[string]string{
 	events.FileIndexedV1: "storage: file indexed",
 	events.FileChangedV1: "storage: file updated",
@@ -80,32 +90,32 @@ var fileChangeMessages = map[string]string{
 }
 
 // logFileChanges logs, at debug, each file change saved by a scan.
-func (s *service) logFileChanges(ctx context.Context, evs []queue.Event) {
+func (s *Service) logFileChanges(ctx context.Context, location uuid.UUID, changes []fileChange) {
 	if !s.log.Enabled(ctx, slog.LevelDebug) {
 		return
 	}
-	for _, e := range evs {
-		env, ok := e.(queue.Envelope[events.FileEventV1])
-		if !ok {
-			continue
-		}
-		s.log.DebugContext(ctx, fileChangeMessages[e.Topic()],
-			"file_id", env.Data.FileID, "location_id", env.Data.LocationID, "path", env.Data.Path)
+	for i := range changes {
+		c := &changes[i]
+		s.log.DebugContext(ctx, fileChangeMessages[c.Type],
+			slog.String("file_id", c.ID.String()),
+			slog.String("location_id", location.String()),
+			slog.String("path", c.Path),
+		)
 	}
 }
 
 // diff compares the index of a location with the files found on disk and
-// returns the changes with their events. A new path with the inode of a
-// missing file is the same file, moved.
-func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (store.ScanChanges, []queue.Event) {
+// returns the changes to apply, with the file event of each one. A new path
+// with the inode of a missing file is the same file, moved.
+func diff(known map[string]*File, found []driver.FileInfo) (*store.ScanChanges, []fileChange) {
 	var (
-		changes = store.ScanChanges{
+		scanChanges = &store.ScanChanges{
 			Added:   make(map[uuid.UUID]driver.FileInfo),
 			Updated: make(map[uuid.UUID]driver.FileInfo),
 		}
-		evs   []queue.Event
-		newer []driver.FileInfo
-		seen  = make(map[string]bool, len(found))
+		changes []fileChange
+		newer   []driver.FileInfo
+		seen    = make(map[string]bool, len(found))
 	)
 
 	for _, info := range found {
@@ -115,8 +125,8 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 		case !ok:
 			newer = append(newer, info)
 		case f.Size != info.Size || !f.ModTime.Equal(info.ModTime) || f.Inode != info.Inode:
-			changes.Updated[f.ID] = info
-			evs = append(evs, fileEvent(events.FileChangedV1, location, f.ID, info.Path))
+			scanChanges.Updated[f.ID] = info
+			changes = append(changes, fileChange{Type: events.FileChangedV1, ID: f.ID, Path: info.Path})
 		}
 	}
 
@@ -132,13 +142,13 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 			delete(missing, info.Inode)
 			seen[old] = true
 			id := known[old].ID
-			changes.Updated[id] = info
-			evs = append(evs, fileEvent(events.FileMovedV1, location, id, info.Path))
+			scanChanges.Updated[id] = info
+			changes = append(changes, fileChange{Type: events.FileMovedV1, ID: id, Path: info.Path})
 			continue
 		}
 		id := newID()
-		changes.Added[id] = info
-		evs = append(evs, fileEvent(events.FileIndexedV1, location, id, info.Path))
+		scanChanges.Added[id] = info
+		changes = append(changes, fileChange{Type: events.FileIndexedV1, ID: id, Path: info.Path})
 	}
 
 	var removed []string
@@ -150,16 +160,16 @@ func diff(location uuid.UUID, known map[string]File, found []driver.FileInfo) (s
 	slices.Sort(removed)
 	for _, p := range removed {
 		id := known[p].ID
-		changes.Removed = append(changes.Removed, id)
-		evs = append(evs, fileEvent(events.FileRemovedV1, location, id, p))
+		scanChanges.Removed = append(scanChanges.Removed, id)
+		changes = append(changes, fileChange{Type: events.FileRemovedV1, ID: id, Path: p})
 	}
-	return changes, evs
+	return scanChanges, changes
 }
 
-func scanResult(evs []queue.Event) ScanResult {
+func scanResult(changes []fileChange) *ScanResult {
 	var r ScanResult
-	for _, e := range evs {
-		switch e.Topic() {
+	for i := range changes {
+		switch changes[i].Type {
 		case events.FileIndexedV1:
 			r.Added++
 		case events.FileChangedV1:
@@ -170,28 +180,36 @@ func scanResult(evs []queue.Event) ScanResult {
 			r.Removed++
 		}
 	}
-	return r
+	return &r
 }
 
-func (s *service) ScanAll(ctx context.Context) {
+// ScanAll scans every location, logging failures.
+func (s *Service) ScanAll(ctx context.Context) {
 	start := time.Now()
 	locations, err := s.store.ListLocations(ctx)
 	if err != nil {
 		if ctx.Err() == nil {
-			s.log.ErrorContext(ctx, "storage: list locations", "error", err)
+			s.log.ErrorContext(ctx, "storage: list locations", slog.String("error", err.Error()))
 		}
 		return
 	}
 	failed := 0
-	for _, loc := range locations {
-		if _, err := s.ScanLocation(ctx, loc.ID); err != nil {
+	for i := range locations {
+		id := locations[i].ID
+		if _, err := s.ScanLocation(ctx, id); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			failed++
-			s.log.WarnContext(ctx, "storage: scan failed", "location_id", loc.ID, "error", err)
+			s.log.WarnContext(ctx, "storage: scan failed",
+				slog.String("location_id", id.String()),
+				slog.String("error", err.Error()),
+			)
 		}
 	}
 	s.log.DebugContext(ctx, "storage: all locations scanned",
-		"count", len(locations), "failed", failed, "duration", time.Since(start))
+		slog.Int("count", len(locations)),
+		slog.Int("failed", failed),
+		slog.Int64("duration", int64(time.Since(start))),
+	)
 }
