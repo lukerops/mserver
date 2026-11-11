@@ -66,7 +66,7 @@ Consulte também os documentos de referência em `docs/`:
      - Se o cliente (Módulo A) envia mensagens em um loop ou canal, instancie sempre uma **nova struct Protobuf a cada iteração** (`req := &pb.MinhaReq{...}`), em vez de criar uma única struct fora do loop e apenas alterar os campos dela antes de cada chamada. Como o servidor lê a memória original no Zero-Copy, alterar a struct enquanto o servidor ainda a processa geraria uma _Race Condition_.
 5. **Mapeamento de Erros:**
    - O `service/` retorna erros sentinela de domínio (`ErrInvalidArgument`, `ErrNotFound`, `ErrAlreadyExists`, `ErrUnauthenticated`, `ErrPermissionDenied`, `ErrFailedPrecondition`).
-   - O `handler/` traduz os erros do `service/` usando `connect.NewError(connect.Code..., err)`.
+   - O `handler/` traduz os erros do `service/` usando `connect.NewError(connect.Code..., err.Error()).WithCause(err)`.
    - Os consumidores verificam erros exclusivamente via `connect.CodeOf(err) == connect.Code...`.
 6. **Exceção — Plano de Dados do `storage` (HTTP Puro):**
    - **Bytes brutos de mídia (vídeo, áudio, legendas, imagens) NUNCA trafegam por Protobuf/ConnectRPC nem pelo `pubsub`.**
@@ -142,9 +142,8 @@ Consulte também os documentos de referência em `docs/`:
 
 ```text
 internal/modules/<módulo>/
-├── service/               # Regra de negócio pura, interface Service, erros sentinela e Resync
+├── service/               # Regra de negócio pura (struct Service), erros sentinela e Resync
 ├── handler/               # Implementação ConnectRPC (<Service>Handler)
-├── events/                # Constantes de tópicos e structs de payload versionadas (ex.: MovieEventV1)
 ├── store/                 # struct Store, models, erros, queries.go e SQL único ($1, $2)
 │   ├── queries.go         # Constantes com todas as queries SQL base do módulo
 │   └── migrations/        # Migrations embutidas (go:embed): sqlite/*.sql e postgres/*.sql
@@ -155,7 +154,8 @@ internal/modules/<módulo>/
 
 - Um módulo **JAMAIS** pode importar `service/`, `store/` ou `handler/` de outro módulo.
 - Para chamar outro módulo, importe apenas a interface gerada em `gen/<outro>/v1/<outro>v1connect` (recebida via `clients.Clients`).
-- Para produzir ou consumir eventos, importe apenas `internal/modules/<módulo>/events` e `internal/pubsub`.
+- Para produzir ou consumir eventos, importe apenas `internal/events` e `internal/pubsub`.
+- **Todos os eventos vivem em um único pacote, `internal/events`**, separados por contexto em arquivos (ex.: `storage_files.go`, `storage_ffprobe.go`): constantes de tópicos versionados, `Source<Módulo>` e structs de payload com sufixo de versão (`V1`). Módulos não declaram pacote `events/` próprio.
 - Apenas o módulo `storage` pode importar `os.Root` ou manipular arquivos de mídia no sistema de arquivos.
 - O módulo `storage` expõe também um `Mux` com as rotas HTTP puras do plano de dados; o `cmd/server` o monta ao lado do `connecthttp.Mount`.
 - Divida cada pacote em arquivos pequenos e coesos por contexto (ex.: `accounts.go`, `profiles.go`, `sessions.go`), evitando arquivos monolíticos.
@@ -166,6 +166,7 @@ internal/modules/<módulo>/
 
 - **Simplicidade e Clareza:** Escreva código Go idiomático, direto e explícito. Evite `reflect`, abstrações genéricas complexas ou "mágica" difícil de depurar (_"Clear is better than clever"_).
 - **Alocações:** evite alocações e cópias desnecessárias. Entre funções, passe e retorne structs grandes por ponteiro (`*File`, `*Analysis`) (parâmetros e retornos únicos). Slices continuam por valor (`[]File`), pois `[]*File` aloca uma vez por elemento; ao ler linhas do banco, escaneie em uma variável local e faça `append` dela.
+- **Logs:** nunca passe pares chave/valor soltos (`"id", id`). Use sempre os atributos tipados do `slog` (`slog.String`, `slog.Int`, `slog.Int64`, `slog.Bool`...), com UUIDs via `.String()`, erros via `slog.String("error", err.Error())` e durações via `slog.Int64("duration", int64(d))`.
 - **Testes:**
   - Sempre execute `go test ./...` após alterações para garantir que todos os testes passem.
   - Ao alterar `proto/`, rode `make lint` e `make generate` e inclua o código gerado.

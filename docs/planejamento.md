@@ -206,7 +206,7 @@ ou flags CLI.
    localização**.
 7. **Eventos versionados e idempotentes:** eventos usam o envelope CloudEvents
    1.0 (`pubsub.Envelope[T]`) com ID (`UUIDv7`), timestamp e tipo versionado;
-   seus payloads ficam no pacote `events/` do módulo emissor (ex.:
+   seus payloads ficam no pacote central `internal/events`, em arquivos por contexto (ex.:
    `FileIndexedV1 = "storage.file.indexed.v1"` e `FileEventV1`).
 8. **Sem estado global compartilhado** entre módulos; cada módulo acessa apenas
    seu próprio banco e recursos.
@@ -257,7 +257,7 @@ tabela `outbox` relacional**:
   | `specversion` | `1.0`                                                              |
   | `time`        | Momento do evento (UTC)                                            |
   | `subject`     | Recurso principal, ex.: o `FileID`                                 |
-  | `data`        | Payload específico, definido no `events/` do módulo de origem      |
+  | `data`        | Payload específico, definido em `internal/events` (por contexto)   |
 
 ### 4.4 ECST (Event-Carried State Transfer) e `Resync`
 
@@ -875,9 +875,8 @@ mserver/
 
 ```
 internal/modules/<módulo>/
-├── service/               # regra de negócio: interface Service, erros de domínio e Resync
+├── service/               # regra de negócio: struct Service, erros de domínio e Resync
 ├── handler/               # implementa <Service>Handler (ConnectRPC), mapeando erros
-├── events/                # tipos e payloads versionados dos eventos publicados (ex.: AccountEventV1)
 ├── store/                 # struct Store, models, erros, queries.go e SQL único ($1, $2)
 │   ├── queries.go         # constantes com todas as queries SQL base do módulo
 │   └── migrations/        # migrations embutidas (go:embed, store.Migrations) separadas por dialeto
@@ -886,15 +885,17 @@ internal/modules/<módulo>/
 └── module.go              # New/Close: abre o banco, cria store, service e handler, registra o handler no *connect.Server e inicia plugins
 ```
 
-- **`service/`**: contém toda a regra de negócio e define a própria interface
-  `Service`. Não importa `handler/` nem pacotes gerados do ConnectRPC. Pode
-  importar `store/` e `events/` do próprio módulo e as interfaces de cliente em
-  `gen/...` e `events/` de outros módulos.
+- **`service/`**: contém toda a regra de negócio numa struct concreta
+  `Service` (não uma interface). Não importa `handler/` nem pacotes gerados do ConnectRPC. Pode
+  importar o `store/` do próprio módulo, `internal/events` e as interfaces de
+  cliente em `gen/...`.
 - **`handler/`**: sem regra de negócio. Implementa a interface gerada pelo
   ConnectRPC (`<Service>Handler`), chama o `service` e converte os erros do
-  `service` para `connect.NewError(connect.Code..., err)`.
-- **`events/`**: a API de eventos do módulo. Só constantes de tópicos
-  versionados, `Source` e structs de payload com sufixo de versão (`V1`).
+  `service` para `connect.NewError(connect.Code..., err.Error()).WithCause(err)`.
+- **`internal/events/`** (fora do módulo): a API de eventos de todos os módulos,
+  separada por contexto em arquivos (ex.: `storage_files.go`). Só constantes de
+  tópicos versionados, `Source<Módulo>` (ex.: `SourceStorage`) e structs de
+  payload com sufixo de versão (`V1`).
 - **`store/`**: implementação única em SQL manual diretamente na pasta `store/`,
   com todas as queries SQL base centralizadas como constantes em `store/queries.go`,
   usando placeholders `$1, $2`, `arg(&args, v)`, `inClause(&args, slice)` e
@@ -911,7 +912,7 @@ internal/modules/<módulo>/
 
 - Um módulo só pode interagir com outro módulo através da interface
   `<Service>Client` gerada em `gen/<outro>/v1/<outro>v1connect` (presente
-  em `clients.Clients`) e dos tipos de eventos em `internal/modules/<outro>/events`.
+  em `clients.Clients`) e dos tipos de eventos em `internal/events`.
   **Nunca** importar `service/`, `store/` ou `handler/` de outro módulo.
 - Surfaces (`plugins/api/*`) usam apenas `clients.Clients` e `kv.Store`.
 - Fora do `storage`, nenhum código acessa o sistema de arquivos de mídia
