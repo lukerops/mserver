@@ -23,7 +23,7 @@ Permitir que o cliente oficial **`jellyfin-web`** se conecte ao `mserver`, auten
    - Operação universal `Resync` em todos os módulos produtores de estado (`identity`, `storage`, `library`, `subtitles`) para _cold start_, autocura pós-queda abrupta e reconciliação periódica (`MSERVER_RESYNC_INTERVAL=24h`).
 3. **Fronteiras estritas entre módulos (ConnectRPC + Protobuf):**
    - Contratos síncronos de todos os módulos definidos em `proto/<módulo>/v1/<módulo>.proto` e gerados via `buf` em `gen/<módulo>/v1`.
-   - No modo monolito (`MSERVER_<MÓDULO>_URL` vazio), chamadas entre módulos usam o **`In-process transport` (`connectinprocess`) com Zero-Copy** (trafegando por ponteiros de memória, sem rede e sem serialização). No modo microserviços (`MSERVER_<MÓDULO>_URL` definido), usam o cliente ConnectRPC sobre HTTP/2 (`h2c`) no protocolo padrão do Connect.
+   - No modo monolito (`MSERVER_<MÓDULO>_URL` vazio), chamadas entre módulos usam o **`In-process transport` (`connectinprocess`)** (em memória, sem rede). No modo microserviços (`MSERVER_<MÓDULO>_URL` definido), usam o cliente ConnectRPC sobre HTTP/2 (`h2c`) no protocolo padrão do Connect.
    - Nenhum módulo importa `service/`, `store/` ou `handler/` de outro: apenas as interfaces geradas em `gen/...` (via `clients.Clients`) e os tipos de eventos em `internal/events`.
    - Apenas o módulo `storage` acessa o sistema de arquivos físico (confinado por `os.Root`). O restante do sistema referencia arquivos exclusivamente por `FileID` (`UUIDv7`).
 4. **Separação estrita de Surfaces e Plano de Dados:**
@@ -56,7 +56,7 @@ flowchart LR
   - Logging estruturado (`slog`), abertura de banco por módulo (`database.Open` com runner de migrations em `migrations/sqlite` e `migrations/postgres`) e `database.IsUniqueViolation`, usando queries SQL com placeholders `$1, $2` (as transações são internas ao `store` de cada módulo).
   - `pubsub` (`Envelope[T]` CloudEvents 1.0, `Message` com `ID` UUIDv7, `Subscriber` com `consumer` e implementação `pubsub/memory` com retry assíncrono).
   - Configuração do `buf` (`buf.yaml`, `buf.gen.yaml`, `make generate`) gerando código Protobuf + ConnectRPC v2 em `gen/` (versionado).
-  - Módulos com `service/`, `handler/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, registrando o `handler` no `*connect.Server` do `cmd/server`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` (_Zero-Copy_) quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`connecthttp.NewTransport` com `h2c`, protocolo padrão) quando definido.
+  - Módulos com `service/`, `handler/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, registrando o `handler` no `*connect.Server` do `cmd/server`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`connecthttp.NewTransport` com `h2c`, protocolo padrão) quando definido.
 - **Módulo `identity` (`internal/modules/identity` + `proto/identity/v1/identity.proto`):**
   - Separação entre **Conta (`Account`)** e **Perfil (`Profile`)**:
     - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id), `is_admin`, `disabled`, `created_at`.
@@ -181,7 +181,7 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
 - **Servidor HTTP de Dados do `storage` (`internal/modules/storage`):**
   - Implementa `GET /locations/{LocationID}/files/{FileID}` e `HEAD /locations/{LocationID}/files/{FileID}` em **HTTP puro**.
   - Serve o arquivo físico a partir do driver `local` (`os.Root`) usando `http.ServeContent` (suporte completo a `Range` / `206 Partial Content` e `sendfile` zero-copy no kernel).
-  - O método `ResolveFile` no serviço ConnectRPC do `storage` devolve a URL HTTP `http://<host>/locations/{LocationID}/files/{FileID}`.
+  - O método `ResolveFile` no serviço ConnectRPC do `storage` devolve a URL HTTP `<MSERVER_STORAGE_PUBLIC_URL>/locations/{LocationID}/files/{FileID}`. `MSERVER_STORAGE_PUBLIC_URL` é o endereço do servidor como quem lê os arquivos o alcança (padrão: o endereço de escuta no loopback, válido só no monolito).
 - **Módulo `playback` (`internal/modules/playback` + `proto/playback/v1/playback.proto`):**
   - Gerenciamento das sessões de reprodução ativas (início, progresso, pausa, retomada, heartbeat e encerramento) operando sobre tipos de domínio próprios (sem conhecer `DeviceProfile` ou `Ticks` do Jellyfin).
   - Estado das sessões guardado exclusivamente na abstração `internal/kv` (`kv.Store`), sem banco SQLite no módulo `playback`: chave `sessions/{PlaybackSessionID}` com valor JSON e TTL de 2× o timeout.

@@ -38,18 +38,14 @@ Consulte também os documentos de referência em `docs/`:
      ```
    - O `module.go` registra o handler no `*connect.Server` recebido do `cmd/server`: `<mod>v1connect.Register<Service>Handler(server, h)`. Só o `cmd/server` expõe o server por HTTP, com `connecthttp.Mount(mux, server)`.
    - Embutir `<mod>v1connect.Unimplemented<Service>Handler` no `Handler` não é permitido: toda RPC do contrato deve ser implementada explicitamente.
-3. **In-Process Transport (Zero-Copy) no Monolito vs. HTTP/2 (`h2c`) no Protocolo Padrão Connect nos Microserviços:**
+3. **In-Process Transport no Monolito vs. HTTP/2 (`h2c`) no Protocolo Padrão Connect nos Microserviços:**
    - Em `internal/clients/clients.go`, a struct `Clients` armazena as interfaces `<Service>Client` geradas pelo ConnectRPC.
    - No `cmd/server`:
-     - **Modo Monolito (`MSERVER_<MÓDULO>_URL` vazio):** utilize o `In-process transport` do ConnectRPC (`connectinprocess`) sobre o `*connect.Server`, desativando a função de cópia para trafegar puramente por ponteiros (Zero-Copy):
+     - **Modo Monolito (`MSERVER_<MÓDULO>_URL` vazio):** utilize o `In-process transport` do ConnectRPC (`connectinprocess`) sobre o `*connect.Server`, sem rede e sem serialização (as mensagens são copiadas pelo `ProtoCopy` padrão do Connect):
 
        ```go
        // server é o *connect.Server em que os módulos locais registraram seus handlers
-       transport := connectinprocess.New(server, connectinprocess.WithCopyFunc(
-           func(src any) any {
-               return src // Zero-Copy: retorna a mesma referência de memória
-           },
-       ))
+       transport := connectinprocess.New(server)
 
        client := <mod>v1connect.New<Service>Client(connect.NewClient(transport))
        ```
@@ -57,18 +53,11 @@ Consulte também os documentos de referência em `docs/`:
      - **Modo Microserviços (`MSERVER_<MÓDULO>_URL` definido):** instancie o cliente com `<mod>v1connect.New<Service>Client(connect.NewClient(connecthttp.NewTransport(h2cClient, url)))`, usando `h2c` (HTTP/2 Cleartext: `http.Transport` com `Protocols.SetUnencryptedHTTP2(true)`) no **protocolo padrão do Connect** (sem gRPC nem gRPC-Web).
        - O servidor HTTP do `cmd/server` usa `http.Protocols` com `SetHTTP1(true)` e `SetUnencryptedHTTP2(true)` (h2c nativo, sem `x/net`).
 
-4. **Regras de Ouro do Zero-Copy (`connectinprocess`):**
-   - **1. Trate os Payloads como Imutáveis:**
-     - O único risco do Zero-Copy é o efeito colateral (_side effects_). Se o Módulo A enviar uma struct contendo um slice, e o Módulo B modificar diretamente um elemento desse slice, o Módulo A verá a alteração.
-     - **Regra de ouro:** considere que o payload recebido em um `Handler` (ou retornado para um cliente) é **somente leitura**.
-     - Se o Módulo B precisar modificar o dado recebido para processá-lo internamente ou salvá-lo, ele deve fazer uma cópia local ou criar uma nova struct com as alterações.
-   - **2. Evite o Reaproveitamento de Ponteiros no Módulo Emissor:**
-     - Se o cliente (Módulo A) envia mensagens em um loop ou canal, instancie sempre uma **nova struct Protobuf a cada iteração** (`req := &pb.MinhaReq{...}`), em vez de criar uma única struct fora do loop e apenas alterar os campos dela antes de cada chamada. Como o servidor lê a memória original no Zero-Copy, alterar a struct enquanto o servidor ainda a processa geraria uma _Race Condition_.
-5. **Mapeamento de Erros:**
+4. **Mapeamento de Erros:**
    - O `service/` retorna erros sentinela de domínio (`ErrInvalidArgument`, `ErrNotFound`, `ErrAlreadyExists`, `ErrUnauthenticated`, `ErrPermissionDenied`, `ErrFailedPrecondition`).
    - O `handler/` traduz os erros do `service/` usando `connect.NewError(connect.Code..., err.Error()).WithCause(err)`.
    - Os consumidores verificam erros exclusivamente via `connect.CodeOf(err) == connect.Code...`.
-6. **Exceção — Plano de Dados do `storage` (HTTP Puro):**
+5. **Exceção — Plano de Dados do `storage` (HTTP Puro):**
    - **Bytes brutos de mídia (vídeo, áudio, legendas, imagens) NUNCA trafegam por Protobuf/ConnectRPC nem pelo `pubsub`.**
    - O módulo `storage` serve arquivos via **HTTP puro** em `GET /locations/{LocationID}/files/{FileID}` (e `HEAD`/`PUT`) usando `http.ServeContent` para garantir suporte a `Range` (`206 Partial Content`) e _zero-copy_ (`sendfile` no kernel Linux).
 
@@ -131,7 +120,7 @@ Consulte também os documentos de referência em `docs/`:
    - `pubsub.Subscriber` tem a assinatura `Subscribe(ctx context.Context, consumer, topic string, h Handler) error`, onde `consumer` é o nome do módulo consumidor (ex.: `"library"`, `"subtitles"`), permitindo que o NATS JetStream balanceie a carga entre réplicas do mesmo módulo sem duplicar entregas.
 3. **Idempotência e `Resync`:**
    - Todo handler de evento deve ser **100% idempotente** (fazer `UPSERT` pelo ID ou ignorar eventos já aplicados/antigos).
-   - Todo módulo produtor de estado deve implementar métodos de `Resync` em seu serviço, capazes de reler o estado atual do banco e republicar os eventos no `pubsub` (usados para _cold start_, autocura após desligamento abrupto e reconciliação periódica `MSERVER_RESYNC_INTERVAL`).
+   - Todo módulo produtor de estado persistido deve implementar métodos de `Resync` em seu serviço, capazes de reler o estado atual do banco e republicar os eventos no `pubsub` (usados para _cold start_, autocura após desligamento abrupto e reconciliação periódica `MSERVER_RESYNC_INTERVAL`).
 4. **Contrato do `internal/kv`:**
    - Usado para estado efêmero compartilhado entre réplicas (ex.: sessões ativas do `playback` e mapeamento `PlaySessionId` do plugin Jellyfin).
    - Restrito às operações atômicas nativas do Valkey (`Get`, `Create` [`SET NX PX`], `Update` [`SET XX PX`], `Delete` [`DEL`], `List` [`SCAN`]), sem scripts Lua.

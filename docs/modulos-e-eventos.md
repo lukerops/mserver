@@ -10,9 +10,9 @@ O **mserver** opera sob uma arquitetura híbrida que funciona tanto como **monol
 
 1. **Isolamento Total de Dados (SQLite por arquivo ou Postgres por Schema):**
    - Cada módulo que persiste estado possui seu próprio banco isolado (`<módulo>.db` no SQLite ou `SCHEMA <módulo>` no Postgres), com uma única implementação de queries SQL manuais diretamente em `store/` (queries base constantes em `store/queries.go`, placeholders `$1, $2`) e migrations separadas por dialeto (`store/migrations/sqlite` e `store/migrations/postgres`). Não há `JOIN` nem compartilhamento de tabelas entre módulos.
-2. **Comunicação Síncrona via ConnectRPC + Protobuf (Zero-Copy In-Process no Monolito):**
+2. **Comunicação Síncrona via ConnectRPC + Protobuf (In-Process no Monolito):**
    - Os contratos síncronos de todos os módulos são definidos em `proto/<módulo>/v1/<módulo>.proto` e compilados com `buf` (`protoc-gen-go` + `protoc-gen-connect-go`).
-   - **No Monolito (`MSERVER_<MÓDULO>_URL` vazio):** os módulos comunicam-se via **`In-process transport` do Connect (`connectinprocess`)** com _Zero-Copy_ (`WithCopyFunc` retornando o mesmo ponteiro), trafegando puramente por ponteiros de memória sem serialização e sem TCP/HTTP loopback.
+   - **No Monolito (`MSERVER_<MÓDULO>_URL` vazio):** os módulos comunicam-se via **`In-process transport` do Connect (`connectinprocess`)** (`connectinprocess.New(server)`), trafegando em memória sem serialização e sem TCP/HTTP loopback (as mensagens são copiadas pelo `ProtoCopy` padrão do Connect).
    - **Nos Microserviços (`MSERVER_<MÓDULO>_URL` definido):** os módulos comunicam-se via **HTTP/2 (`h2c`) no protocolo padrão do Connect** (Protobuf binário).
 3. **Event-Carried State Transfer (ECST) Direto no `pubsub` (Sem Outbox):**
    - Módulos produtores publicam eventos contendo todo o estado necessário para que os módulos consumidores atualizem suas próprias projeções locais.
@@ -20,7 +20,7 @@ O **mserver** opera sob uma arquitetura híbrida que funciona tanto como **monol
      - No modo monolito (`pubsub/memory`), o barramento entrega em memória com retry assíncrono curto (_exponential backoff_) em caso de falha do handler.
      - No modo distribuído (`pubsub/nats`), o **NATS JetStream** persiste os eventos, descarta duplicatas nativamente via header `Nats-Msg-Id` (`UUIDv7`) e distribui a carga por módulo através de _Durable Consumers / Queue Groups_ (`consumer` na assinatura de `Subscribe`).
 4. **Consistência Eventual Garantida com `Resync` Universal:**
-   - Todo módulo produtor de estado expõe operações de `Resync` por contexto em seu serviço ConnectRPC.
+   - Todo módulo produtor de estado persistido expõe operações de `Resync` por contexto em seu serviço ConnectRPC. O `playback` é a exceção: seu estado vive apenas em memória (`kv.Store`) e não tem o que republicar.
    - O `Resync` lê os registros atuais do banco do módulo e republica os eventos correspondentes no `pubsub`.
    - Como todos os handlers de eventos são **idempotentes** (`UPSERT` baseado em ID), o `Resync` resolve _cold start_ (ex.: nova biblioteca cadastrada), recuperação após desligamento abrupto (`kill -9` / queda de energia entre o `COMMIT` e o `Publish`) e reconciliação periódica (`MSERVER_RESYNC_INTERVAL=24h`, ou incremental via `updated_at`).
 5. **Apenas o `storage` Manipula Dados Físicos (Plano de Dados HTTP Puro):**

@@ -63,41 +63,42 @@ ou flags CLI.
    diretamente no `pubsub` após o commit (com retry em memória no monolito e
    persistência/deduplicação nativa no NATS JetStream nos microserviços),
    eliminando o custo de escrita dupla de uma tabela `outbox`. Todo módulo
-   produtor de estado expõe uma operação de `Resync` para republicar seu estado
-   atual, garantindo consistência eventual, _cold start_ e autocura.
+   produtor de estado persistido expõe uma operação de `Resync` para republicar
+   seu estado atual, garantindo consistência eventual, _cold start_ e autocura
+   (o `playback`, cujo estado vive só em memória, é a exceção).
 8. **Contratos Protobuf + ConnectRPC (In-Process Transport no monolito, HTTP/2 `h2c` nos microserviços).**
    Toda comunicação síncrona de controle entre módulos é definida em arquivos
    `.proto` e implementada com **ConnectRPC** (`connectrpc.com/connect/v2`). No
    monolito, os módulos comunicam-se via **`In-process transport`** do Connect
-   (`connectinprocess`) com _Zero-Copy_ (trafegando puramente por ponteiros de
-   memória, sem serialização e sem rede). Nos microserviços, usam o cliente
+   (`connectinprocess`), em memória, sem serialização e sem rede. Nos
+   microserviços, usam o cliente
    ConnectRPC no protocolo padrão sobre HTTP/2 (`h2c`). O código dos módulos
    consumidores é 100% idêntico nos dois modos (ver seção 4).
 
 ## 3. Decisões de arquitetura
 
-| Tema                       | Decisão                                                                                                                                                                                                                                                                         |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linguagem                  | Go 1.27.3                                                                                                                                                                                                                                                                       |
-| Modo de execução           | Mesmo binário; módulos habilitados via `MSERVER_MODULES` (padrão: `all`) e backends selecionados por variáveis de ambiente                                                                                                                                                      |
-| Contratos entre módulos    | **Protobuf (`.proto`)** em `proto/<módulo>/v1/`, compilados via `buf` (`protoc-gen-go` + `protoc-gen-connect-go`) para `gen/<módulo>/v1`                                                                                                                               |
-| Comunicação síncrona (RPC) | **ConnectRPC**: `In-process transport` (`connectinprocess`) com _Zero-Copy_ quando o módulo de destino é local no monolito; **HTTP/2 (`h2c`) no protocolo padrão do Connect** (Protobuf binário) quando remoto. Aceita também JSON via `POST` para administração (`curl`/Bruno) |
-| Plano de dados (bytes)     | **HTTP puro** servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` / `sendfile` zero-copy no MVP; `PUT` no pós-MVP); bytes brutos de mídia nunca trafegam por Protobuf/ConnectRPC nem pelo `pubsub`                                       |
-| Sincronização de estado    | **ECST (Event-Carried State Transfer)** via publicação direta no `pubsub` (sem tabela `outbox`) + operação `Resync` em todos os módulos produtores para _cold start_, reconciliação e autocura                                                                                  |
-| Descoberta de serviços     | Se `MSERVER_<MÓDULO>_URL` estiver vazio e o módulo rodar no processo, usa o `connectinprocess` (_Zero-Copy_); se definido, usa o endereço remoto informado via `h2c`                                                                                                            |
-| Banco de dados             | Implementação única em SQL manual direto em `store/` (com queries base em `store/queries.go`) usando `*sql.DB` puro e placeholders `$1, $2`. Suporta **SQLite** (1 arquivo `<módulo>.db` por módulo no monolito) e **Postgres** (1 `SCHEMA` por módulo), mudando só migrations  |
-| Cache / KV                 | Estado efêmero compartilhável (ex.: sessões do `playback`) usa `internal/kv` (`kv.Store`): `kv/memory` no monolito e `kv/valkey` nos microserviços, mapeado 1:1 para comandos atômicos nativos (`GET`, `SET NX PX`, `SET XX PX`, `DEL`, `SCAN`)                                 |
-| PubSub / Eventos           | Interface em `internal/pubsub` (`Publisher`/`Subscriber` com `consumer` group e `Message.ID` UUIDv7): `pubsub/memory` (com retry em memória) no monolito e `pubsub/nats` (**NATS JetStream** com deduplicação por `Nats-Msg-Id`) nos microserviços                              |
-| Storage                    | Módulo próprio implementando um VFS; pode rodar isolado diretamente no NAS enquanto os demais módulos escalam em outras máquinas; driver inicial: disco local (`os.Root`)                                                                                                       |
-| Identificação de arquivos  | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes (`sha256`, `ed2k`) entram no pós-MVP (seção 7)                                                                                         |
-| API do projeto             | As próprias rotas ConnectRPC dos módulos montadas na raiz do servidor (que aceitam tanto Protobuf/gRPC quanto HTTP `POST` com JSON para administração via `curl`/Bruno e futura UI web)                                                                                         |
-| Processamento multimídia   | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`                                                                                              |
-| FFmpeg ausente             | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; o processo falha no startup com erro claro                                                                                                                    |
-| Clientes de download       | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                                                                                       |
-| Plugins                    | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                                                                                      |
-| Metadados                  | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                                                                                      |
-| Compatibilidade Jellyfin   | Alvo: API do **Jellyfin 12.4.0** (`docs/jellyfin-openapi-stable.json`); cliente alvo do MVP: **`jellyfin-web`** (`jellyfin-android` e `jellyfin-tizen` no pós-MVP)                                                                                                              |
-| Licença                    | Apache 2.0                                                                                                                                                                                                                                                                      |
+| Tema                       | Decisão                                                                                                                                                                                                                                                                        |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Linguagem                  | Go 1.27.3                                                                                                                                                                                                                                                                      |
+| Modo de execução           | Mesmo binário; módulos habilitados via `MSERVER_MODULES` (padrão: `all`) e backends selecionados por variáveis de ambiente                                                                                                                                                     |
+| Contratos entre módulos    | **Protobuf (`.proto`)** em `proto/<módulo>/v1/`, compilados via `buf` (`protoc-gen-go` + `protoc-gen-connect-go`) para `gen/<módulo>/v1`                                                                                                                                       |
+| Comunicação síncrona (RPC) | **ConnectRPC**: `In-process transport` (`connectinprocess`) quando o módulo de destino é local no monolito; **HTTP/2 (`h2c`) no protocolo padrão do Connect** (Protobuf binário) quando remoto. Aceita também JSON via `POST` para administração (`curl`/Bruno)                |
+| Plano de dados (bytes)     | **HTTP puro** servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` / `sendfile` zero-copy no MVP; `PUT` no pós-MVP); bytes brutos de mídia nunca trafegam por Protobuf/ConnectRPC nem pelo `pubsub`                                      |
+| Sincronização de estado    | **ECST (Event-Carried State Transfer)** via publicação direta no `pubsub` (sem tabela `outbox`) + operação `Resync` nos módulos produtores com estado persistido (não no `playback`, só em memória) para _cold start_, reconciliação e autocura                                |
+| Descoberta de serviços     | Se `MSERVER_<MÓDULO>_URL` estiver vazio e o módulo rodar no processo, usa o `connectinprocess`; se definido, usa o endereço remoto informado via `h2c`                                                                                                                         |
+| Banco de dados             | Implementação única em SQL manual direto em `store/` (com queries base em `store/queries.go`) usando `*sql.DB` puro e placeholders `$1, $2`. Suporta **SQLite** (1 arquivo `<módulo>.db` por módulo no monolito) e **Postgres** (1 `SCHEMA` por módulo), mudando só migrations |
+| Cache / KV                 | Estado efêmero compartilhável (ex.: sessões do `playback`) usa `internal/kv` (`kv.Store`): `kv/memory` no monolito e `kv/valkey` nos microserviços, mapeado 1:1 para comandos atômicos nativos (`GET`, `SET NX PX`, `SET XX PX`, `DEL`, `SCAN`)                                |
+| PubSub / Eventos           | Interface em `internal/pubsub` (`Publisher`/`Subscriber` com `consumer` group e `Message.ID` UUIDv7): `pubsub/memory` (com retry em memória) no monolito e `pubsub/nats` (**NATS JetStream** com deduplicação por `Nats-Msg-Id`) nos microserviços                             |
+| Storage                    | Módulo próprio implementando um VFS; pode rodar isolado diretamente no NAS enquanto os demais módulos escalam em outras máquinas; driver inicial: disco local (`os.Root`)                                                                                                      |
+| Identificação de arquivos  | `FileID` opaco e ordenável (**UUIDv7**), gerado pelo `storage` na indexação; `ffprobe` roda como analisador do `storage` no MVP e hashes (`sha256`, `ed2k`) entram no pós-MVP (seção 7)                                                                                        |
+| API do projeto             | As próprias rotas ConnectRPC dos módulos montadas na raiz do servidor (que aceitam tanto Protobuf/gRPC quanto HTTP `POST` com JSON para administração via `curl`/Bruno e futura UI web)                                                                                        |
+| Processamento multimídia   | `ffprobe` (analisador no `storage` no MVP) e `ffmpeg` (no `transcoder` no pós-MVP, com controle de processo via `SIGSTOP`/`SIGCONT`/`SIGTERM`) disponíveis no ambiente, via `exec`                                                                                             |
+| FFmpeg ausente             | Módulos que dependem dele (`storage` com `ffprobe` no MVP; `transcoder` com `ffmpeg` no pós-MVP) não inicializam; o processo falha no startup com erro claro                                                                                                                   |
+| Clientes de download       | **Não** haverá cliente embutido; apenas integração com clientes externos (Transmission, qBittorrent, SABnzbd) via plugins                                                                                                                                                      |
+| Plugins                    | Inicialmente apenas internos (compilados no binário); suporte a plugins externos no futuro                                                                                                                                                                                     |
+| Metadados                  | **Fora do MVP.** O MVP implementa apenas o fallback baseado em nomes de arquivos (seção 8)                                                                                                                                                                                     |
+| Compatibilidade Jellyfin   | Alvo: API do **Jellyfin 12.4.0** (`docs/jellyfin-openapi-stable.json`); cliente alvo do MVP: **`jellyfin-web`** (`jellyfin-android` e `jellyfin-tizen` no pós-MVP)                                                                                                             |
+| Licença                    | Apache 2.0                                                                                                                                                                                                                                                                     |
 
 ## 4. Comunicação entre módulos
 
@@ -122,11 +123,10 @@ ou flags CLI.
   o expõe por HTTP com `connecthttp.Mount(mux, server)`, que instala uma rota
   `/<pacote.v1.Service>/<Método>` por procedimento. Os mesmos handlers
   atendem os clientes remotos (HTTP) e as chamadas em memória.
-- **Modo Monolito (`In-process transport` com Zero-Copy):** quando o módulo de
+- **Modo Monolito (`In-process transport`):** quando o módulo de
   destino está habilitado no mesmo processo e `MSERVER_<MÓDULO>_URL` não está
   definido, o `cmd/server` cria um transporte `connectinprocess` sobre o
-  `*connect.Server`, com `WithCopyFunc` retornando o mesmo ponteiro (`src`), e
-  instancia o `<Service>Client` sobre esse transporte:
+  `*connect.Server` e instancia o `<Service>Client` sobre esse transporte:
 
   ```go
   server := connect.NewServer()
@@ -134,20 +134,17 @@ ou flags CLI.
   // 1. O módulo registra seu handler no server
   pingv1connect.RegisterPingServiceHandler(server, &pingServer{})
 
-  // 2. Inicializa o transporte inprocess desativando a função de cópia (Zero-Copy)
-  transport := connectinprocess.New(server, connectinprocess.WithCopyFunc(
-      func(src any) any {
-          return src // Zero-Copy: retorna a mesma referência de memória
-      },
-  ))
+  // 2. Inicializa o transporte inprocess sobre o server
+  transport := connectinprocess.New(server)
 
-  // 3. Cria o cliente usando este transporte otimizado
+  // 3. Cria o cliente usando este transporte
   client := pingv1connect.NewPingServiceClient(connect.NewClient(transport))
   ```
 
-  Assim, todas as chamadas `client.<Método>()` trafegam puramente por ponteiros
-  em memória, **sem serialização Protobuf/JSON e sem passar pela pilha TCP/HTTP**,
-  preservando 100% da semântica e dos interceptors do ConnectRPC.
+  Assim, todas as chamadas `client.<Método>()` ocorrem em memória, **sem
+  serialização Protobuf/JSON e sem passar pela pilha TCP/HTTP** (as mensagens
+  são copiadas pelo `ProtoCopy` padrão do Connect), preservando 100% da
+  semântica e dos interceptors do ConnectRPC.
 
 - **Modo Microserviços (Remoto via HTTP/2 `h2c` no protocolo padrão Connect):**
   quando `MSERVER_<MÓDULO>_URL` está definido, o `cmd/server` cria o transporte
@@ -174,43 +171,27 @@ ou flags CLI.
 1. **Fonte única da verdade no `.proto`:** nenhum módulo escreve pacotes
    `router/` ou `client/` manuais para chamadas entre módulos. Todas as
    mensagens de requisição/resposta são definidas em `proto/<módulo>/v1/`.
-2. **Trate os Payloads como Imutáveis (Regra 1 do Zero-Copy):** o único risco do
-   Zero-Copy (`connectinprocess`) é o efeito colateral (_side effects_). Se o
-   Módulo A enviar uma struct contendo um slice e o Módulo B modificar
-   diretamente um elemento desse slice, o Módulo A verá a alteração.
-   - **Regra de ouro:** considere que o payload recebido em um `Handler` (ou
-     retornado ao cliente) é **somente leitura**.
-   - Se o Módulo B precisar modificar o dado recebido para processá-lo
-     internamente ou salvá-lo, ele deve fazer uma cópia local ou criar uma nova
-     struct com as alterações.
-3. **Evite o Reaproveitamento de Ponteiros no Módulo Emissor (Regra 2 do Zero-Copy):**
-   se o cliente (Módulo A) envia mensagens em um loop ou canal, instancie sempre
-   uma **nova struct Protobuf a cada iteração** (`req := &pb.MinhaReq{...}`), em
-   vez de criar uma única struct fora do loop e apenas alterar os campos dela
-   antes de cada chamada. Como o servidor lê a memória original no Zero-Copy,
-   alterar a struct enquanto o servidor ainda a processa geraria uma _Race
-   Condition_.
-4. **Erros tipados com `connect.Code`:** o `handler/` do módulo converte os
+2. **Erros tipados com `connect.Code`:** o `handler/` do módulo converte os
    erros sentinela do `service/` para códigos padrão (`connect.CodeInvalidArgument`,
    `connect.CodeUnauthenticated`, `connect.CodePermissionDenied`,
    `connect.CodeNotFound`, `connect.CodeAlreadyExists`,
    `connect.CodeFailedPrecondition`, `connect.CodeUnavailable`,
    `connect.CodeInternal`). Os consumidores verificam erros exclusivamente via
    `connect.CodeOf(err)`.
-5. **Coleções grandes paginadas** (limite/offset ou cursor), nunca listas
+3. **Coleções grandes paginadas** (limite/offset ou cursor), nunca listas
    ilimitadas.
-6. **Bytes e paths físicos fora dos contratos Protobuf/JSON:** arquivos são
+4. **Bytes e paths físicos fora dos contratos Protobuf/JSON:** arquivos são
    referenciados pelo `FileID` (seção 7) e transferidos exclusivamente via HTTP
    puro do `storage` (`GET` com `Range` e `PUT`), aproveitando `sendfile(2)` do
    kernel Linux. Caminhos só aparecem nos contratos como **dados relativos a uma
    localização**.
-7. **Eventos versionados e idempotentes:** eventos usam o envelope CloudEvents
+5. **Eventos versionados e idempotentes:** eventos usam o envelope CloudEvents
    1.0 (`pubsub.Envelope[T]`) com ID (`UUIDv7`), timestamp e tipo versionado;
    seus payloads ficam no pacote central `internal/events`, em arquivos por contexto (ex.:
    `FileIndexedV1 = "storage.file.indexed.v1"` e `FileEventV1`).
-8. **Sem estado global compartilhado** entre módulos; cada módulo acessa apenas
+6. **Sem estado global compartilhado** entre módulos; cada módulo acessa apenas
    seu próprio banco e recursos.
-9. **Wiring centralizado:** apenas `cmd/server` instancia os módulos habilitados
+7. **Wiring centralizado:** apenas `cmd/server` instancia os módulos habilitados
    e monta a struct `clients.Clients` (decidindo entre `connectinprocess` e
    cliente remoto `h2c` por módulo).
 
@@ -280,7 +261,7 @@ estado (ECST)** em vez de chamadas síncronas em cascata:
   `library` acionando `storage.Resync`, ou `playback` chamando `StartTranscode`
   no `transcoder`).
 - **Operação `Resync` universal e Reconciliação:** todo módulo produtor de
-  estado implementa operações de `Resync` por contexto em seu contrato
+  estado persistido (o `playback`, só em memória, é a exceção) implementa operações de `Resync` por contexto em seu contrato
   ConnectRPC. Ao ser invocada, ela lê os registros atuais do banco do módulo e
   republica os eventos de estado no `pubsub`. Como todo consumidor é idempotente
   (`UPSERT` por ID), o `Resync` resolve:
@@ -939,12 +920,24 @@ localmente (`MSERVER_MODULES`) e quais backends utilizar:
      (`New<Service>Client(connect.NewClient(connecthttp.NewTransport(h2cClient, url)))`).
    - Se o módulo estiver habilitado localmente, inicializa o módulo (que registra
      seu handler no `*connect.Server` do processo) e instancia o
-     `<Service>Client` sobre um transporte `connectinprocess` com Zero-Copy
-     (`connectinprocess.New(server, connectinprocess.WithCopyFunc(func(src any) any { return src }))`).
+     `<Service>Client` sobre um transporte `connectinprocess`
+     (`connectinprocess.New(server)`).
 3. Monta o `*connect.Server` no `http.ServeMux` com `connecthttp.Mount` (junto
    das rotas HTTP do `storage` e dos plugins) e sobe o servidor HTTP com `h2c`
    (`http.Protocols` com HTTP/1 e `SetUnencryptedHTTP2(true)`, na mesma porta
    `MSERVER_HTTP_ADDR`, sem depender de `x/net`).
+4. Os plugins de API (`jellyfin`, habilitado em `MSERVER_MODULES` como os
+   módulos) sobem depois dos módulos, com um `kv.Store` próprio (`kv/memory`),
+   e são montados no `http.ServeMux` sob `/plugins/<nome>/`. O plugin recebe os
+   clients dos módulos (`identity` é obrigatório; `storage`, `library` e
+   `playback` são opcionais e, se ausentes, as rotas que dependem deles
+   respondem vazio ou `503`). O stream do Jellyfin obtém a URL do arquivo por
+   `storage.ResolveFile` e repassa a resposta HTTP (com `Range`) ao player.
+   A URL devolvida é `MSERVER_STORAGE_PUBLIC_URL` + `/locations/{LocationID}/files/{FileID}`;
+   essa variável deve ser o endereço do servidor que monta as rotas do `storage`
+   **como quem lê os arquivos o alcança** (ex.: `http://nas-storage:8096` quando o
+   `storage` roda em outra máquina). Se vazia, usa o endereço de escuta do
+   processo no loopback (`http://127.0.0.1:8096`), o que só funciona no monolito.
 
 ### 10.5 Configuração por variáveis de ambiente
 
@@ -974,6 +967,7 @@ MSERVER_PLAYBACK_URL=                        # ex.: http://playback:8096
 MSERVER_SUBTITLES_URL=                       # ex.: http://subtitles:8096
 
 # Configurações de Módulos
+MSERVER_STORAGE_PUBLIC_URL=                  # endereço do plano de dados que o ResolveFile devolve (padrão: o endereço de escuta, no loopback)
 MSERVER_FFPROBE_PATH=/usr/bin/ffprobe        # executável do ffprobe (padrão: "ffprobe" do PATH)
 MSERVER_STORAGE_SCAN_INTERVAL=6h             # varredura periódica de disco (0 desativa)
 MSERVER_RESYNC_INTERVAL=24h                  # reconciliação periódica de segurança (0 desativa)
