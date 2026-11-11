@@ -5,14 +5,14 @@ package clients
 
 import (
 	"github.com/lukerops/mserver/gen/identity/v1/identityv1connect"
+	"github.com/lukerops/mserver/gen/library/v1/libraryv1connect"
 	"github.com/lukerops/mserver/gen/storage/v1/storagev1connect"
-	library "github.com/lukerops/mserver/internal/modules/library/client"
 	playback "github.com/lukerops/mserver/internal/modules/playback/client"
 )
 
 type Clients struct {
 	Identity identityv1connect.IdentityServiceClient
 	Storage  storagev1connect.StorageServiceClient
-	Library  *library.Client
+	Library  libraryv1connect.LibraryServiceClient
 	Playback *playback.Client
 }

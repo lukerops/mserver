@@ -4,8 +4,8 @@
 // reach it.
 //
 // The modules register their ConnectRPC services on the one server. Only
-// the migrated modules (identity and storage) exist yet; the others are
-// added as they are migrated.
+// the migrated modules (identity, storage and library) exist yet; the
+// others are added as they are migrated.
 //
 // Variables:
 //
@@ -19,6 +19,9 @@
 //	MSERVER_STORAGE_PUBLIC_URL   address of this server as the readers of
 //	                             the files reach it (default: the listen
 //	                             address, on the loopback)
+//	MSERVER_STORAGE_URL          address of the storage when it runs in
+//	                             another instance (default: the storage
+//	                             module of this process)
 //	MSERVER_LOG_LEVEL            debug, info, warn or error (default info)
 //	MSERVER_LOG_FORMAT           text or json (default text)
 //
@@ -46,6 +49,7 @@ import (
 	"github.com/lukerops/mserver/internal/database"
 	"github.com/lukerops/mserver/internal/logger"
 	"github.com/lukerops/mserver/internal/modules/identity"
+	"github.com/lukerops/mserver/internal/modules/library"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
@@ -122,6 +126,21 @@ func run(ctx context.Context) error {
 		defer closeModule(log, "identity", ident.Close)
 	}
 
+	// The library consumes the events of the storage: with the in-memory
+	// bus, it must subscribe before the storage starts publishing.
+	if enabled["library"] {
+		stor, err := newStorageClient(rpc, os.Getenv("MSERVER_STORAGE_URL"), enabled["storage"])
+		if err != nil {
+			return fmt.Errorf("library: %w", err)
+		}
+
+		lib, err := library.New(ctx, dbCfg, rpc, bus, bus, stor, log.With(slog.String("module", "library")))
+		if err != nil {
+			return fmt.Errorf("library: %w", err)
+		}
+		defer closeModule(log, "library", lib.Close)
+	}
+
 	if enabled["storage"] {
 		baseURL := os.Getenv("MSERVER_STORAGE_PUBLIC_URL")
 		if baseURL == "" {
@@ -173,7 +192,7 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 }
 
 // available are the modules migrated to ConnectRPC.
-var available = []string{"identity", "storage"}
+var available = []string{"identity", "storage", "library"}
 
 // parseModules parses MSERVER_MODULES: "all" (or empty) or a
 // comma-separated list of modules.

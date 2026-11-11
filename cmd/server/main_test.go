@@ -62,9 +62,10 @@ func TestParseModules(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"", []string{"identity", "storage"}, false},
-		{"all", []string{"identity", "storage"}, false},
+		{"", []string{"identity", "storage", "library"}, false},
+		{"all", []string{"identity", "storage", "library"}, false},
 		{"storage", []string{"storage"}, false},
+		{"library", []string{"library"}, false},
 		{"identity,storage", []string{"identity", "storage"}, false},
 		{" storage , storage", []string{"storage"}, false},
 		{"nope", nil, true},
@@ -100,6 +101,25 @@ func TestLocalURL(t *testing.T) {
 		}
 		if got := localURL(a); got != want {
 			t.Errorf("localURL(%s) = %s, want %s", addr, got, want)
+		}
+	}
+}
+
+func TestNewStorageClient(t *testing.T) {
+	rpc := connect.NewServer()
+	if _, err := newStorageClient(rpc, "", false); err == nil {
+		t.Error("a storage that is neither local nor remote was accepted")
+	}
+	for name, tc := range map[string]struct {
+		url   string
+		local bool
+	}{
+		"local":  {local: true},
+		"remote": {url: "http://storage.test:8096"},
+		"both":   {url: "http://storage.test:8096", local: true},
+	} {
+		if c, err := newStorageClient(rpc, tc.url, tc.local); err != nil || c == nil {
+			t.Errorf("%s: client = %v, %v", name, c, err)
 		}
 	}
 }

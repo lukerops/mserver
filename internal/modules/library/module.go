@@ -1,6 +1,6 @@
 // Package library is the library module: the global catalog of media,
-// built from the events of the storage. Other modules reach it only
-// through its REST API (see the client package).
+// built from the events of the storage. Other modules reach it through the
+// ConnectRPC LibraryService (libraryv1connect).
 package library
 
 import (
@@ -8,62 +8,61 @@ import (
 	"database/sql"
 	"errors"
 	"log/slog"
-	"net/http"
-	"path/filepath"
 
-	"github.com/lukerops/mserver/internal/clients"
-	database "github.com/lukerops/mserver/internal/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/outbox"
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/library/router"
+	"connectrpc.com/connect/v2"
+
+	"github.com/lukerops/mserver/gen/library/v1/libraryv1connect"
+	"github.com/lukerops/mserver/gen/storage/v1/storagev1connect"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/modules/library/handler"
 	"github.com/lukerops/mserver/internal/modules/library/service"
-	"github.com/lukerops/mserver/internal/modules/library/store/sqlite"
+	"github.com/lukerops/mserver/internal/modules/library/store"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
+
+// consumer is the name of the module as a consumer of events.
+const consumer = "library"
 
 // Module is a running library module.
 type Module struct {
-	// Mux serves the library API.
-	Mux *http.ServeMux
-
 	db     *sql.DB
-	outbox *outbox.Outbox
+	cancel context.CancelFunc
 }
 
-// New opens the database <dataDir>/library.db, starts publishing the
-// saved events on pub, subscribes to the storage events on sub and builds
-// the API. The library uses the storage (c.Storage) to create libraries.
+// New opens the database of the module, registers the LibraryService
+// handler on server and subscribes to the storage events on sub. Events are
+// published on pub. The library uses the storage to check and resync the
+// locations of the libraries.
 //
-// Events published on sub before New are not seen: create the library
-// before the modules it consumes events from start publishing.
-func New(ctx context.Context, dataDir string, pub queue.Publisher, sub queue.Subscriber, c clients.Clients, log *slog.Logger) (*Module, error) {
+// With the in-memory bus, events published before New are not seen: create
+// the library before the modules it consumes events from start publishing.
+func New(ctx context.Context, cfg database.Config, server *connect.Server, pub pubsub.Publisher, sub pubsub.Subscriber, storage storagev1connect.StorageServiceClient, log *slog.Logger) (*Module, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	db, err := database.Open(ctx, filepath.Join(dataDir, "library.db"))
+	db, err := database.Open(ctx, cfg, "library", store.Migrations)
 	if err != nil {
 		return nil, err
 	}
-	ob, err := outbox.New(ctx, db, pub, log)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	st, err := sqlite.New(ctx, db)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	ob.Start(ctx)
 
-	svc := service.New(st, ob, c.Storage, log)
+	svc := service.New(store.New(db), pub, storage, log)
+
+	// The subscriptions last until Close.
+	subCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	for _, topic := range service.StorageTopics {
-		sub.Subscribe(topic, svc.HandleStorageEvent)
+		if err := sub.Subscribe(subCtx, consumer, topic, svc.HandleStorageEvent); err != nil {
+			cancel()
+			return nil, errors.Join(err, db.Close())
+		}
 	}
-	log.InfoContext(ctx, "library: started",
-		"db_file", filepath.Join(dataDir, "library.db"), "topics", service.StorageTopics)
-	return &Module{Mux: router.New(svc, log), db: db, outbox: ob}, nil
+	libraryv1connect.RegisterLibraryServiceHandler(server, handler.New(svc, log))
+
+	log.InfoContext(ctx, "library: module started", slog.String("db_driver", string(cfg.Driver)))
+	return &Module{db: db, cancel: cancel}, nil
 }
 
-// Close stops publishing events and closes the database.
+// Close stops listening to the storage events and closes the database.
 func (m *Module) Close() error {
-	m.outbox.Stop()
+	m.cancel()
 	return m.db.Close()
 }
