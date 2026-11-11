@@ -5,12 +5,13 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/playback/sessions/{{PlaybackSessionID}}/progress"
+  url: "{{BaseURL}}/playback.v1.PlaybackService/ReportProgress"
   body:
     type: json
     data: |-
       {
-        "position_ms": 60000,
+        "id": "{{PlaybackSessionID}}",
+        "positionMs": 60000,
         "paused": true
       }
   auth: inherit

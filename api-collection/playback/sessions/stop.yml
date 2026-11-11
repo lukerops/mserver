@@ -5,12 +5,13 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/playback/sessions/{{PlaybackSessionID}}/stop"
+  url: "{{BaseURL}}/playback.v1.PlaybackService/StopSession"
   body:
     type: json
     data: |-
       {
-        "position_ms": 90000
+        "id": "{{PlaybackSessionID}}",
+        "positionMs": 90000
       }
   auth: inherit
 

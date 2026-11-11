@@ -4,8 +4,14 @@ info:
   seq: 2
 
 http:
-  method: GET
-  url: "{{BaseURL}}/v1/playback/sessions"
+  method: POST
+  url: "{{BaseURL}}/playback.v1.PlaybackService/ListSessions"
+  body:
+    type: json
+    data: |-
+      {
+        "limit": 50
+      }
   auth: inherit
 
 settings:

@@ -5,7 +5,13 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/playback/sessions/{{PlaybackSessionID}}/heartbeat"
+  url: "{{BaseURL}}/playback.v1.PlaybackService/HeartbeatSession"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{PlaybackSessionID}}"
+      }
   auth: inherit
 
 settings:
