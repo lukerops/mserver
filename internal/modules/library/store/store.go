@@ -1,90 +1,109 @@
-// Package store defines the persistence of the library catalog: its
-// records and the Store interface. Database backends implement Store in
-// subpackages (e.g. store/sqlite).
+// Package store persists the library catalog: libraries, movies, series,
+// seasons and episodes. The Store is a concrete type, with hand-written SQL
+// that runs on both SQLite and Postgres (placeholders "$1, $2, ..."); only
+// the migrations differ between them (migrations/sqlite and
+// migrations/postgres, in Migrations).
+//
+// The audio and subtitle languages of the media info are also saved in
+// their own columns (see languages.go), so that the lists can filter by
+// language with a plain LIKE.
+//
+// The SQLite pool has a single connection: inside a transaction every query
+// must go through the transaction, and rows must be closed before running
+// another query. The transactions are internal to the Store methods.
 package store
 
 import (
 	"context"
-	"errors"
-
-	"github.com/google/uuid"
+	"database/sql"
+	"embed"
+	"fmt"
+	"math"
+	"strings"
+	"time"
 )
 
-// Errors returned by Store implementations, wrapped with context.
-var (
-	ErrNotFound      = errors.New("not found")
-	ErrAlreadyExists = errors.New("already exists")
-)
+// Migrations holds the migrations of the module, laid out as
+// "migrations/sqlite/*.sql" and "migrations/postgres/*.sql", as expected by
+// database.Open.
+//
+//go:embed migrations/*/*.sql
+var Migrations embed.FS
 
-// Store persists libraries, movies, series, seasons and episodes.
-type Store interface {
-	// WithTx runs fn in a transaction, committing if fn succeeds. Store
-	// methods called with the context given to fn join the transaction.
-	WithTx(ctx context.Context, fn func(ctx context.Context) error) error
-
-	// InsertLibrary saves a new library. It returns ErrAlreadyExists if
-	// one of its locations belongs to another library.
-	InsertLibrary(ctx context.Context, lib Library) error
-	// GetLibrary returns ErrNotFound if the library does not exist.
-	GetLibrary(ctx context.Context, id uuid.UUID) (Library, error)
-	// ListLibraries returns every library ordered by name and ID.
-	ListLibraries(ctx context.Context) ([]Library, error)
-	// LibraryOfLocation returns the library of a location, or ErrNotFound
-	// if the location belongs to no library.
-	LibraryOfLocation(ctx context.Context, location uuid.UUID) (Library, error)
-	// DeleteLibrary removes a library with its movies, series, seasons and
-	// episodes, freeing its locations. It returns ErrNotFound if the
-	// library does not exist.
-	DeleteLibrary(ctx context.Context, id uuid.UUID) error
-
-	// GetMovie returns ErrNotFound if the movie does not exist.
-	GetMovie(ctx context.Context, id uuid.UUID) (Movie, error)
-	// SaveMovie inserts or replaces a movie.
-	SaveMovie(ctx context.Context, m Movie) error
-	// DeleteMovie removes a movie; removing a missing movie is not an
-	// error.
-	DeleteMovie(ctx context.Context, id uuid.UUID) error
-	// ListMovies returns a page of the movies selected by q and the total
-	// number of movies selected (ignoring the offset and limit).
-	ListMovies(ctx context.Context, q MovieQuery) ([]Movie, int, error)
-
-	// GetSeries returns ErrNotFound if the series does not exist.
-	GetSeries(ctx context.Context, id uuid.UUID) (Series, error)
-	// FindSeries returns the series of a library with a key and year, or
-	// ErrNotFound.
-	FindSeries(ctx context.Context, library uuid.UUID, key string, year int) (Series, error)
-	// InsertSeries saves a new series.
-	InsertSeries(ctx context.Context, s Series) error
-	// DeleteSeries removes a series with its seasons and episodes;
-	// removing a missing series is not an error.
-	DeleteSeries(ctx context.Context, id uuid.UUID) error
-	// ListSeries returns a page of the series selected by q and the total
-	// number of series selected (ignoring the offset and limit).
-	ListSeries(ctx context.Context, q SeriesQuery) ([]Series, int, error)
-
-	// GetSeason returns ErrNotFound if the season does not exist.
-	GetSeason(ctx context.Context, id uuid.UUID) (Season, error)
-	// FindSeason returns the season of a series with a number, or
-	// ErrNotFound.
-	FindSeason(ctx context.Context, series uuid.UUID, number int) (Season, error)
-	// InsertSeason saves a new season.
-	InsertSeason(ctx context.Context, s Season) error
-	// DeleteSeason removes a season with its episodes; removing a missing
-	// season is not an error.
-	DeleteSeason(ctx context.Context, id uuid.UUID) error
-	// ListSeasons returns the seasons selected by q, ordered by series and
-	// number.
-	ListSeasons(ctx context.Context, q SeasonQuery) ([]Season, error)
-
-	// GetEpisode returns ErrNotFound if the episode does not exist.
-	GetEpisode(ctx context.Context, id uuid.UUID) (Episode, error)
-	// SaveEpisode inserts or replaces an episode. Its series and season
-	// must exist.
-	SaveEpisode(ctx context.Context, e Episode) error
-	// DeleteEpisode removes an episode; removing a missing episode is not
-	// an error.
-	DeleteEpisode(ctx context.Context, id uuid.UUID) error
-	// ListEpisodes returns a page of the episodes selected by q and the
-	// total number of episodes selected (ignoring the offset and limit).
-	ListEpisodes(ctx context.Context, q EpisodeQuery) ([]Episode, int, error)
+// Store persists the catalog. Create it with New.
+type Store struct {
+	db *sql.DB
 }
+
+// New returns the Store on a database already migrated (see database.Open
+// and Migrations).
+func New(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
+// withTx runs fn in a transaction, committing if fn succeeds. fn must run
+// its queries on the given transaction.
+func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit transaction: %w", err)
+	}
+	return nil
+}
+
+// arg appends v to args and returns its placeholder.
+func arg(args *[]any, v any) string {
+	*args = append(*args, v)
+	return fmt.Sprintf("$%d", len(*args))
+}
+
+// inClause appends vals to args and returns the placeholders of the IN
+// list, e.g. "($1, $2)". vals must not be empty.
+func inClause[T any](args *[]any, vals []T) string {
+	ph := make([]string, len(vals))
+	for i, v := range vals {
+		ph[i] = arg(args, v)
+	}
+	return "(" + strings.Join(ph, ", ") + ")"
+}
+
+// paginate appends LIMIT and OFFSET to query, only when they are set (a
+// "LIMIT -1" is invalid on Postgres). SQLite does not accept an OFFSET
+// without a LIMIT, so an offset alone gets the largest possible limit.
+func paginate(query string, args *[]any, limit, offset int) string {
+	var b strings.Builder
+	b.WriteString(query)
+	switch {
+	case limit > 0:
+		b.WriteString(" LIMIT ")
+		b.WriteString(arg(args, limit))
+	case offset > 0:
+		b.WriteString(" LIMIT ")
+		b.WriteString(arg(args, int64(math.MaxInt64)))
+	}
+	if offset > 0 {
+		b.WriteString(" OFFSET ")
+		b.WriteString(arg(args, offset))
+	}
+	return b.String()
+}
+
+// where joins the conditions into a WHERE clause, empty when there are
+// none.
+func where(conds []string) string {
+	if len(conds) == 0 {
+		return ""
+	}
+	return " WHERE " + strings.Join(conds, " AND ")
+}
+
+func nanos(t time.Time) int64     { return t.UnixNano() }
+func fromNanos(n int64) time.Time { return time.Unix(0, n).UTC() }

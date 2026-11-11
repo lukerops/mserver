@@ -1,6 +1,7 @@
 package store
 
 import (
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -86,6 +87,16 @@ type Stream struct {
 	Channels      int    `json:"channels,omitempty"`
 	ChannelLayout string `json:"channel_layout,omitempty"`
 	SampleRate    int    `json:"sample_rate,omitempty"`
+}
+
+// Equal reports whether m and o hold the same information; nil is only
+// equal to nil.
+func (m *MediaInfo) Equal(o *MediaInfo) bool {
+	if m == nil || o == nil {
+		return m == o
+	}
+	return m.Container == o.Container && m.DurationMs == o.DurationMs &&
+		m.BitRate == o.BitRate && m.Size == o.Size && slices.Equal(m.Streams, o.Streams)
 }
 
 // Sort orders of ListMovies and ListSeries.
@@ -238,4 +249,14 @@ type EpisodeQuery struct {
 	Offset     int
 	// Limit is the maximum number of episodes; zero means no limit.
 	Limit int
+}
+
+// ShowChanges are the series and seasons that SaveEpisode and DeleteEpisode
+// created or removed along with the episode. The fields are nil when
+// nothing happened to them.
+type ShowChanges struct {
+	AddedSeries   *Series
+	AddedSeason   *Season
+	RemovedSeason *Season
+	RemovedSeries *Series
 }
