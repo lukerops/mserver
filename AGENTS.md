@@ -28,21 +28,23 @@ Consulte também os documentos de referência em `docs/`:
 ### Pilar 1: Comunicação Síncrona entre Módulos (ConnectRPC + Protobuf + In-Process)
 
 1. **Contratos em Protobuf (`proto/<módulo>/v1/<módulo>.proto`):**
-   - Toda comunicação síncrona de controle entre módulos é definida em arquivos `.proto` e gerada via `buf` (`protoc-gen-go` e `protoc-gen-connect-go`) dentro de `internal/gen/<módulo>/v1`.
+   - Usa-se o **connect-go v2** (`connectrpc.com/connect/v2`): handlers e clientes usam a assinatura simples `func(ctx, *Request) (*Response, error)`, o servidor é um `*connect.Server` e o transporte HTTP vem de `connecthttp`.
+   - Toda comunicação síncrona de controle entre módulos é definida em arquivos `.proto` e gerada via `buf` (`protoc-gen-go` e `protoc-gen-connect-go`) dentro de `gen/<módulo>/v1`. Gere com `make generate` (o `buf` roda via `go run`, em versão fixa); o código gerado é versionado e **nunca editado à mão**.
    - **Não crie pacotes `router/` ou `client/` manuais para módulos.**
 2. **Pacote `handler/` em cada módulo:**
    - Cada módulo implementa um pacote `handler/` cuja struct `Handler` satisfaz a interface `<Service>Handler` gerada pelo ConnectRPC:
      ```go
      var _ <mod>v1connect.<Service>Handler = (*Handler)(nil)
      ```
-   - O `module.go` registra `mux.Handle(<mod>v1connect.New<Service>Handler(h))` no `http.ServeMux` do módulo.
+   - O `module.go` registra o handler no `*connect.Server` recebido do `cmd/server`: `<mod>v1connect.Register<Service>Handler(server, h)`. Só o `cmd/server` expõe o server por HTTP, com `connecthttp.Mount(mux, server)`.
+   - Embutir `<mod>v1connect.Unimplemented<Service>Handler` no `Handler` não é permitido: toda RPC do contrato deve ser implementada explicitamente.
 3. **In-Process Transport (Zero-Copy) no Monolito vs. HTTP/2 (`h2c`) no Protocolo Padrão Connect nos Microserviços:**
    - Em `internal/clients/clients.go`, a struct `Clients` armazena as interfaces `<Service>Client` geradas pelo ConnectRPC.
    - No `cmd/server`:
-     - **Modo Monolito (`MSERVER_<MÓDULO>_URL` vazio):** utilize o `In-process transport` do ConnectRPC (`connectinprocess`) sobre o `mux` do módulo, desativando a função de cópia para trafegar puramente por ponteiros (Zero-Copy):
+     - **Modo Monolito (`MSERVER_<MÓDULO>_URL` vazio):** utilize o `In-process transport` do ConnectRPC (`connectinprocess`) sobre o `*connect.Server`, desativando a função de cópia para trafegar puramente por ponteiros (Zero-Copy):
 
        ```go
-       server := connect.NewServer()
+       // server é o *connect.Server em que os módulos locais registraram seus handlers
        transport := connectinprocess.New(server, connectinprocess.WithCopyFunc(
            func(src any) any {
                return src // Zero-Copy: retorna a mesma referência de memória
@@ -52,7 +54,8 @@ Consulte também os documentos de referência em `docs/`:
        client := <mod>v1connect.New<Service>Client(connect.NewClient(transport))
        ```
 
-     - **Modo Microserviços (`MSERVER_<MÓDULO>_URL` definido):** instancie `New<Service>Client(h2cClient, url)` usando `h2c` (HTTP/2 Cleartext) no **protocolo padrão do Connect** (sem `connect.WithGRPC()`).
+     - **Modo Microserviços (`MSERVER_<MÓDULO>_URL` definido):** instancie o cliente com `<mod>v1connect.New<Service>Client(connect.NewClient(connecthttp.NewTransport(h2cClient, url)))`, usando `h2c` (HTTP/2 Cleartext: `http.Transport` com `Protocols.SetUnencryptedHTTP2(true)`) no **protocolo padrão do Connect** (sem gRPC nem gRPC-Web).
+       - O servidor HTTP do `cmd/server` usa `http.Protocols` com `SetHTTP1(true)` e `SetUnencryptedHTTP2(true)` (h2c nativo, sem `x/net`).
 
 4. **Regras de Ouro do Zero-Copy (`connectinprocess`):**
    - **1. Trate os Payloads como Imutáveis:**
@@ -75,7 +78,8 @@ Consulte também os documentos de referência em `docs/`:
 
 1. **Sem ORMs, sem Wrappers sobre `*sql.DB` e tudo direto em `store/`:**
    - Não use ORMs (`gorm`, `ent`, `bun`) nem geradores de queries (`sqlc`), e não crie wrappers que reescrevam strings SQL em tempo de execução.
-   - Como haverá apenas uma implementação de banco de dados por módulo, **todo o código de persistência fica diretamente dentro de `internal/modules/<módulo>/store/`** (sem subpasta `sqlstore` ou `sqlite`), operando sobre `*sql.DB` / `database.Conn`.
+   - Como haverá apenas uma implementação de banco de dados por módulo, **todo o código de persistência fica diretamente dentro de `internal/modules/<módulo>/store/`** (sem subpasta `sqlstore` ou `sqlite`), operando sobre `*sql.DB`. `Store` é uma struct concreta (não uma interface), criada com `store.New(db)`; os testes dos módulos usam um SQLite em memória em vez de mocks. Se um consumidor precisar de um fake, ele declara a própria interface mínima.
+     - **Transações são internas ao `store`:** um `withTx` privado, usado só pelos métodos que precisam de atomicidade (ex.: `ApplyScan`). Dentro dele, todas as queries usam o `*sql.Tx` (o pool do SQLite tem uma única conexão) e as linhas são fechadas antes da próxima query.
    - **Queries base em `queries.go`:** todas as queries SQL estáticas/base do módulo devem ser declaradas como constantes em um arquivo dedicado `internal/modules/<módulo>/store/queries.go` (apenas a concatenação condicional de cláusulas em queries dinâmicas fica nos métodos em si, ainda partindo da query base definida em `queries.go`).
 2. **Regras Estritas de SQL Portável (SQLite + Postgres):**
    - **Placeholders sempre no padrão `$1, $2, $3...`:** nunca use `?` ou `?1`. Tanto o SQLite moderno quanto o Postgres (`pgx`) suportam `$1, $2` nativamente.
@@ -96,7 +100,8 @@ Consulte também os documentos de referência em `docs/`:
      }
      ```
 
-   - **Paginação (`LIMIT` / `OFFSET`):** **NUNCA** use `LIMIT -1` (causa erro de execução no Postgres). Só concatene `LIMIT $N` na query quando `Limit > 0` e `OFFSET $N` quando `Offset > 0`.
+   - **Paginação (`LIMIT` / `OFFSET`):** **NUNCA** use `LIMIT -1` (causa erro de execução no Postgres). Só concatene `LIMIT $N` na query quando `Limit > 0` e `OFFSET $N` quando `Offset > 0`. Como o SQLite não aceita `OFFSET` sem `LIMIT`, um `Offset` sozinho usa `LIMIT` com `math.MaxInt64`.
+     - **Coleções grandes são paginadas** (`Limit`/`Offset`) nos contratos e no `store`.
    - **Upserts:** use sempre `INSERT INTO ... VALUES ($1, ...) ON CONFLICT (...) DO UPDATE SET col = excluded.col`.
    - **Tipos de Dados nas Colunas e no Scan:**
      - **IDs:** `uuid.UUID` (`TEXT` no SQLite, `UUID` no Postgres). Para UUIDs anuláveis, use `uuid.NullUUID`.
@@ -108,7 +113,8 @@ Consulte também os documentos de referência em `docs/`:
    - Dentro de `internal/modules/<módulo>/store/migrations/`, mantenha:
      - `sqlite/*.sql`
      - `postgres/*.sql`
-   - Ambas embutidas via `//go:embed migrations/*/*.sql` e selecionadas conforme `MSERVER_DB_DRIVER` (`sqlite` ou `postgres`).
+   - Ambas embutidas via `//go:embed migrations/*/*.sql` (exportadas como `store.Migrations`) e selecionadas conforme `MSERVER_DB_DRIVER` (`sqlite` ou `postgres`).
+   - O `module.go` abre o banco com `database.Open(ctx, cfg, "<módulo>", store.Migrations)` e cria o store com `store.New(db)`.
    - No Postgres, cada módulo roda confinado em seu próprio schema (`CREATE SCHEMA IF NOT EXISTS <módulo>` e `search_path=<módulo>`).
 
 ---
@@ -118,7 +124,7 @@ Consulte também os documentos de referência em `docs/`:
 1. **Sem Tabela `outbox`:**
    - O projeto **não utiliza** tabela `outbox` no banco de dados (evitando o dobro de I/O de escrita em cartões SD/discos do NAS).
    - O `service` faz a escrita no `store` e, logo após o commit, publica os eventos diretamente via `pubsub.Publisher`.
-   - Não propague transações de banco pelo `context.Context` para fins de publicação de eventos; transações (`WithTx`) são internas à operação de persistência do `store`.
+   - Não propague transações de banco pelo `context.Context` para fins de publicação de eventos; transações (`withTx`) são internas à operação de persistência do `store`.
 2. **Contrato do `internal/pubsub`:**
    - Todo evento usa o envelope CloudEvents 1.0 (`pubsub.Envelope[T]`) com `ID` **UUIDv7**.
    - `pubsub.Message` deve carregar `{ID string, Topic string, Payload []byte}`, onde `ID` é o `UUIDv7` do envelope (usado como `Nats-Msg-Id` no NATS JetStream para deduplicação nativa).
@@ -139,18 +145,19 @@ internal/modules/<módulo>/
 ├── service/               # Regra de negócio pura, interface Service, erros sentinela e Resync
 ├── handler/               # Implementação ConnectRPC (<Service>Handler)
 ├── events/                # Constantes de tópicos e structs de payload versionadas (ex.: MovieEventV1)
-├── store/                 # Interface Store, models, erros, queries.go e implementação SQL única ($1, $2)
+├── store/                 # struct Store, models, erros, queries.go e SQL único ($1, $2)
 │   ├── queries.go         # Constantes com todas as queries SQL base do módulo
 │   └── migrations/        # Migrations embutidas (go:embed): sqlite/*.sql e postgres/*.sql
-└── module.go              # New/Close: inicializa store, service, handler, subscrições e plugins
+└── module.go              # New/Close: abre o banco, inicializa store, service, handler (registrado no *connect.Server), subscrições e plugins
 ```
 
 **Regras de Importação (Fronteiras Rígidas):**
 
 - Um módulo **JAMAIS** pode importar `service/`, `store/` ou `handler/` de outro módulo.
-- Para chamar outro módulo, importe apenas a interface gerada em `internal/gen/<outro>/v1/<outro>v1connect` (recebida via `clients.Clients`).
+- Para chamar outro módulo, importe apenas a interface gerada em `gen/<outro>/v1/<outro>v1connect` (recebida via `clients.Clients`).
 - Para produzir ou consumir eventos, importe apenas `internal/modules/<módulo>/events` e `internal/pubsub`.
 - Apenas o módulo `storage` pode importar `os.Root` ou manipular arquivos de mídia no sistema de arquivos.
+- O módulo `storage` expõe também um `Mux` com as rotas HTTP puras do plano de dados; o `cmd/server` o monta ao lado do `connecthttp.Mount`.
 - Divida cada pacote em arquivos pequenos e coesos por contexto (ex.: `accounts.go`, `profiles.go`, `sessions.go`), evitando arquivos monolíticos.
 
 ---
@@ -158,8 +165,10 @@ internal/modules/<módulo>/
 ## 3. Estilo de Código, Testes e Git
 
 - **Simplicidade e Clareza:** Escreva código Go idiomático, direto e explícito. Evite `reflect`, abstrações genéricas complexas ou "mágica" difícil de depurar (_"Clear is better than clever"_).
+- **Alocações:** evite alocações e cópias desnecessárias. Entre funções, passe e retorne structs grandes por ponteiro (`*File`, `*Analysis`) (parâmetros e retornos únicos). Slices continuam por valor (`[]File`), pois `[]*File` aloca uma vez por elemento; ao ler linhas do banco, escaneie em uma variável local e faça `append` dela.
 - **Testes:**
   - Sempre execute `go test ./...` após alterações para garantir que todos os testes passem.
+  - Ao alterar `proto/`, rode `make lint` e `make generate` e inclua o código gerado.
   - Parsers de regex (`library`, `subtitles`) devem ter testes baseados em tabela cobrindo casos de borda.
 - **Commits (quando solicitados pelo usuário):**
   - Siga o padrão **Conventional Commits** e escreva as mensagens **em português**.

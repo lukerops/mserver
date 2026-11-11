@@ -67,7 +67,7 @@ ou flags CLI.
    atual, garantindo consistência eventual, _cold start_ e autocura.
 8. **Contratos Protobuf + ConnectRPC (In-Process Transport no monolito, HTTP/2 `h2c` nos microserviços).**
    Toda comunicação síncrona de controle entre módulos é definida em arquivos
-   `.proto` e implementada com **ConnectRPC** (`connectrpc.com/connect`). No
+   `.proto` e implementada com **ConnectRPC** (`connectrpc.com/connect/v2`). No
    monolito, os módulos comunicam-se via **`In-process transport`** do Connect
    (`connectinprocess`) com _Zero-Copy_ (trafegando puramente por ponteiros de
    memória, sem serialização e sem rede). Nos microserviços, usam o cliente
@@ -80,7 +80,7 @@ ou flags CLI.
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linguagem                  | Go 1.27.3                                                                                                                                                                                                                                                                       |
 | Modo de execução           | Mesmo binário; módulos habilitados via `MSERVER_MODULES` (padrão: `all`) e backends selecionados por variáveis de ambiente                                                                                                                                                      |
-| Contratos entre módulos    | **Protobuf (`.proto`)** em `proto/<módulo>/v1/`, compilados via `buf` (`protoc-gen-go` + `protoc-gen-connect-go`) para `internal/gen/<módulo>/v1`                                                                                                                               |
+| Contratos entre módulos    | **Protobuf (`.proto`)** em `proto/<módulo>/v1/`, compilados via `buf` (`protoc-gen-go` + `protoc-gen-connect-go`) para `gen/<módulo>/v1`                                                                                                                               |
 | Comunicação síncrona (RPC) | **ConnectRPC**: `In-process transport` (`connectinprocess`) com _Zero-Copy_ quando o módulo de destino é local no monolito; **HTTP/2 (`h2c`) no protocolo padrão do Connect** (Protobuf binário) quando remoto. Aceita também JSON via `POST` para administração (`curl`/Bruno) |
 | Plano de dados (bytes)     | **HTTP puro** servido pelo módulo `storage` em `GET /locations/{LocationID}/files/{FileID}` (com `Range` / `sendfile` zero-copy no MVP; `PUT` no pós-MVP); bytes brutos de mídia nunca trafegam por Protobuf/ConnectRPC nem pelo `pubsub`                                       |
 | Sincronização de estado    | **ECST (Event-Carried State Transfer)** via publicação direta no `pubsub` (sem tabela `outbox`) + operação `Resync` em todos os módulos produtores para _cold start_, reconciliação e autocura                                                                                  |
@@ -103,24 +103,36 @@ ou flags CLI.
 
 ### 4.1 Estratégia (Pilar 1: ConnectRPC + Protobuf + In-Process Transport)
 
+- Usa-se o **connect-go v2** (`connectrpc.com/connect/v2`), cujo núcleo não
+  depende de `net/http`: o servidor é um `*connect.Server`, o transporte HTTP
+  vem de `connecthttp` e as chamadas em memória vêm de `connectinprocess`. As
+  mensagens e métodos gerados usam a assinatura simples
+  `func(ctx, *Request) (*Response, error)`, sem `connect.Request[T]`.
 - Cada módulo define seu contrato síncrono em um arquivo Protobuf
-  (`proto/<módulo>/v1/<módulo>.proto`). O `buf generate` gera em
-  `internal/gen/<módulo>/v1` as structs de mensagem e o pacote `<módulo>v1connect`
-  contendo as interfaces `<Service>Handler` (servidor) e `<Service>Client`
-  (cliente).
-- O pacote `handler/` de cada módulo implementa `<Service>Handler` e é montado
-  no `http.ServeMux` do módulo via `<mod>v1connect.New<Service>Handler(h)`.
+  (`proto/<módulo>/v1/<módulo>.proto`). O `buf generate` (`make generate`)
+  gera em `gen/<módulo>/v1` as structs de mensagem e o pacote
+  `<módulo>v1connect`, contendo as interfaces `<Service>Handler` (servidor) e
+  `<Service>Client` (cliente), `Register<Service>Handler` e
+  `New<Service>Client`. O código gerado é versionado, para que o build não
+  dependa do `buf`.
+- O pacote `handler/` de cada módulo implementa `<Service>Handler`. O
+  `module.go` o registra no `*connect.Server` recebido do `cmd/server` via
+  `<mod>v1connect.Register<Service>Handler(server, h)`.
+- O `cmd/server` cria um único `*connect.Server` (com os interceptors comuns) e
+  o expõe por HTTP com `connecthttp.Mount(mux, server)`, que instala uma rota
+  `/<pacote.v1.Service>/<Método>` por procedimento. Os mesmos handlers
+  atendem os clientes remotos (HTTP) e as chamadas em memória.
 - **Modo Monolito (`In-process transport` com Zero-Copy):** quando o módulo de
   destino está habilitado no mesmo processo e `MSERVER_<MÓDULO>_URL` não está
-  definido, o `cmd/server` cria um transporte `connectinprocess` apontando para
-  o `mux` do módulo com `WithCopyFunc` retornando o mesmo ponteiro (`src`), e
+  definido, o `cmd/server` cria um transporte `connectinprocess` sobre o
+  `*connect.Server`, com `WithCopyFunc` retornando o mesmo ponteiro (`src`), e
   instancia o `<Service>Client` sobre esse transporte:
 
   ```go
   server := connect.NewServer()
 
-  // 1. Registra o handler no mux normalmente
-  pingv1connect.NewPingServiceHandler(server, &pingServer{})
+  // 1. O módulo registra seu handler no server
+  pingv1connect.RegisterPingServiceHandler(server, &pingServer{})
 
   // 2. Inicializa o transporte inprocess desativando a função de cópia (Zero-Copy)
   transport := connectinprocess.New(server, connectinprocess.WithCopyFunc(
@@ -138,10 +150,12 @@ ou flags CLI.
   preservando 100% da semântica e dos interceptors do ConnectRPC.
 
 - **Modo Microserviços (Remoto via HTTP/2 `h2c` no protocolo padrão Connect):**
-  quando `MSERVER_<MÓDULO>_URL` está definido, o `cmd/server` instancia o
-  cliente de rede gerado (`New<Service>Client(h2cClient, url)`) usando o
-  **protocolo padrão do Connect** (Protobuf binário por padrão) multiplexado
-  sobre HTTP/2 Cleartext (`h2c`).
+  quando `MSERVER_<MÓDULO>_URL` está definido, o `cmd/server` cria o transporte
+  `connecthttp.NewTransport(h2cClient, url)` e instancia o cliente gerado
+  (`New<Service>Client(connect.NewClient(transport))`). O `h2cClient` é um
+  `*http.Client` cujo `http.Transport` tem `Protocols` com
+  `SetUnencryptedHTTP2(true)` (HTTP/2 Cleartext). Usa-se o **protocolo padrão
+  do Connect** (Protobuf binário por padrão), sem `gRPC`/`gRPC-Web`.
 - **Exposição HTTP e Montagem:** o servidor sobe um listener HTTP/1.1 + HTTP/2
   Cleartext (`h2c`) e monta:
 
@@ -298,7 +312,9 @@ wrappers sobre `*sql.DB`), compatível simultaneamente com **SQLite**
    placeholder `$N` correspondente em uma única operação (`arg(&args, val)` e
    `inClause(&args, slice)`).
 4. **Paginação SQL padrão:** a cláusula `LIMIT $N` só é concatenada na query
-   quando `Limit > 0` (nunca usar `LIMIT -1`, que é inválido no Postgres).
+   quando `Limit > 0` (nunca usar `LIMIT -1`, que é inválido no Postgres) e
+   `OFFSET $N` só quando `Offset > 0`. Como o SQLite não aceita `OFFSET` sem
+   `LIMIT`, um `Offset` sozinho usa `LIMIT` com o maior `int64`.
 5. **Upserts padronizados:** uso de `INSERT INTO ... ON CONFLICT (...) DO UPDATE SET col = excluded.col`,
    cuja sintaxe é idêntica no SQLite e no Postgres.
 6. **Tipos portáveis nas structs de scan:**
@@ -310,10 +326,21 @@ wrappers sobre `*sql.DB`), compatível simultaneamente com **SQLite**
      (cobrindo `"UNIQUE constraint failed"` do SQLite e SQLSTATE `23505` do
      Postgres).
 7. **Migrations isoladas por dialeto:** cada módulo embute via `go:embed` duas
-   pastas de migrations dentro de `store/migrations/`:
+   pastas de migrations dentro de `store/migrations/`, exportadas como
+   `store.Migrations`:
    - `migrations/sqlite/*.sql`
    - `migrations/postgres/*.sql`
-8. **Isolamento físico e lógico:**
+
+   O `module.go` abre o banco com
+   `database.Open(ctx, cfg, "<módulo>", store.Migrations)`, que aplica as
+   migrations do dialeto configurado, e cria o store com `store.New(db)`.
+
+8. **Transações internas ao `store`:** transações (`withTx`) são um detalhe
+   de cada método do `store` que precisa de atomicidade (ex.: `ApplyScan`) e
+   nunca viajam pelo `context.Context`. Como o pool do SQLite tem uma única
+   conexão, dentro da transação todas as queries usam o `*sql.Tx` e as linhas
+   são fechadas antes da próxima query.
+9. **Isolamento físico e lógico:**
    - Quando `MSERVER_DB_DRIVER=sqlite` (padrão): abre `<MSERVER_DATA_DIR>/<módulo>.db`
      com `WAL`, `foreign_keys=1`, `synchronous=NORMAL` e `MaxOpenConns(1)`.
    - Quando `MSERVER_DB_DRIVER=postgres`: conecta em `MSERVER_POSTGRES_URL`,
@@ -803,6 +830,7 @@ Estrutura de pastas reconhecida pela identificação:
 mserver/
 ├── buf.yaml
 ├── buf.gen.yaml
+├── Makefile                             # make generate / make lint (buf via go run, versão fixa)
 ├── proto/                               # contratos Protobuf de todos os módulos
 │   ├── identity/v1/identity.proto
 │   ├── storage/v1/storage.proto
@@ -812,9 +840,9 @@ mserver/
 ├── cmd/
 │   └── server/                          # ponto de entrada: bootstrap híbrido (monolito / microserviços)
 ├── internal/
-│   ├── gen/                             # código gerado pelo buf (protobuf + connectrpc)
+│   ├── gen/                             # código gerado pelo buf (protobuf + connectrpc); versionado, não editar
 │   ├── clients/                         # struct Clients com as interfaces <Service>Client geradas
-│   ├── database/                        # abertura de banco (sqlite / postgres), migrations, WithTx/ConnFrom, IsUniqueViolation
+│   ├── database/                        # abertura de banco (sqlite / postgres), runner de migrations, IsUniqueViolation
 │   ├── kv/                              # interface kv.Store (Get/Create/Update/Delete/List com TTL)
 │   │   └── memory/                      # implementação em memória (valkey nos microserviços)
 │   ├── logger/                          # logger estruturado (slog) com propagação no contexto
@@ -850,18 +878,18 @@ internal/modules/<módulo>/
 ├── service/               # regra de negócio: interface Service, erros de domínio e Resync
 ├── handler/               # implementa <Service>Handler (ConnectRPC), mapeando erros
 ├── events/                # tipos e payloads versionados dos eventos publicados (ex.: AccountEventV1)
-├── store/                 # interface Store, models, erros, queries.go e implementação SQL única ($1, $2)
+├── store/                 # struct Store, models, erros, queries.go e SQL único ($1, $2)
 │   ├── queries.go         # constantes com todas as queries SQL base do módulo
-│   └── migrations/        # migrations embutidas (go:embed) separadas por dialeto
+│   └── migrations/        # migrations embutidas (go:embed, store.Migrations) separadas por dialeto
 │       ├── sqlite/
 │       └── postgres/
-└── module.go              # New/Close: abre o banco, cria store, service, handler e plugins; expõe Mux
+└── module.go              # New/Close: abre o banco, cria store, service e handler, registra o handler no *connect.Server e inicia plugins
 ```
 
 - **`service/`**: contém toda a regra de negócio e define a própria interface
   `Service`. Não importa `handler/` nem pacotes gerados do ConnectRPC. Pode
   importar `store/` e `events/` do próprio módulo e as interfaces de cliente em
-  `internal/gen/...` e `events/` de outros módulos.
+  `gen/...` e `events/` de outros módulos.
 - **`handler/`**: sem regra de negócio. Implementa a interface gerada pelo
   ConnectRPC (`<Service>Handler`), chama o `service` e converte os erros do
   `service` para `connect.NewError(connect.Code..., err)`.
@@ -872,15 +900,17 @@ internal/modules/<módulo>/
   usando placeholders `$1, $2`, `arg(&args, v)`, `inClause(&args, slice)` e
   `database.IsUniqueViolation(err)`. Funciona tanto sobre SQLite quanto sobre
   Postgres mudando apenas o subdiretório de `store/migrations/` (`sqlite/` vs.
-  `postgres/`).
-- **`module.go`**: abre o banco do módulo (se o módulo usar banco), instancia
-  `store`, `service`, `handler` e os plugins do módulo, e registra as rotas
-  ConnectRPC (e rotas HTTP de dados, no caso do `storage`) no `Mux` do módulo.
+  `postgres/`). As transações são internas aos métodos do `store`.
+- **`module.go`**: abre o banco do módulo (se o módulo usar banco) com
+  `database.Open(..., store.Migrations)`, instancia `store`, `service`,
+  `handler` e os plugins do módulo, e registra o `handler` no `*connect.Server`
+  recebido do `cmd/server` (`Register<Service>Handler`). O `storage` expõe
+  ainda um `Mux` com as rotas HTTP puras do plano de dados.
 
 ### 10.3 Regras de fronteira
 
 - Um módulo só pode interagir com outro módulo através da interface
-  `<Service>Client` gerada em `internal/gen/<outro>/v1/<outro>v1connect` (presente
+  `<Service>Client` gerada em `gen/<outro>/v1/<outro>v1connect` (presente
   em `clients.Clients`) e dos tipos de eventos em `internal/modules/<outro>/events`.
   **Nunca** importar `service/`, `store/` ou `handler/` de outro módulo.
 - Surfaces (`plugins/api/*`) usam apenas `clients.Clients` e `kv.Store`.
@@ -903,14 +933,16 @@ localmente (`MSERVER_MODULES`) e quais backends utilizar:
 2. Para cada módulo do sistema:
    - Se `MSERVER_<MÓDULO>_URL` estiver definido, configura o campo em
      `clients.Clients` com um cliente remoto ConnectRPC sobre HTTP/2 (`h2c`) no
-     protocolo padrão do Connect (`New<Service>Client(h2cClient, url)`).
-   - Se o módulo estiver habilitado localmente, inicializa o módulo, cria um
-     transporte `connectinprocess` sobre o `mod.Mux` com Zero-Copy
-     (`connectinprocess.WithCopyFunc(func(src any) any { return src })`) e
-     instancia o `<Service>Client` usando `transport.Client()` e
-     `transport.ClientOptions()...`.
-3. Sobe o servidor HTTP com suporte a `h2c` (HTTP/2 Cleartext + HTTP/1.1 na
-   mesma porta `MSERVER_HTTP_ADDR`).
+     protocolo padrão do Connect
+     (`New<Service>Client(connect.NewClient(connecthttp.NewTransport(h2cClient, url)))`).
+   - Se o módulo estiver habilitado localmente, inicializa o módulo (que registra
+     seu handler no `*connect.Server` do processo) e instancia o
+     `<Service>Client` sobre um transporte `connectinprocess` com Zero-Copy
+     (`connectinprocess.New(server, connectinprocess.WithCopyFunc(func(src any) any { return src }))`).
+3. Monta o `*connect.Server` no `http.ServeMux` com `connecthttp.Mount` (junto
+   das rotas HTTP do `storage` e dos plugins) e sobe o servidor HTTP com `h2c`
+   (`http.Protocols` com HTTP/1 e `SetUnencryptedHTTP2(true)`, na mesma porta
+   `MSERVER_HTTP_ADDR`, sem depender de `x/net`).
 
 ### 10.5 Configuração por variáveis de ambiente
 

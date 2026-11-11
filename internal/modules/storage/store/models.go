@@ -56,6 +56,14 @@ type Analysis struct {
 	AnalyzedAt time.Time
 }
 
+// Page limits a list. The zero value is the whole list.
+type Page struct {
+	// Limit is the maximum number of records. Zero means no limit.
+	Limit int
+	// Offset is the number of records to skip.
+	Offset int
+}
+
 // ScanChanges is the difference between the index and a location walk.
 type ScanChanges struct {
 	Added   map[uuid.UUID]driver.FileInfo

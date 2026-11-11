@@ -113,7 +113,7 @@ flowchart TD
 - **Dados próprios (SQLite / Postgres):** `locations`, `files` (`id`, `location_id`, `path`, `dir`, `size`, `mod_time`, `inode`), `file_analyses` (`file_id`, `analyzer`, `version`, `size`, `mod_time`, `result`, `error`, `analyzed_at`).
 - **Projeções de outros módulos:** Nenhuma.
 - **Comunicação:**
-  - Recebe chamadas síncronas ConnectRPC (`CreateLocation`, `ListLocations`, `DeleteLocation`, `GetFile`, `ResolveFile`, `ResyncLocation`) e requisições HTTP puras no plano de dados (`GET`/`HEAD`/`PUT /locations/{LocationID}/files/{FileID}`).
+  - Recebe chamadas síncronas ConnectRPC (`storage.v1.StorageService`: `CreateLocation`, `GetLocation`, `ListLocations`, `DeleteLocation`, `ScanLocation`, `ResyncLocation`, `GetFile`, `ListFiles`, `ListSiblings`, `ResolveFile`) e requisições HTTP puras no plano de dados (`GET`/`HEAD`/`PUT /locations/{LocationID}/files/{FileID}`).
   - Emite eventos `storage.file.*` no `pubsub` sempre que arquivos são indexados, alterados, movidos, removidos ou analisados.
 
 ### 3.2 `identity` (Contas, Perfis e Autenticação — MVP)

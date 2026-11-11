@@ -22,9 +22,9 @@ Permitir que o cliente oficial **`jellyfin-web`** se conecte ao `mserver`, auten
    - `pubsub.Subscriber` identificando o grupo consumidor (`Subscribe(ctx, consumer, topic, handler)`).
    - Operação universal `Resync` em todos os módulos produtores de estado (`identity`, `storage`, `library`, `subtitles`) para _cold start_, autocura pós-queda abrupta e reconciliação periódica (`MSERVER_RESYNC_INTERVAL=24h`).
 3. **Fronteiras estritas entre módulos (ConnectRPC + Protobuf):**
-   - Contratos síncronos de todos os módulos definidos em `proto/<módulo>/v1/<módulo>.proto` e gerados via `buf` em `internal/gen/<módulo>/v1`.
+   - Contratos síncronos de todos os módulos definidos em `proto/<módulo>/v1/<módulo>.proto` e gerados via `buf` em `gen/<módulo>/v1`.
    - No modo monolito (`MSERVER_<MÓDULO>_URL` vazio), chamadas entre módulos usam o **`In-process transport` (`connectinprocess`) com Zero-Copy** (trafegando por ponteiros de memória, sem rede e sem serialização). No modo microserviços (`MSERVER_<MÓDULO>_URL` definido), usam o cliente ConnectRPC sobre HTTP/2 (`h2c`) no protocolo padrão do Connect.
-   - Nenhum módulo importa `service/`, `store/` ou `handler/` de outro: apenas as interfaces geradas em `internal/gen/...` (via `clients.Clients`) e os tipos de eventos em `events/`.
+   - Nenhum módulo importa `service/`, `store/` ou `handler/` de outro: apenas as interfaces geradas em `gen/...` (via `clients.Clients`) e os tipos de eventos em `events/`.
    - Apenas o módulo `storage` acessa o sistema de arquivos físico (confinado por `os.Root`). O restante do sistema referencia arquivos exclusivamente por `FileID` (`UUIDv7`).
 4. **Separação estrita de Surfaces e Plano de Dados:**
    - **API do Projeto (Serviços ConnectRPC dos módulos):** cada módulo registra seu handler ConnectRPC no servidor (aceitando tanto gRPC/Protobuf binário quanto `POST` HTTP com JSON para administração via `curl`/Bruno). Qualquer método ou contrato fora do que já foi acordado deve ser discutido antes.
@@ -53,10 +53,10 @@ flowchart LR
 
 - **Infraestrutura e Bootstrap (`cmd/server`, `internal/database`, `internal/pubsub`, `internal/kv`, `internal/clients`, `proto/`):**
   - Variáveis de ambiente (`MSERVER_*`) lidas explicitamente pelo nome completo.
-  - Logging estruturado (`slog`), abertura de banco por módulo com runner de migrations (`migrations/sqlite` e `migrations/postgres`), `database.WithTx`/`ConnFrom` e `database.IsUniqueViolation`, usando queries SQL com placeholders `$1, $2`.
+  - Logging estruturado (`slog`), abertura de banco por módulo (`database.Open` com runner de migrations em `migrations/sqlite` e `migrations/postgres`) e `database.IsUniqueViolation`, usando queries SQL com placeholders `$1, $2` (as transações são internas ao `store` de cada módulo).
   - `pubsub` (`Envelope[T]` CloudEvents 1.0, `Message` com `ID` UUIDv7, `Subscriber` com `consumer` e implementação `pubsub/memory` com retry assíncrono).
-  - Configuração do `buf` (`buf.yaml`, `buf.gen.yaml`) gerando código Protobuf + ConnectRPC em `internal/gen/`.
-  - Módulos com `service/`, `handler/`, `events/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, expondo `Mux`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` (_Zero-Copy_) quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`h2c`, protocolo padrão) quando definido.
+  - Configuração do `buf` (`buf.yaml`, `buf.gen.yaml`, `make generate`) gerando código Protobuf + ConnectRPC v2 em `gen/` (versionado).
+  - Módulos com `service/`, `handler/`, `events/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, registrando o `handler` no `*connect.Server` do `cmd/server`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` (_Zero-Copy_) quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`connecthttp.NewTransport` com `h2c`, protocolo padrão) quando definido.
 - **Módulo `identity` (`internal/modules/identity` + `proto/identity/v1/identity.proto`):**
   - Separação entre **Conta (`Account`)** e **Perfil (`Profile`)**:
     - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id), `is_admin`, `disabled`, `created_at`.
@@ -106,6 +106,7 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
     1. Registro rápido: gera `FileID` (`UUIDv7`), grava tamanho, `mtime` e `inode`, detecta renomeações/movimentações pelo `inode` e emite `storage.file.indexed.v1`, `storage.file.changed.v1`, `storage.file.moved.v1`, `storage.file.removed.v1` no `pubsub`.
     2. Análise assíncrona: executa o plugin `ffprobe` em arquivos de vídeo estáveis e emite `storage.file.analyzed.v1` no `pubsub`.
   - Operação `ResyncLocation(ctx, LocationID)` republicando `FileIndexed` e `FileAnalyzed` de todos os arquivos da localização.
+  - Contrato `storage.v1.StorageService` (`ConnectRPC`): `CreateLocation`, `GetLocation`, `ListLocations`, `DeleteLocation`, `ScanLocation`, `ResyncLocation`, `GetFile`, `ListFiles` (paginado por `limit`/`offset`), `ListSiblings` e `ResolveFile`.
 - **Módulo `library` (`internal/modules/library` + `proto/library/v1/library.proto` — Escopo Filmes):**
   - Cadastro, listagem, consulta e remoção de bibliotecas (`LibraryID`, nome, tipo de mídia filmes, vínculo com um ou mais `LocationID`s; cada localização pertence a no máximo uma biblioteca).
   - Ao cadastrar uma biblioteca, invoca `storage.ResyncLocation` via ConnectRPC.

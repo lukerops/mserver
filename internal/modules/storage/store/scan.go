@@ -1,35 +1,31 @@
-package sqlite
+package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"path"
 
 	"github.com/google/uuid"
-
-	"github.com/lukerops/mserver/internal/modules/storage/store"
 )
 
-func (s *Store) ApplyScan(ctx context.Context, location uuid.UUID, c store.ScanChanges) error {
-	return s.WithTx(ctx, func(ctx context.Context) error {
-		conn := s.conn(ctx)
+// ApplyScan applies the changes of a scan atomically.
+func (s *Store) ApplyScan(ctx context.Context, location uuid.UUID, c *ScanChanges) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, id := range c.Removed {
-			if _, err := conn.ExecContext(ctx, `DELETE FROM files WHERE id = ?`, id); err != nil {
+			if _, err := tx.ExecContext(ctx, deleteFile, id); err != nil {
 				return fmt.Errorf("store: remove file %s: %w", id, err)
 			}
 		}
 		for id, info := range c.Updated {
-			if _, err := conn.ExecContext(ctx,
-				`UPDATE files SET path = ?, dir = ?, size = ?, mod_time = ?, inode = ? WHERE id = ?`,
+			if _, err := tx.ExecContext(ctx, updateFile,
 				info.Path, path.Dir(info.Path), info.Size, nanos(info.ModTime), int64(info.Inode), id,
 			); err != nil {
 				return fmt.Errorf("store: update %s: %w", info.Path, err)
 			}
 		}
 		for id, info := range c.Added {
-			if _, err := conn.ExecContext(ctx, `
-				INSERT INTO files (id, location_id, path, dir, size, mod_time, inode)
-				VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			if _, err := tx.ExecContext(ctx, insertFile,
 				id, location, info.Path, path.Dir(info.Path),
 				info.Size, nanos(info.ModTime), int64(info.Inode),
 			); err != nil {
