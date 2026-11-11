@@ -1,0 +1,22 @@
+info:
+  name: delete movies
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{BaseURL}}/storage.v1.StorageService/DeleteLocation"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{MovieLocationID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

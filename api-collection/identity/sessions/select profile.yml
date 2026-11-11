@@ -1,0 +1,23 @@
+info:
+  name: select profile
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{BaseURL}}/identity.v1.IdentityService/SelectProfile"
+  body:
+    type: json
+    data: |-
+      {
+        "sessionId": "{{SessionID}}",
+        "profileId": "{{ProfileID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

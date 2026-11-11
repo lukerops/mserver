@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/locations"
+  url: "{{BaseURL}}/storage.v1.StorageService/CreateLocation"
   body:
     type: json
     data: |-
@@ -22,7 +22,7 @@ runtime:
     - type: set-variable
       phase: after-response
       selector:
-        expression: res.body.id
+        expression: res.body.location.id
         method: jsonq
       variable:
         name: MovieLocationID

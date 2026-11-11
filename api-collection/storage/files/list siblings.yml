@@ -1,0 +1,22 @@
+info:
+  name: list siblings
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: "{{BaseURL}}/storage.v1.StorageService/ListSiblings"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{MovieFileID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

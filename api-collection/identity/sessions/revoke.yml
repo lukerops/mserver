@@ -1,0 +1,22 @@
+info:
+  name: revoke
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BaseURL}}/identity.v1.IdentityService/RevokeSession"
+  body:
+    type: json
+    data: |-
+      {
+        "sessionId": "{{SessionID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

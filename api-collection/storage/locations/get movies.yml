@@ -1,0 +1,22 @@
+info:
+  name: get movies
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{BaseURL}}/storage.v1.StorageService/GetLocation"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{MovieLocationID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

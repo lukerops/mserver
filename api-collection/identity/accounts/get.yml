@@ -4,8 +4,14 @@ info:
   seq: 1
 
 http:
-  method: GET
-  url: "{{BaseURL}}/v1/accounts/{{AccountID}}"
+  method: POST
+  url: "{{BaseURL}}/identity.v1.IdentityService/GetAccount"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{AccountID}}"
+      }
   auth: inherit
 
 settings:

@@ -5,7 +5,13 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/locations/{{TVLocationID}}/scan"
+  url: "{{BaseURL}}/storage.v1.StorageService/ScanLocation"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{MovieLocationID}}"
+      }
   auth: inherit
 
 settings:

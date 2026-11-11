@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/setup"
+  url: "{{BaseURL}}/identity.v1.IdentityService/Setup"
   body:
     type: json
     data: |-
@@ -15,7 +15,7 @@ http:
         "password": "secret123",
         "profile": {
           "handle": "lucas",
-          "display_name": "Lucas"
+          "displayName": "Lucas"
         }
       }
   auth: inherit

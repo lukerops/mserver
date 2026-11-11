@@ -1,0 +1,22 @@
+info:
+  name: validate token
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{BaseURL}}/identity.v1.IdentityService/ValidateToken"
+  body:
+    type: json
+    data: |-
+      {
+        "token": "{{Token}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

@@ -1,0 +1,37 @@
+info:
+  name: list movies
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{BaseURL}}/storage.v1.StorageService/ListFiles"
+  headers:
+    - name: Content-Type
+      value: application/json
+      disabled: true
+  body:
+    type: json
+    data: |-
+      {
+        "locationId": "{{MovieLocationID}}"
+      }
+  auth: inherit
+
+runtime:
+  actions:
+    - type: set-variable
+      phase: after-response
+      selector:
+        expression: res.body.files[0].id
+        method: jsonq
+      variable:
+        name: MovieFileID
+        scope: runtime
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
