@@ -1,75 +1,104 @@
 package service
 
 import (
+	"context"
+	"log/slog"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/playback/events"
+	"github.com/lukerops/mserver/internal/events"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
-func startedEvent(s Session) queue.Envelope[events.SessionStartedEventV1] {
-	return queue.NewEnvelope(events.SessionStartedV1, events.Source, s.ID.String(), events.SessionStartedEventV1{
-		PlaybackSessionID: s.ID,
-		AccountID:         s.AccountID,
-		ProfileID:         s.ProfileID,
-		DeviceID:          s.DeviceID,
-		ItemID:            s.ItemID,
-		FileID:            s.FileID,
-		PlayMethod:        s.PlayMethod,
-		PositionMs:        s.PositionMs,
-		Sequence:          s.Sequence,
-		StartedAt:         s.StartedAt,
-	})
+// event is an event to publish: its type (the topic), subject and data.
+type event struct {
+	typ     string
+	subject string
+	data    any
 }
 
-// progressedEvent has the sequence before the paused or resumed event
-// of the same report, if any.
-func progressedEvent(s Session, at time.Time) queue.Envelope[events.SessionProgressedEventV1] {
-	return queue.NewEnvelope(events.SessionProgressedV1, events.Source, s.ID.String(), events.SessionProgressedEventV1{
-		PlaybackSessionID: s.ID,
-		ProfileID:         s.ProfileID,
-		DeviceID:          s.DeviceID,
-		ItemID:            s.ItemID,
-		PositionMs:        s.PositionMs,
-		IsPaused:          s.Paused,
-		Sequence:          s.Sequence,
+// publish publishes the events in order, stopping at the first failure. The
+// change they describe is already saved, so the publication is not canceled
+// with the request, and a failure is only logged.
+func (s *Service) publish(ctx context.Context, evs ...event) {
+	ctx = context.WithoutCancel(ctx)
+	for i := range evs {
+		ev := &evs[i]
+		msg, err := pubsub.Encode(pubsub.NewEnvelope(ev.typ, events.SourcePlayback, ev.subject, ev.data))
+		if err == nil {
+			err = s.pub.Publish(ctx, msg)
+		}
+		if err != nil {
+			s.log.ErrorContext(ctx, "playback: publish events failed",
+				slog.String("type", ev.typ),
+				slog.String("subject", ev.subject),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+	}
+}
+
+func startedEvent(sess *Session) event {
+	return event{typ: events.SessionStartedV1, subject: sess.ID.String(), data: events.SessionStartedEventV1{
+		PlaybackSessionID: sess.ID,
+		AccountID:         sess.AccountID,
+		ProfileID:         sess.ProfileID,
+		DeviceID:          sess.DeviceID,
+		ItemID:            sess.ItemID,
+		FileID:            sess.FileID,
+		PlayMethod:        sess.PlayMethod,
+		PositionMs:        sess.PositionMs,
+		Sequence:          sess.Sequence,
+		StartedAt:         sess.StartedAt,
+	}}
+}
+
+func progressedEvent(sess *Session, at time.Time) event {
+	return event{typ: events.SessionProgressedV1, subject: sess.ID.String(), data: events.SessionProgressedEventV1{
+		PlaybackSessionID: sess.ID,
+		ProfileID:         sess.ProfileID,
+		DeviceID:          sess.DeviceID,
+		ItemID:            sess.ItemID,
+		PositionMs:        sess.PositionMs,
+		IsPaused:          sess.Paused,
+		Sequence:          sess.Sequence,
 		ReportedAt:        at,
-	})
+	}}
 }
 
-func pausedEvent(s Session, at time.Time) queue.Envelope[events.SessionPausedEventV1] {
-	return queue.NewEnvelope(events.SessionPausedV1, events.Source, s.ID.String(), events.SessionPausedEventV1{
-		PlaybackSessionID: s.ID,
-		ProfileID:         s.ProfileID,
-		ItemID:            s.ItemID,
-		PositionMs:        s.PositionMs,
-		Sequence:          s.Sequence,
+func pausedEvent(sess *Session, at time.Time) event {
+	return event{typ: events.SessionPausedV1, subject: sess.ID.String(), data: events.SessionPausedEventV1{
+		PlaybackSessionID: sess.ID,
+		ProfileID:         sess.ProfileID,
+		ItemID:            sess.ItemID,
+		PositionMs:        sess.PositionMs,
+		Sequence:          sess.Sequence,
 		PausedAt:          at,
-	})
+	}}
 }
 
-func resumedEvent(s Session, at time.Time) queue.Envelope[events.SessionResumedEventV1] {
-	return queue.NewEnvelope(events.SessionResumedV1, events.Source, s.ID.String(), events.SessionResumedEventV1{
-		PlaybackSessionID: s.ID,
-		ProfileID:         s.ProfileID,
-		ItemID:            s.ItemID,
-		PositionMs:        s.PositionMs,
-		Sequence:          s.Sequence,
+func resumedEvent(sess *Session, at time.Time) event {
+	return event{typ: events.SessionResumedV1, subject: sess.ID.String(), data: events.SessionResumedEventV1{
+		PlaybackSessionID: sess.ID,
+		ProfileID:         sess.ProfileID,
+		ItemID:            sess.ItemID,
+		PositionMs:        sess.PositionMs,
+		Sequence:          sess.Sequence,
 		ResumedAt:         at,
-	})
+	}}
 }
 
-func stoppedEvent(s Session, at time.Time, reason string) queue.Envelope[events.SessionStoppedEventV1] {
-	return queue.NewEnvelope(events.SessionStoppedV1, events.Source, s.ID.String(), events.SessionStoppedEventV1{
-		PlaybackSessionID: s.ID,
-		AccountID:         s.AccountID,
-		ProfileID:         s.ProfileID,
-		DeviceID:          s.DeviceID,
-		ItemID:            s.ItemID,
-		PositionMs:        s.PositionMs,
-		WatchedDurationMs: s.WatchedMs,
-		Sequence:          s.Sequence,
+func stoppedEvent(sess *Session, at time.Time, reason string) event {
+	return event{typ: events.SessionStoppedV1, subject: sess.ID.String(), data: events.SessionStoppedEventV1{
+		PlaybackSessionID: sess.ID,
+		AccountID:         sess.AccountID,
+		ProfileID:         sess.ProfileID,
+		DeviceID:          sess.DeviceID,
+		ItemID:            sess.ItemID,
+		PositionMs:        sess.PositionMs,
+		WatchedDurationMs: sess.WatchedMs,
+		Sequence:          sess.Sequence,
 		StoppedAt:         at,
 		Reason:            reason,
-	})
+	}}
 }
