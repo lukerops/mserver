@@ -1,64 +1,71 @@
-// Package store defines the persistence of the identity module: its
-// records and the Store interface. Database backends implement Store in
-// subpackages (e.g. store/sqlite).
+// Package store persists the identity records: accounts, profiles, devices
+// and sessions. The Store is a concrete type, with hand-written SQL that
+// runs on both SQLite and Postgres (placeholders "$1, $2, ..."); only the
+// migrations differ between them (migrations/sqlite and migrations/postgres,
+// in Migrations).
+//
+// Usernames and emails are compared ignoring case.
+//
+// The SQLite pool has a single connection: inside a transaction every query
+// must go through the transaction, and rows must be closed before running
+// another query. The transactions are internal to the Store methods.
 package store
 
 import (
 	"context"
-	"errors"
+	"database/sql"
+	"embed"
+	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
 
-// Errors returned by Store implementations, wrapped with context.
-var (
-	ErrNotFound      = errors.New("not found")
-	ErrAlreadyExists = errors.New("already exists")
-)
+// Migrations holds the migrations of the module, laid out as
+// "migrations/sqlite/*.sql" and "migrations/postgres/*.sql", as expected by
+// database.Open.
+//
+//go:embed migrations/*/*.sql
+var Migrations embed.FS
 
-// Store persists accounts, profiles, devices and sessions. Usernames and
-// emails are compared ignoring case.
-type Store interface {
-	// WithTx runs fn in a transaction, committing if fn succeeds. Store
-	// methods called with the context given to fn join the transaction.
-	WithTx(ctx context.Context, fn func(ctx context.Context) error) error
+// Store persists accounts, profiles, devices and sessions. Create it with
+// New.
+type Store struct {
+	db *sql.DB
+}
 
-	CountAccounts(ctx context.Context) (int, error)
-	// InsertAccount returns ErrAlreadyExists if the username or the email
-	// is taken.
-	InsertAccount(ctx context.Context, a Account, passwordHash string) error
-	// GetAccount returns ErrNotFound if the account does not exist.
-	GetAccount(ctx context.Context, id uuid.UUID) (Account, error)
-	// FindAccountByLogin finds an account by username or email and returns
-	// it with its password hash, or ErrNotFound.
-	FindAccountByLogin(ctx context.Context, login string) (Account, string, error)
-	// ListAccounts returns every account ordered by ID.
-	ListAccounts(ctx context.Context) ([]Account, error)
+// New returns the Store on a database already migrated (see database.Open
+// and Migrations).
+func New(db *sql.DB) *Store {
+	return &Store{db: db}
+}
 
-	// InsertProfile returns ErrAlreadyExists if the handle is taken in the
-	// account.
-	InsertProfile(ctx context.Context, p Profile) error
-	// GetProfile returns ErrNotFound if the profile does not exist.
-	GetProfile(ctx context.Context, id uuid.UUID) (Profile, error)
-	// ListProfiles returns the profiles of an account ordered by ID.
-	ListProfiles(ctx context.Context, account uuid.UUID) ([]Profile, error)
-	// ListAllProfiles returns every profile ordered by ID.
-	ListAllProfiles(ctx context.Context) ([]Profile, error)
+// withTx runs fn in a transaction, committing if fn succeeds. fn must run
+// its queries on the given transaction.
+func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
 
-	// UpsertDevice saves a device identified by its account and
-	// identifier. An existing device keeps its ID and creation time, which
-	// are returned.
-	UpsertDevice(ctx context.Context, d Device) (Device, error)
+	if err := fn(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: commit transaction: %w", err)
+	}
+	return nil
+}
 
-	InsertSession(ctx context.Context, s Session, tokenHash string) error
-	// GetSession returns ErrNotFound if the session does not exist.
-	GetSession(ctx context.Context, id uuid.UUID) (Session, error)
-	// FindSessionByToken returns ErrNotFound for an unknown token hash.
-	FindSessionByToken(ctx context.Context, tokenHash string) (Session, error)
-	// ListDeviceSessions returns the sessions of a device.
-	ListDeviceSessions(ctx context.Context, device uuid.UUID) ([]Session, error)
-	// SetSessionProfile returns ErrNotFound if the session does not exist.
-	SetSessionProfile(ctx context.Context, id, profile uuid.UUID) error
-	// DeleteSession returns ErrNotFound if the session does not exist.
-	DeleteSession(ctx context.Context, id uuid.UUID) error
+// key is the form used to compare usernames and emails.
+func key(s string) string { return strings.ToLower(s) }
+
+func nanos(t time.Time) int64     { return t.UnixNano() }
+func fromNanos(n int64) time.Time { return time.Unix(0, n).UTC() }
+
+// nullID stores uuid.Nil as NULL.
+func nullID(id uuid.UUID) uuid.NullUUID {
+	return uuid.NullUUID{UUID: id, Valid: id != uuid.Nil}
 }
