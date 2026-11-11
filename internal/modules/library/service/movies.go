@@ -7,34 +7,34 @@ import (
 	"github.com/google/uuid"
 )
 
-func (s *service) GetMovie(ctx context.Context, libraryID, id uuid.UUID) (Movie, error) {
+func (s *Service) GetMovie(ctx context.Context, libraryID, id uuid.UUID) (*Movie, error) {
 	m, err := s.store.GetMovie(ctx, id)
 	if err != nil {
-		return Movie{}, err
+		return nil, err
 	}
 	if !belongs(libraryID, m.LibraryID) {
-		return Movie{}, fmt.Errorf("%w: movie %s of library %s", ErrNotFound, id, libraryID)
+		return nil, fmt.Errorf("%w: movie %s of library %s", ErrNotFound, id, libraryID)
 	}
 	return m, nil
 }
 
-func (s *service) ListMovies(ctx context.Context, q MovieQuery) (MoviePage, error) {
+func (s *Service) ListMovies(ctx context.Context, q *MovieQuery) (*MoviePage, error) {
 	switch q.SortBy {
 	case "", SortByTitle, SortByAdded, SortByYear:
 	default:
-		return MoviePage{}, fmt.Errorf("%w: unknown sort %q", ErrInvalidArgument, q.SortBy)
+		return nil, fmt.Errorf("%w: unknown sort %q", ErrInvalidArgument, q.SortBy)
 	}
 	if q.Offset < 0 || q.Limit < 0 {
-		return MoviePage{}, fmt.Errorf("%w: negative offset or limit", ErrInvalidArgument)
+		return nil, fmt.Errorf("%w: negative offset or limit", ErrInvalidArgument)
 	}
 	if err := s.checkParents(ctx, q.LibraryID, uuid.Nil, uuid.Nil); err != nil {
-		return MoviePage{}, err
+		return nil, err
 	}
 	movies, total, err := s.store.ListMovies(ctx, q)
 	if err != nil {
-		return MoviePage{}, err
+		return nil, err
 	}
-	return MoviePage{Movies: movies, Total: total}, nil
+	return &MoviePage{Movies: movies, Total: total}, nil
 }
 
 // movieNamespace derives the movie IDs from the file IDs.

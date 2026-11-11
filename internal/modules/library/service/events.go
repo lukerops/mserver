@@ -1,12 +1,45 @@
 package service
 
 import (
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/library/events"
+	"context"
+	"log/slog"
+
+	"github.com/lukerops/mserver/internal/events"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
-func movieEvent(typ string, m Movie) queue.Envelope[events.MovieEventV1] {
-	e := events.MovieEventV1{
+// event is an event to publish: its type (the topic), subject and data.
+type event struct {
+	typ     string
+	subject string
+	data    any
+}
+
+// publish publishes the events in order, stopping at the first failure. The
+// change they describe is already committed, so the publication is not
+// canceled with the request, and a failure is only logged: ResyncLibrary
+// republishes the state.
+func (s *Service) publish(ctx context.Context, evs ...event) {
+	ctx = context.WithoutCancel(ctx)
+	for i := range evs {
+		ev := &evs[i]
+		msg, err := pubsub.Encode(pubsub.NewEnvelope(ev.typ, events.SourceLibrary, ev.subject, ev.data))
+		if err == nil {
+			err = s.pub.Publish(ctx, msg)
+		}
+		if err != nil {
+			s.log.ErrorContext(ctx, "library: publish events failed, a resync reconciles the consumers",
+				slog.String("type", ev.typ),
+				slog.String("subject", ev.subject),
+				slog.String("error", err.Error()),
+			)
+			return
+		}
+	}
+}
+
+func movieEvent(typ string, m *Movie) event {
+	data := events.MovieEventV1{
 		MovieID:    m.ID,
 		LibraryID:  m.LibraryID,
 		FileID:     m.FileID,
@@ -16,47 +49,47 @@ func movieEvent(typ string, m Movie) queue.Envelope[events.MovieEventV1] {
 		Year:       m.Year,
 	}
 	if m.MediaInfo != nil {
-		e.DurationMs = m.MediaInfo.DurationMs
+		data.DurationMs = m.MediaInfo.DurationMs
 	}
-	return queue.NewEnvelope(typ, events.Source, m.ID.String(), e)
+	return event{typ: typ, subject: m.ID.String(), data: data}
 }
 
-func movieRemovedEvent(m Movie) queue.Envelope[events.MovieRemovedEventV1] {
-	return queue.NewEnvelope(events.MovieRemovedV1, events.Source, m.ID.String(), events.MovieRemovedEventV1{
+func movieRemovedEvent(m *Movie) event {
+	return event{typ: events.MovieRemovedV1, subject: m.ID.String(), data: events.MovieRemovedEventV1{
 		MovieID:   m.ID,
 		LibraryID: m.LibraryID,
 		FileID:    m.FileID,
-	})
+	}}
 }
 
-func seriesEvent(typ string, sr Series) queue.Envelope[events.SeriesEventV1] {
-	return queue.NewEnvelope(typ, events.Source, sr.ID.String(), events.SeriesEventV1{
+func seriesEvent(typ string, sr *Series) event {
+	return event{typ: typ, subject: sr.ID.String(), data: events.SeriesEventV1{
 		SeriesID:  sr.ID,
 		LibraryID: sr.LibraryID,
 		Title:     sr.Title,
 		Year:      sr.Year,
-	})
+	}}
 }
 
-func seriesRemovedEvent(sr Series) queue.Envelope[events.SeriesRemovedEventV1] {
-	return queue.NewEnvelope(events.SeriesRemovedV1, events.Source, sr.ID.String(), events.SeriesRemovedEventV1{
+func seriesRemovedEvent(sr *Series) event {
+	return event{typ: events.SeriesRemovedV1, subject: sr.ID.String(), data: events.SeriesRemovedEventV1{
 		SeriesID:  sr.ID,
 		LibraryID: sr.LibraryID,
-	})
+	}}
 }
 
-func seasonEvent(typ string, sn Season) queue.Envelope[events.SeasonEventV1] {
-	return queue.NewEnvelope(typ, events.Source, sn.ID.String(), events.SeasonEventV1{
+func seasonEvent(typ string, sn *Season) event {
+	return event{typ: typ, subject: sn.ID.String(), data: events.SeasonEventV1{
 		SeasonID:     sn.ID,
 		SeriesID:     sn.SeriesID,
 		LibraryID:    sn.LibraryID,
 		SeasonNumber: sn.Number,
-	})
+	}}
 }
 
 // episodeEvent needs the series and season fields of e.
-func episodeEvent(typ string, e Episode) queue.Envelope[events.EpisodeEventV1] {
-	ev := events.EpisodeEventV1{
+func episodeEvent(typ string, e *Episode) event {
+	data := events.EpisodeEventV1{
 		EpisodeID:        e.ID,
 		LibraryID:        e.LibraryID,
 		SeriesID:         e.SeriesID,
@@ -72,17 +105,17 @@ func episodeEvent(typ string, e Episode) queue.Envelope[events.EpisodeEventV1] {
 		Path:             e.Path,
 	}
 	if e.MediaInfo != nil {
-		ev.DurationMs = e.MediaInfo.DurationMs
+		data.DurationMs = e.MediaInfo.DurationMs
 	}
-	return queue.NewEnvelope(typ, events.Source, e.ID.String(), ev)
+	return event{typ: typ, subject: e.ID.String(), data: data}
 }
 
-func episodeRemovedEvent(e Episode) queue.Envelope[events.EpisodeRemovedEventV1] {
-	return queue.NewEnvelope(events.EpisodeRemovedV1, events.Source, e.ID.String(), events.EpisodeRemovedEventV1{
+func episodeRemovedEvent(e *Episode) event {
+	return event{typ: events.EpisodeRemovedV1, subject: e.ID.String(), data: events.EpisodeRemovedEventV1{
 		EpisodeID: e.ID,
 		LibraryID: e.LibraryID,
 		SeriesID:  e.SeriesID,
 		SeasonID:  e.SeasonID,
 		FileID:    e.FileID,
-	})
+	}}
 }
