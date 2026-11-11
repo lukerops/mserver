@@ -1,0 +1,16 @@
+version: v2
+managed:
+  enabled: true
+  override:
+    - file_option: go_package_prefix
+      value: github.com/lukerops/mserver/gen
+plugins:
+  # The plugins run from the versions pinned in go.mod, so that everyone
+  # generates the same code without installing anything else.
+  - local: ["go", "run", "google.golang.org/protobuf/cmd/protoc-gen-go"]
+    out: gen
+    opt: paths=source_relative
+  - local: ["go", "run", "connectrpc.com/connect/v2/cmd/protoc-gen-connect-go"]
+    out: gen
+    opt: paths=source_relative
+clean: true
