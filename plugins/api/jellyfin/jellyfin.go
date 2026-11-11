@@ -137,9 +137,15 @@ func New(c clients.Clients, st kv.Store, files *http.Client, log *slog.Logger) *
 	mux.HandleFunc("GET /shows/upcoming", p.emptyItems)
 	// No studios until metadata.
 	mux.HandleFunc("GET /studios", p.emptyItems)
-	// Not in the OpenAPI anymore, but jellyfin-web still loads the item
-	// page from it.
+	// Not in the OpenAPI anymore, but jellyfin-web and jellyfin-tizen still
+	// use these routes with the user in the path. The user is always the
+	// authenticated profile, so they share the handlers of the routes above.
+	mux.HandleFunc("GET /users/{userId}/views", p.userViews)
+	mux.HandleFunc("GET /users/{userId}/items", p.items)
+	mux.HandleFunc("GET /users/{userId}/items/resume", p.resumeItems)
+	mux.HandleFunc("GET /users/{userId}/items/latest", p.latestItems)
 	mux.HandleFunc("GET /users/{userId}/items/{itemId}", p.item)
+	mux.HandleFunc("GET /users/{userId}/items/{itemId}/intros", p.emptyItems)
 
 	// Every response allows any origin: jellyfin-web is often served from
 	// another origin.

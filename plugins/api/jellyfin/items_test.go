@@ -203,6 +203,32 @@ func TestMovieNavigation(t *testing.T) {
 		t.Fatalf("latest of every library = %+v", latest)
 	}
 
+	// The legacy routes with the user in the path (jellyfin-tizen).
+	var legacyUser = "/Users/" + hex(uuid.NewString())
+	c.expect("GET", legacyUser+"/Items?recursive=true&includeItemTypes=Movie&ids="+heat.Id, token, nil, &all, http.StatusOK)
+	if all.TotalRecordCount != 1 || all.Items[0].Id != heat.Id {
+		t.Errorf("legacy by ids = %+v", all)
+	}
+	c.expect("GET", legacyUser+"/Items/Latest?Limit=16&ParentId="+libID, token, nil, &latest, http.StatusOK)
+	if len(latest) != 2 {
+		t.Errorf("legacy latest = %+v", latest)
+	}
+	var legacyResume itemsResult
+	c.expect("GET", legacyUser+"/Items/Resume?Limit=12&Recursive=true&MediaTypes=Video", token, nil, &legacyResume, http.StatusOK)
+	if legacyResume.Items == nil || len(legacyResume.Items) != 0 {
+		t.Errorf("legacy resume = %+v", legacyResume)
+	}
+	var legacyViews itemsResult
+	c.expect("GET", legacyUser+"/Views", token, nil, &legacyViews, http.StatusOK)
+	if len(legacyViews.Items) != 1 {
+		t.Errorf("legacy views = %+v", legacyViews)
+	}
+	var legacyIntros itemsResult
+	c.expect("GET", legacyUser+"/Items/"+heat.Id+"/Intros", token, nil, &legacyIntros, http.StatusOK)
+	if legacyIntros.Items == nil || legacyIntros.TotalRecordCount != 0 {
+		t.Errorf("legacy intros = %+v", legacyIntros)
+	}
+
 	// The movie page.
 	var movie item
 	c.expect("GET", "/Items/"+heat.Id+"?userId=x", token, nil, &movie, http.StatusOK)

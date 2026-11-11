@@ -134,6 +134,15 @@ func annotateClient(r *http.Request, a authorization) {
 // methods from a missing one.
 var probeMethods = []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch}
 
+// ignoredEndpoints are the endpoints the plugin does not implement on
+// purpose, that clients call all the time and work without (lower case
+// paths): they are logged at debug level.
+var ignoredEndpoints = map[string]bool{
+	// The WebSocket of the server notifications. Clients fall back to
+	// polling.
+	"/socket": true,
+}
+
 // checkRoute logs the requests mux has no route for: an endpoint the
 // plugin does not implement (404), or a method it does not implement on
 // an existing endpoint (405). path is the path as the client sent it.
@@ -163,7 +172,12 @@ func (p *plugin) checkRoute(mux *http.ServeMux, r *http.Request, path string, a 
 		annotate(ctx, slog.String("error", "method not allowed"))
 		return
 	}
-	p.log.WarnContext(ctx, "jellyfin: endpoint not implemented",
+	level := slog.LevelWarn
+	if ignoredEndpoints[r.URL.Path] {
+		level = slog.LevelDebug
+		quiet(ctx)
+	}
+	p.log.LogAttrs(ctx, level, "jellyfin: endpoint not implemented",
 		slog.String("method", r.Method),
 		slog.String("path", path),
 		slog.String("client", a.Client),

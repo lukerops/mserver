@@ -53,6 +53,7 @@ func TestUnknownRoutes(t *testing.T) {
 		allow        string
 	}{
 		{"GET", "/Unknown/Route", http.StatusNotFound, "jellyfin: endpoint not implemented", "endpoint not implemented", ""},
+		{"GET", "/socket", http.StatusNotFound, "jellyfin: endpoint not implemented", "endpoint not implemented", ""},
 		{"POST", "/Items/abc", http.StatusMethodNotAllowed, "jellyfin: method not allowed", "method not allowed", "GET, HEAD"},
 		{"GET", "/Sessions/Logout", http.StatusMethodNotAllowed, "jellyfin: method not allowed", "method not allowed", "POST"},
 		{"GET", "/System/Info/Public", http.StatusOK, "", "", ""},
@@ -86,8 +87,15 @@ func TestUnknownRoutes(t *testing.T) {
 			}
 			continue
 		}
+		wantLevel := "WARN"
+		if tc.path == "/socket" {
+			wantLevel = "DEBUG"
+			if access["level"] != "DEBUG" {
+				t.Errorf("%s %s: access log level = %v, want DEBUG", tc.method, tc.path, access["level"])
+			}
+		}
 		warn := findRecord(recs, tc.msg)
-		if warn == nil || warn["level"] != "WARN" || warn["path"] != tc.path || warn["method"] != tc.method ||
+		if warn == nil || warn["level"] != wantLevel || warn["path"] != tc.path || warn["method"] != tc.method ||
 			warn["client"] != "Android TV" || warn["request_id"] == nil {
 			t.Errorf("%s %s: warn = %v", tc.method, tc.path, warn)
 		}

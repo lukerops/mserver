@@ -27,6 +27,7 @@ type request struct {
 
 	mu    sync.Mutex
 	attrs []slog.Attr
+	quiet bool
 }
 
 func requestFrom(ctx context.Context) *request {
@@ -44,6 +45,18 @@ func annotate(ctx context.Context, attrs ...slog.Attr) {
 	}
 	req.mu.Lock()
 	req.attrs = append(req.attrs, attrs...)
+	req.mu.Unlock()
+}
+
+// quiet makes the access log line of the request of ctx debug level even
+// for an error status: for requests that are expected to fail.
+func quiet(ctx context.Context) {
+	req := requestFrom(ctx)
+	if req == nil {
+		return
+	}
+	req.mu.Lock()
+	req.quiet = true
 	req.mu.Unlock()
 }
 
@@ -108,8 +121,12 @@ func accessLog(log *slog.Logger, next http.Handler) http.Handler {
 			if !rw.wroteHeader {
 				status = http.StatusOK
 			}
+			req.mu.Lock()
+			quiet := req.quiet
+			req.mu.Unlock()
 			level := slog.LevelDebug
 			switch {
+			case quiet:
 			case status >= 500:
 				level = slog.LevelError
 			case status >= 400:
