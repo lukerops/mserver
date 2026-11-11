@@ -109,7 +109,8 @@ As rotas abaixo são relativas ao ponto de montagem do plugin (`/plugins/jellyfi
   - Contrato `storage.v1.StorageService` (`ConnectRPC`): `CreateLocation`, `GetLocation`, `ListLocations`, `DeleteLocation`, `ScanLocation`, `ResyncLocation`, `GetFile`, `ListFiles` (paginado por `limit`/`offset`), `ListSiblings` e `ResolveFile`.
 - **Módulo `library` (`internal/modules/library` + `proto/library/v1/library.proto` — Escopo Filmes):**
   - Cadastro, listagem, consulta e remoção de bibliotecas (`LibraryID`, nome, tipo de mídia filmes, vínculo com um ou mais `LocationID`s; cada localização pertence a no máximo uma biblioteca).
-  - Ao cadastrar uma biblioteca, invoca `storage.ResyncLocation` via ConnectRPC.
+  - Contrato `library.v1.LibraryService` (ConnectRPC): `CreateLibrary`, `GetLibrary`, `ListLibraries`, `DeleteLibrary`, `ResyncLibrary`, `GetMovie`, `ListMovies`, `GetSeries`, `ListSeries`, `GetSeason`, `ListSeasons`, `GetEpisode` e `ListEpisodes` (listas paginadas por `limit`/`offset`, com teto de 1000 por página).
+  - Ao cadastrar uma biblioteca, invoca `storage.GetLocation` e `storage.ResyncLocation` via ConnectRPC.
   - Consome eventos `storage.file.*` (consumer `"library"`), aplica o parser regex de filmes (`Título (Ano)`) sobre o caminho relativo e gera `MovieID` determinístico (UUIDv5 derivado do `FileID`).
   - Consolida as informações técnicas das faixas no modelo de domínio da `library` ao receber `storage.file.analyzed.v1`.
   - Emite `library.movie.added.v1`, `library.movie.updated.v1`, `library.movie.removed.v1` no `pubsub` e implementa `ResyncLibrary`.

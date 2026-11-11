@@ -134,15 +134,18 @@ flowchart TD
 - **Responsabilidade:** Manter o catálogo global de mídia (`Library`, `Movie`, `Series`, `Season`, `Episode`), 100% independente de usuários (altamente cacheável) e livre de conceitos do Jellyfin. Identifica itens aplicando regex sobre os caminhos relativos vindos do `storage` e agrega as informações técnicas e enriquecimentos vindos dos demais módulos em seu modelo de domínio próprio.
 - **Dados próprios (SQLite / Postgres):**
   - `libraries` e `library_locations` (`library_id`, `location_id`).
-  - `movies`, `series`, `seasons`, `episodes`.
+  - `movies`, `series`, `seasons`, `episodes`. As informações técnicas (`media_info`) ficam como JSON; os idiomas de áudio e de legenda delas são copiados para as colunas derivadas `audio_languages` e `subtitle_languages` (formato `,eng,por,`), apenas para que os filtros por idioma usem um `LIKE` portável entre SQLite e Postgres.
 - **Dados consolidados via Eventos (ECST):**
   - Informações técnicas de streams e capítulos (recebidos de `storage.file.analyzed.v1` via analisador `ffprobe`).
   - Legendas externas (recebidas de `subtitles.subtitle.added.v1` e `transcoder.subtitle.converted.v1`).
   - Segmentos de mídia e imagens (pós-MVP).
 - **Comunicação:**
+  - Recebe chamadas síncronas ConnectRPC (`library.v1.LibraryService`: `CreateLibrary`, `GetLibrary`, `ListLibraries`, `DeleteLibrary`, `ResyncLibrary`, `GetMovie`, `ListMovies`, `GetSeries`, `ListSeries`, `GetSeason`, `ListSeasons`, `GetEpisode`, `ListEpisodes`). Os IDs de pai dos requests (`library_id`, `series_id`, `season_id`) são filtros opcionais: vazio casa com qualquer pai; preenchido, o item precisa pertencer a ele (`NOT_FOUND` se não pertencer).
+  - As listas de filmes, séries e episódios são paginadas (`limit`/`offset`), com teto de 1000 itens por página (`limit` zero ou acima do teto vira 1000) e `total` ignorando a paginação. Aceitam filtros por `ids`, por idiomas de áudio/legenda (e por `years` em filmes e séries) e ordenação (`sort_by`, `descending`).
   - Não chama nenhum módulo no caminho crítico de leitura.
-  - Ao cadastrar uma biblioteca, invoca `storage.ResyncLocation` via ConnectRPC.
-  - Emite eventos de catálogo (`Movie*`, `Series*`, `Season*`, `Episode*`) no `pubsub`.
+  - Ao cadastrar uma biblioteca, invoca `storage.GetLocation` e `storage.ResyncLocation` via ConnectRPC (cliente `storagev1connect.StorageServiceClient`, em memória no monolito ou `MSERVER_STORAGE_URL` nos microserviços). Um resync que falha é repetido duas vezes (500ms e 2s) e depois apenas logado: a biblioteca é criada de qualquer forma.
+  - Consome `storage.file.*` (consumer `"library"`). As mudanças do catálogo e os eventos que as descrevem são serializados por um mutex do `service` (handlers de evento, `DeleteLibrary` e `ResyncLibrary`); a transação de cada escrita é interna ao `store`.
+  - Emite eventos de catálogo (`Movie*`, `Series*`, `Season*`, `Episode*`) diretamente no `pubsub`, na ordem série → temporada → episódio ao adicionar e episódio → temporada → série ao remover.
 
 ### 3.4 `watchstate` (Estado de Consumo por Perfil e Histórico — Pós-MVP)
 
@@ -254,7 +257,7 @@ Todos os eventos trafegam no envelope **CloudEvents 1.0** (`pubsub.Envelope[T]`)
 
 ### 4.3 Eventos emitidos pela `library`
 
-| Tópico (`type`)              | `subject`   | Consumidores                                                                       | Quando é disparado                                                                     | Campos de referência em `data` (a discutir antes de implementar)                                                                                                                                                                                                                                                                    |
+| Tópico (`type`)              | `subject`   | Consumidores                                                                       | Quando é disparado                                                                     | Campos em `data`                                                                                                                                                                                                                                                                                                                    |
 | :--------------------------- | :---------- | :--------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `library.movie.added.v1`     | `MovieID`   | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`, `notification` | Filme identificado (ou via `Resync`).                                                  | `movie_id`, `library_id`, `file_id`, `location_id`, `path`, `title`, `year` (omitido se desconhecido), `duration_ms` (omitido até a análise do `ffprobe`) — `events.MovieEventV1`; `chapters[]` no pós-MVP                                                                                                                  |
 | `library.movie.updated.v1`   | `MovieID`   | `subtitles`, `watchstate`, `transcoder`, `metadata`, `acquisition`                 | Reidentificação do filme, chegada da análise do `ffprobe` ou atualização de vínculo.   | Mesmos campos de `library.movie.added.v1`                                                                                                                                                                                                                                                                                           |
