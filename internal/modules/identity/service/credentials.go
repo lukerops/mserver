@@ -3,71 +3,41 @@ package service
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"strings"
 
-	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/bcrypt"
 )
 
-// argonParams are the argon2id cost parameters.
-type argonParams struct {
-	memory  uint32 // KiB
-	time    uint32
-	threads uint8
-}
+// hashCost is the bcrypt cost of new hashes. Tests lower it.
+var hashCost = 12
 
-// hashParams are used for new hashes. Existing hashes keep the parameters
-// encoded in them. Tests lower the cost.
-var hashParams = argonParams{memory: 64 * 1024, time: 3, threads: 4}
-
-const (
-	saltLen = 16
-	keyLen  = 32
-)
-
-var b64 = base64.RawStdEncoding
-
-// hashPassword returns the argon2id hash of password in the PHC string
-// format: $argon2id$v=19$m=65536,t=3,p=4$<salt>$<key>.
+// hashPassword returns the bcrypt hash of password. It needs about 4 KiB of
+// memory, so concurrent logins do not add up to a large heap. bcrypt only
+// reads the first 72 bytes of the password, which validatePassword enforces
+// as the maximum.
 func hashPassword(password string) (string, error) {
-	salt := make([]byte, saltLen)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("identity: password salt: %w", err)
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), hashCost)
+	if err != nil {
+		return "", fmt.Errorf("identity: hash password: %w", err)
 	}
-	p := hashParams
-	key := argon2.IDKey([]byte(password), salt, p.time, p.memory, p.threads, keyLen)
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, p.memory, p.time, p.threads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
+	return string(hash), nil
 }
 
 // verifyPassword reports whether password matches hash, in constant time.
+// A password that does not match, or that is too long to ever match, is not
+// an error.
 func verifyPassword(hash, password string) (bool, error) {
-	parts := strings.Split(hash, "$")
-	if len(parts) != 6 || parts[1] != "argon2id" {
-		return false, errors.New("identity: unsupported password hash")
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, bcrypt.ErrMismatchedHashAndPassword), errors.Is(err, bcrypt.ErrPasswordTooLong):
+		return false, nil
+	default:
+		return false, fmt.Errorf("identity: verify password: %w", err)
 	}
-	var version int
-	if _, err := fmt.Sscanf(parts[2], "v=%d", &version); err != nil || version != argon2.Version {
-		return false, errors.New("identity: unsupported argon2 version")
-	}
-	var p argonParams
-	if _, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.memory, &p.time, &p.threads); err != nil {
-		return false, fmt.Errorf("identity: invalid argon2 parameters: %w", err)
-	}
-	salt, err := b64.DecodeString(parts[4])
-	if err != nil {
-		return false, fmt.Errorf("identity: invalid argon2 salt: %w", err)
-	}
-	want, err := b64.DecodeString(parts[5])
-	if err != nil {
-		return false, fmt.Errorf("identity: invalid argon2 key: %w", err)
-	}
-	got := argon2.IDKey([]byte(password), salt, p.time, p.memory, p.threads, uint32(len(want)))
-	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 
 // newToken returns a random access token and the hash that is stored.

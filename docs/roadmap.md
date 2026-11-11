@@ -59,7 +59,7 @@ flowchart LR
   - Módulos com `service/`, `handler/`, `store/` (com `queries.go` e `migrations/{sqlite,postgres}`) e `module.go` (`New`/`Close`, registrando o `handler` no `*connect.Server` do `cmd/server`). O `cmd/server` monta `clients.Clients` usando o `connectinprocess` quando `MSERVER_<MÓDULO>_URL` está vazio ou cliente ConnectRPC HTTP/2 (`connecthttp.NewTransport` com `h2c`, protocolo padrão) quando definido.
 - **Módulo `identity` (`internal/modules/identity` + `proto/identity/v1/identity.proto`):**
   - Separação entre **Conta (`Account`)** e **Perfil (`Profile`)**:
-    - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (argon2id), `is_admin`, `disabled`, `created_at`.
+    - `Account`: `account_id` (UUIDv7), `username`, `email`, `password_hash` (bcrypt), `is_admin`, `disabled`, `created_at`.
     - `Profile`: `profile_id` (UUIDv7), `account_id`, `handle` (identificador curto único na conta), `display_name`, `created_at`.
   - Sessões e tokens de acesso vinculados a `(AccountID, ProfileID, DeviceID)`.
   - Autenticação no domínio recebendo conta (`username` ou `email`), `handle` do perfil e senha de forma estruturada (o parse da string concatenada `<username ou email>#<profile>` pertence exclusivamente ao `plugins/api/jellyfin`).

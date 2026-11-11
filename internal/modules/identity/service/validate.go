@@ -15,7 +15,7 @@ var (
 
 const (
 	minPasswordLen    = 8
-	maxPasswordLen    = 1024
+	maxPasswordLen    = 72 // bytes: bcrypt ignores the rest
 	maxDisplayNameLen = 64
 )
 
@@ -42,7 +42,7 @@ func validateEmail(email string) error {
 
 func validatePassword(password string) error {
 	if n := utf8.RuneCountInString(password); n < minPasswordLen || len(password) > maxPasswordLen {
-		return invalid("password must have at least %d characters", minPasswordLen)
+		return invalid("password must have at least %d characters and at most %d bytes", minPasswordLen, maxPasswordLen)
 	}
 	return nil
 }

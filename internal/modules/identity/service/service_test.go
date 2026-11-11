@@ -6,10 +6,12 @@ import (
 	"io"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/lukerops/mserver/internal/database"
 	"github.com/lukerops/mserver/internal/events"
@@ -19,7 +21,7 @@ import (
 
 func init() {
 	// A cheap cost keeps the tests fast.
-	hashParams = argonParams{memory: 64, time: 1, threads: 1}
+	hashCost = bcrypt.MinCost
 }
 
 // recorder records the published messages, in order.
@@ -339,7 +341,13 @@ func TestPasswordHash(t *testing.T) {
 	if ok, err := verifyPassword(hash, "wrong"); ok || err != nil {
 		t.Fatalf("verify wrong = %v, %v", ok, err)
 	}
-	if _, err := verifyPassword("$bcrypt$x", password); err == nil {
+	if ok, err := verifyPassword(hash, strings.Repeat("a", maxPasswordLen+1)); ok || err != nil {
+		t.Fatalf("verify too long = %v, %v", ok, err)
+	}
+	if err := validatePassword(strings.Repeat("a", maxPasswordLen+1)); !errors.Is(err, ErrInvalidArgument) {
+		t.Fatalf("validate too long = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := verifyPassword("$argon2id$x", password); err == nil {
 		t.Fatal("verify unsupported hash: no error")
 	}
 }
