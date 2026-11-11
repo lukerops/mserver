@@ -1,0 +1,176 @@
+syntax = "proto3";
+
+// The identity module: accounts, profiles, devices and sessions.
+//
+// Login happens in two steps: Authenticate checks the account credentials and
+// opens a session without profile; SelectProfile then binds a profile of the
+// account to the session, keeping its token.
+package identity.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service IdentityService {
+  // Setup creates the first account, as administrator, with its first
+  // profile. It fails with ALREADY_EXISTS if any account exists.
+  rpc Setup(SetupRequest) returns (SetupResponse);
+
+  // Authenticate checks the credentials of an account and opens a session on
+  // the device, registering it if needed. A previous session of the same
+  // device is revoked. Wrong credentials and disabled accounts fail with
+  // UNAUTHENTICATED.
+  rpc Authenticate(AuthenticateRequest) returns (AuthenticateResponse);
+  // SelectProfile binds a profile of the session account to the session. It
+  // fails with NOT_FOUND if the session does not exist or the profile is not
+  // of its account.
+  rpc SelectProfile(SelectProfileRequest) returns (SelectProfileResponse);
+  // ValidateToken returns the session of an access token, or fails with
+  // UNAUTHENTICATED.
+  rpc ValidateToken(ValidateTokenRequest) returns (ValidateTokenResponse);
+  // RevokeSession ends a session; its token stops being valid.
+  rpc RevokeSession(RevokeSessionRequest) returns (RevokeSessionResponse);
+
+  rpc GetAccount(GetAccountRequest) returns (GetAccountResponse);
+  // ResyncAccounts publishes again the created event of every account, so
+  // that consumers can rebuild their projections.
+  rpc ResyncAccounts(ResyncAccountsRequest) returns (ResyncAccountsResponse);
+
+  rpc GetProfile(GetProfileRequest) returns (GetProfileResponse);
+  // ListProfiles lists the profiles of an account ordered by creation.
+  rpc ListProfiles(ListProfilesRequest) returns (ListProfilesResponse);
+  // ResyncProfiles publishes again the created event of every profile, so
+  // that consumers can rebuild their projections.
+  rpc ResyncProfiles(ResyncProfilesRequest) returns (ResyncProfilesResponse);
+}
+
+// Account holds the credentials and administrative data. Profiles belong to
+// an account. The password hash is never part of it.
+message Account {
+  // id is a UUIDv7.
+  string id = 1;
+  string username = 2;
+  string email = 3;
+  bool is_admin = 4;
+  bool disabled = 5;
+  google.protobuf.Timestamp created_at = 6;
+  google.protobuf.Timestamp updated_at = 7;
+}
+
+// Profile is the identity used to consume media. Its handle is unique within
+// the account.
+message Profile {
+  // id is a UUIDv7.
+  string id = 1;
+  string account_id = 2;
+  string handle = 3;
+  string display_name = 4;
+  google.protobuf.Timestamp created_at = 5;
+  google.protobuf.Timestamp updated_at = 6;
+}
+
+// Session is an authenticated session of an account on a device.
+message Session {
+  // id is a UUIDv7.
+  string id = 1;
+  string account_id = 2;
+  string device_id = 3;
+  // profile_id is empty until a profile is selected.
+  string profile_id = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// NewProfile describes a profile to create.
+message NewProfile {
+  string handle = 1;
+  string display_name = 2;
+}
+
+// DeviceInfo describes the device of an authentication.
+message DeviceInfo {
+  // identifier is chosen by the client and is unique per account.
+  string identifier = 1;
+  string name = 2;
+  // client is the application name, e.g. "Jellyfin Web".
+  string client = 3;
+  string version = 4;
+}
+
+message SetupRequest {
+  string username = 1;
+  string email = 2;
+  string password = 3;
+  NewProfile profile = 4;
+}
+
+message SetupResponse {
+  Account account = 1;
+  Profile profile = 2;
+}
+
+message AuthenticateRequest {
+  // login is the username or the email of the account.
+  string login = 1;
+  string password = 2;
+  DeviceInfo device = 3;
+}
+
+message AuthenticateResponse {
+  Session session = 1;
+  // token is the access token. It is only returned here: the identity keeps
+  // just its hash.
+  string token = 2;
+}
+
+message SelectProfileRequest {
+  string session_id = 1;
+  string profile_id = 2;
+}
+
+message SelectProfileResponse {
+  Session session = 1;
+}
+
+message ValidateTokenRequest {
+  string token = 1;
+}
+
+message ValidateTokenResponse {
+  Session session = 1;
+}
+
+message RevokeSessionRequest {
+  string session_id = 1;
+}
+
+message RevokeSessionResponse {}
+
+message GetAccountRequest {
+  string id = 1;
+}
+
+message GetAccountResponse {
+  Account account = 1;
+}
+
+message ResyncAccountsRequest {}
+
+message ResyncAccountsResponse {}
+
+message GetProfileRequest {
+  string id = 1;
+}
+
+message GetProfileResponse {
+  Profile profile = 1;
+}
+
+message ListProfilesRequest {
+  string account_id = 1;
+}
+
+message ListProfilesResponse {
+  repeated Profile profiles = 1;
+}
+
+message ResyncProfilesRequest {}
+
+message ResyncProfilesResponse {}
