@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
+	"github.com/lukerops/mserver/internal/events"
 )
 
 // dummyHash is verified when the login matches no account, so that the
@@ -27,159 +28,147 @@ func unauthenticated() error {
 	return fmt.Errorf("%w: invalid credentials", ErrUnauthenticated)
 }
 
-func (s *service) Authenticate(ctx context.Context, req AuthenticateRequest) (AuthenticateResult, error) {
+// Authenticate checks the credentials of an account and opens a session on
+// the device, registering it if needed. A previous session of the same
+// device is revoked. Wrong credentials and disabled accounts return
+// ErrUnauthenticated.
+func (s *Service) Authenticate(ctx context.Context, req *AuthenticateRequest) (*AuthenticateResult, error) {
 	login := strings.TrimSpace(req.Login)
 	if login == "" || req.Password == "" {
-		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", "missing credentials")
-		return AuthenticateResult{}, unauthenticated()
+		s.logRejected(ctx, "missing credentials")
+		return nil, unauthenticated()
 	}
-	dev := req.Device
-	dev.Identifier = strings.TrimSpace(dev.Identifier)
-	if dev.Identifier == "" {
-		return AuthenticateResult{}, invalid("device identifier is required")
+	identifier := strings.TrimSpace(req.Device.Identifier)
+	if identifier == "" {
+		return nil, invalid("device identifier is required")
 	}
 
 	account, hash, err := s.store.FindAccountByLogin(ctx, login)
 	if errors.Is(err, ErrNotFound) {
 		_, _ = verifyPassword(dummyHash(), req.Password)
-		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", "unknown login")
-		return AuthenticateResult{}, unauthenticated()
+		s.logRejected(ctx, "unknown login")
+		return nil, unauthenticated()
 	}
 	if err != nil {
-		return AuthenticateResult{}, err
+		return nil, err
 	}
 	ok, err := verifyPassword(hash, req.Password)
 	if err != nil {
-		return AuthenticateResult{}, err
+		return nil, err
 	}
 	if !ok || account.Disabled {
 		reason := "wrong password"
 		if ok {
 			reason = "account disabled"
 		}
-		s.log.DebugContext(ctx, "identity: authentication rejected", "reason", reason, "account_id", account.ID)
-		return AuthenticateResult{}, unauthenticated()
+		s.logRejected(ctx, reason, slog.String("account_id", account.ID.String()))
+		return nil, unauthenticated()
 	}
 
 	token, tokenHash, err := newToken()
 	if err != nil {
-		return AuthenticateResult{}, err
+		return nil, err
 	}
 	now := time.Now().UTC()
-	session := Session{
-		ID:        newID(),
-		AccountID: account.ID,
-		CreatedAt: now,
+	device := &Device{
+		ID:         newID(),
+		AccountID:  account.ID,
+		Identifier: identifier,
+		Name:       req.Device.Name,
+		Client:     req.Device.Client,
+		Version:    req.Device.Version,
+		CreatedAt:  now,
+		LastSeenAt: now,
+	}
+	res := &AuthenticateResult{
+		Session: Session{ID: newID(), AccountID: account.ID, CreatedAt: now},
+		Token:   token,
 	}
 
-	var revoked []Session
-	err = s.store.WithTx(ctx, func(ctx context.Context) error {
-		device, err := s.store.UpsertDevice(ctx, Device{
-			ID:         newID(),
-			AccountID:  account.ID,
-			Identifier: dev.Identifier,
-			Name:       dev.Name,
-			Client:     dev.Client,
-			Version:    dev.Version,
-			CreatedAt:  now,
-			LastSeenAt: now,
-		})
-		if err != nil {
-			return err
-		}
-		session.DeviceID = device.ID
-
-		// A device keeps a single session: logging in again revokes it.
-		previous, err := s.store.ListDeviceSessions(ctx, device.ID)
-		if err != nil {
-			return err
-		}
-		events := make([]queue.Event, 0, len(previous))
-		for _, p := range previous {
-			if err := s.store.DeleteSession(ctx, p.ID); err != nil {
-				return err
-			}
-			events = append(events, sessionRevokedEvent(p, now))
-		}
-		if err := s.store.InsertSession(ctx, session, tokenHash); err != nil {
-			return err
-		}
-		revoked = previous
-		return s.outbox.Publish(ctx, events...)
-	})
+	// A device keeps a single session: logging in again revokes it.
+	revoked, err := s.store.OpenSession(ctx, device, &res.Session, tokenHash)
 	if err != nil {
-		return AuthenticateResult{}, err
+		return nil, err
 	}
-	for _, p := range revoked {
-		s.log.InfoContext(ctx, "identity: session revoked", "session_id", p.ID,
-			"account_id", p.AccountID, "device_id", p.DeviceID, "reason", "new login on the device")
+	for i := range revoked {
+		r := &revoked[i]
+		s.log.InfoContext(ctx, "identity: session revoked",
+			slog.String("session_id", r.ID.String()),
+			slog.String("account_id", r.AccountID.String()),
+			slog.String("device_id", r.DeviceID.String()),
+			slog.String("reason", "new login on the device"),
+		)
+		if err := s.publishSessionRevoked(ctx, r, now); err != nil {
+			s.logPublishError(ctx, events.SessionRevokedV1, err)
+		}
 	}
-	s.log.InfoContext(ctx, "identity: session authenticated", "session_id", session.ID,
-		"account_id", session.AccountID, "device_id", session.DeviceID, "client", dev.Client)
-	return AuthenticateResult{Session: session, Token: token}, nil
+	s.log.InfoContext(ctx, "identity: session authenticated",
+		slog.String("session_id", res.Session.ID.String()),
+		slog.String("account_id", res.Session.AccountID.String()),
+		slog.String("device_id", res.Session.DeviceID.String()),
+		slog.String("client", req.Device.Client),
+	)
+	return res, nil
 }
 
-func (s *service) SelectProfile(ctx context.Context, id, profileID uuid.UUID) (Session, error) {
-	var session Session
-	err := s.store.WithTx(ctx, func(ctx context.Context) error {
-		var err error
-		if session, err = s.store.GetSession(ctx, id); err != nil {
-			return err
-		}
-		profile, err := s.store.GetProfile(ctx, profileID)
-		if err != nil {
-			return err
-		}
-		if profile.AccountID != session.AccountID {
-			s.log.DebugContext(ctx, "identity: profile rejected, not of the session account",
-				"session_id", id, "account_id", session.AccountID, "profile_id", profileID)
-			return fmt.Errorf("%w: profile %s", ErrNotFound, profileID)
-		}
-		session.ProfileID = profile.ID
-		return s.store.SetSessionProfile(ctx, id, profile.ID)
-	})
+func (s *Service) logRejected(ctx context.Context, reason string, attrs ...slog.Attr) {
+	attrs = append(attrs, slog.String("reason", reason))
+	s.log.LogAttrs(ctx, slog.LevelDebug, "identity: authentication rejected", attrs...)
+}
+
+// SelectProfile binds a profile of the session account to the session. It
+// returns ErrNotFound if the session does not exist or the profile is not
+// of that account.
+func (s *Service) SelectProfile(ctx context.Context, id, profile uuid.UUID) (*Session, error) {
+	session, err := s.store.SelectSessionProfile(ctx, id, profile)
 	if err != nil {
-		return Session{}, err
+		return nil, err
 	}
-	s.log.DebugContext(ctx, "identity: profile selected", "session_id", session.ID,
-		"account_id", session.AccountID, "profile_id", session.ProfileID)
+	s.log.DebugContext(ctx, "identity: profile selected",
+		slog.String("session_id", session.ID.String()),
+		slog.String("account_id", session.AccountID.String()),
+		slog.String("profile_id", session.ProfileID.String()),
+	)
 	return session, nil
 }
 
-func (s *service) ValidateToken(ctx context.Context, token string) (Session, error) {
+// ValidateToken returns the session of an access token, or
+// ErrUnauthenticated.
+func (s *Service) ValidateToken(ctx context.Context, token string) (*Session, error) {
 	if token == "" {
-		s.log.DebugContext(ctx, "identity: token rejected", "reason", "missing")
-		return Session{}, fmt.Errorf("%w: missing token", ErrUnauthenticated)
+		s.log.DebugContext(ctx, "identity: token rejected", slog.String("reason", "missing"))
+		return nil, fmt.Errorf("%w: missing token", ErrUnauthenticated)
 	}
 	session, err := s.store.FindSessionByToken(ctx, hashToken(token))
 	if errors.Is(err, ErrNotFound) {
-		s.log.DebugContext(ctx, "identity: token rejected", "reason", "unknown or revoked")
-		return Session{}, fmt.Errorf("%w: invalid token", ErrUnauthenticated)
+		s.log.DebugContext(ctx, "identity: token rejected", slog.String("reason", "unknown or revoked"))
+		return nil, fmt.Errorf("%w: invalid token", ErrUnauthenticated)
 	}
 	if err != nil {
-		return Session{}, err
+		return nil, err
 	}
-	s.log.DebugContext(ctx, "identity: token validated", "session_id", session.ID,
-		"account_id", session.AccountID, "profile_id", session.ProfileID)
+	s.log.DebugContext(ctx, "identity: token validated",
+		slog.String("session_id", session.ID.String()),
+		slog.String("account_id", session.AccountID.String()),
+		slog.String("profile_id", session.ProfileID.String()),
+	)
 	return session, nil
 }
 
-func (s *service) RevokeSession(ctx context.Context, id uuid.UUID) error {
-	var session Session
-	err := s.store.WithTx(ctx, func(ctx context.Context) error {
-		var err error
-		if session, err = s.store.GetSession(ctx, id); err != nil {
-			return err
-		}
-		if err := s.store.DeleteSession(ctx, id); err != nil {
-			return err
-		}
-		return s.outbox.Publish(ctx, sessionRevokedEvent(session, time.Now().UTC()))
-	})
+// RevokeSession ends a session; its token stops being valid. It returns
+// ErrNotFound if the session does not exist.
+func (s *Service) RevokeSession(ctx context.Context, id uuid.UUID) error {
+	session, err := s.store.DeleteSession(ctx, id)
 	if err != nil {
 		return err
 	}
-	s.log.InfoContext(ctx, "identity: session revoked", "session_id", session.ID,
-		"account_id", session.AccountID, "device_id", session.DeviceID)
+	s.log.InfoContext(ctx, "identity: session revoked",
+		slog.String("session_id", session.ID.String()),
+		slog.String("account_id", session.AccountID.String()),
+		slog.String("device_id", session.DeviceID.String()),
+	)
+	if err := s.publishSessionRevoked(ctx, session, time.Now().UTC()); err != nil {
+		s.logPublishError(ctx, events.SessionRevokedV1, err)
+	}
 	return nil
 }

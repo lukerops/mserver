@@ -10,8 +10,7 @@ import (
 const SpecVersion = "1.0"
 
 // Envelope is an event in the CloudEvents 1.0 JSON format. Data holds the
-// event-specific payload, defined in the events package of the module that
-// publishes it.
+// event-specific payload, defined in internal/events.
 type Envelope[T any] struct {
 	// ID is a UUIDv7, used for ordering and deduplication.
 	ID string `json:"id"`

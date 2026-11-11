@@ -2,74 +2,69 @@ package service
 
 import (
 	"context"
-	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
-	"github.com/lukerops/mserver/internal/modules/identity/events"
+	"github.com/lukerops/mserver/internal/events"
 )
 
-func (s *service) Setup(ctx context.Context, req SetupRequest) (SetupResult, error) {
-	req.Username = strings.TrimSpace(req.Username)
-	req.Email = strings.TrimSpace(req.Email)
-	if err := validateUsername(req.Username); err != nil {
-		return SetupResult{}, err
+// Setup creates the first account, as administrator, with its first
+// profile. It returns ErrAlreadyExists if any account exists.
+func (s *Service) Setup(ctx context.Context, req *SetupRequest) (*SetupResult, error) {
+	username := strings.TrimSpace(req.Username)
+	email := strings.TrimSpace(req.Email)
+	if err := validateUsername(username); err != nil {
+		return nil, err
 	}
-	if err := validateEmail(req.Email); err != nil {
-		return SetupResult{}, err
+	if err := validateEmail(email); err != nil {
+		return nil, err
 	}
 	if err := validatePassword(req.Password); err != nil {
-		return SetupResult{}, err
+		return nil, err
 	}
 	newProfile, err := normalizeProfile(req.Profile)
 	if err != nil {
-		return SetupResult{}, err
+		return nil, err
 	}
 	hash, err := hashPassword(req.Password)
 	if err != nil {
-		return SetupResult{}, err
+		return nil, err
 	}
 
 	now := time.Now().UTC()
-	account := Account{
-		ID:        newID(),
-		Username:  req.Username,
-		Email:     req.Email,
-		IsAdmin:   true,
-		CreatedAt: now,
-		UpdatedAt: now,
+	res := &SetupResult{
+		Account: Account{
+			ID:        newID(),
+			Username:  username,
+			Email:     email,
+			IsAdmin:   true,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		Profile: Profile{
+			ID:          newID(),
+			Handle:      newProfile.Handle,
+			DisplayName: newProfile.DisplayName,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		},
 	}
-	profile := Profile{
-		ID:          newID(),
-		AccountID:   account.ID,
-		Handle:      newProfile.Handle,
-		DisplayName: newProfile.DisplayName,
-		CreatedAt:   now,
-		UpdatedAt:   now,
-	}
+	res.Profile.AccountID = res.Account.ID
 
-	err = s.store.WithTx(ctx, func(ctx context.Context) error {
-		n, err := s.store.CountAccounts(ctx)
-		if err != nil {
-			return err
-		}
-		if n > 0 {
-			return fmt.Errorf("%w: setup was already done", ErrAlreadyExists)
-		}
-		if err := s.store.InsertAccount(ctx, account, hash); err != nil {
-			return err
-		}
-		if err := s.store.InsertProfile(ctx, profile); err != nil {
-			return err
-		}
-		return s.outbox.Publish(ctx,
-			accountEvent(events.AccountCreatedV1, account),
-			profileEvent(events.ProfileCreatedV1, profile),
-		)
-	})
-	if err != nil {
-		return SetupResult{}, err
+	if err := s.store.CreateFirstAccount(ctx, &res.Account, hash, &res.Profile); err != nil {
+		return nil, err
 	}
-	s.log.InfoContext(ctx, "identity: setup done", "account_id", account.ID, "profile_id", profile.ID)
-	return SetupResult{Account: account, Profile: profile}, nil
+	s.log.InfoContext(ctx, "identity: setup done",
+		slog.String("account_id", res.Account.ID.String()),
+		slog.String("profile_id", res.Profile.ID.String()),
+	)
+
+	if err := s.publishAccount(ctx, events.AccountCreatedV1, &res.Account); err != nil {
+		s.logPublishError(ctx, events.AccountCreatedV1, err)
+	}
+	if err := s.publishProfile(ctx, events.ProfileCreatedV1, &res.Profile); err != nil {
+		s.logPublishError(ctx, events.ProfileCreatedV1, err)
+	}
+	return res, nil
 }

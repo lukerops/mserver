@@ -2,41 +2,39 @@ package service
 
 import (
 	"context"
+	"log/slog"
 
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/identity/events"
+	"github.com/lukerops/mserver/internal/events"
 )
 
-// ResyncAccounts publishes the created event of every account.
-func (s *service) ResyncAccounts(ctx context.Context) error {
+// ResyncAccounts publishes the created event of every account. It stops at
+// the first failure.
+func (s *Service) ResyncAccounts(ctx context.Context) error {
 	accounts, err := s.store.ListAccounts(ctx)
 	if err != nil {
 		return err
 	}
-	evs := make([]queue.Event, 0, len(accounts))
-	for _, a := range accounts {
-		evs = append(evs, accountEvent(events.AccountCreatedV1, a))
+	for i := range accounts {
+		if err := s.publishAccount(ctx, events.AccountCreatedV1, &accounts[i]); err != nil {
+			return err
+		}
 	}
-	if err := s.outbox.Publish(ctx, evs...); err != nil {
-		return err
-	}
-	s.log.DebugContext(ctx, "identity: accounts resynced", "count", len(evs))
+	s.log.DebugContext(ctx, "identity: accounts resynced", slog.Int("count", len(accounts)))
 	return nil
 }
 
-// ResyncProfiles publishes the created event of every profile.
-func (s *service) ResyncProfiles(ctx context.Context) error {
+// ResyncProfiles publishes the created event of every profile. It stops at
+// the first failure.
+func (s *Service) ResyncProfiles(ctx context.Context) error {
 	profiles, err := s.store.ListAllProfiles(ctx)
 	if err != nil {
 		return err
 	}
-	evs := make([]queue.Event, 0, len(profiles))
-	for _, p := range profiles {
-		evs = append(evs, profileEvent(events.ProfileCreatedV1, p))
+	for i := range profiles {
+		if err := s.publishProfile(ctx, events.ProfileCreatedV1, &profiles[i]); err != nil {
+			return err
+		}
 	}
-	if err := s.outbox.Publish(ctx, evs...); err != nil {
-		return err
-	}
-	s.log.DebugContext(ctx, "identity: profiles resynced", "count", len(evs))
+	s.log.DebugContext(ctx, "identity: profiles resynced", slog.Int("count", len(profiles)))
 	return nil
 }

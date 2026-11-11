@@ -2,23 +2,19 @@ package service
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
-	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
-	database "github.com/lukerops/mserver/internal/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/outbox"
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/identity/events"
-	"github.com/lukerops/mserver/internal/modules/identity/store/sqlite"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/events"
+	"github.com/lukerops/mserver/internal/modules/identity/store"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
 func init() {
@@ -26,73 +22,58 @@ func init() {
 	hashParams = argonParams{memory: 64, time: 1, threads: 1}
 }
 
-// recorder records the types of the published events.
+// recorder records the published messages, in order.
 type recorder struct {
-	mu    sync.Mutex
-	types []string
-	data  []json.RawMessage
+	mu   sync.Mutex
+	msgs []pubsub.Message
 }
 
-func (r *recorder) Publish(_ context.Context, msg queue.Message) error {
-	var env queue.Envelope[json.RawMessage]
-	if err := json.Unmarshal(msg.Payload, &env); err != nil {
-		return err
-	}
+func (r *recorder) Publish(_ context.Context, msg pubsub.Message) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.types = append(r.types, env.Type)
-	r.data = append(r.data, env.Data)
+	r.msgs = append(r.msgs, msg)
 	return nil
 }
 
-// wait returns the recorded event types once there are at least n.
-func (r *recorder) wait(t *testing.T, n int) []string {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		r.mu.Lock()
-		types := slices.Clone(r.types)
-		r.mu.Unlock()
-		if len(types) >= n {
-			return types
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("got events %v, want %d", types, n)
-		}
-		time.Sleep(10 * time.Millisecond)
+// topics returns the topics of the messages published so far.
+func (r *recorder) topics() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	topics := make([]string, len(r.msgs))
+	for i, m := range r.msgs {
+		topics[i] = m.Topic
 	}
+	return topics
 }
 
-func newTestService(t *testing.T, pub queue.Publisher) (Service, *outbox.Outbox) {
+// failingPublisher fails every publication.
+type failingPublisher struct{}
+
+func (failingPublisher) Publish(context.Context, pubsub.Message) error {
+	return errors.New("bus down")
+}
+
+func newTestService(t *testing.T, pub pubsub.Publisher) *Service {
 	t.Helper()
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "identity.db"))
+	cfg := database.Config{Driver: database.SQLite, DataDir: ":memory:"}
+	db, err := database.Open(t.Context(), cfg, "identity", store.Migrations)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	ob, err := outbox.New(t.Context(), db, pub, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(ob.Stop)
-	st, err := sqlite.New(t.Context(), db)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return New(st, ob, slog.Default()), ob
+	return New(store.New(db), pub, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
-func newService(t *testing.T) Service {
+func newService(t *testing.T) *Service {
 	t.Helper()
-	s, _ := newTestService(t, memory.New())
-	return s
+	return newTestService(t, &recorder{})
 }
 
 const password = "correct horse"
 
-func setup(t *testing.T, s Service) SetupResult {
+func setup(t *testing.T, s *Service) *SetupResult {
 	t.Helper()
-	res, err := s.Setup(t.Context(), SetupRequest{
+	res, err := s.Setup(t.Context(), &SetupRequest{
 		Username: "admin",
 		Email:    "admin@example.com",
 		Password: password,
@@ -108,9 +89,9 @@ func device(id string) DeviceInfo {
 	return DeviceInfo{Identifier: id, Name: "Firefox", Client: "Jellyfin Web", Version: "10.10.0"}
 }
 
-func authenticate(t *testing.T, s Service, login, dev string) AuthenticateResult {
+func authenticate(t *testing.T, s *Service, login, dev string) *AuthenticateResult {
 	t.Helper()
-	res, err := s.Authenticate(t.Context(), AuthenticateRequest{Login: login, Password: password, Device: device(dev)})
+	res, err := s.Authenticate(t.Context(), &AuthenticateRequest{Login: login, Password: password, Device: device(dev)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +109,7 @@ func TestSetup(t *testing.T) {
 		t.Fatalf("profile = %+v", res.Profile)
 	}
 
-	_, err := s.Setup(t.Context(), SetupRequest{
+	_, err := s.Setup(t.Context(), &SetupRequest{
 		Username: "other", Email: "other@example.com", Password: password,
 		Profile: NewProfile{Handle: "other"},
 	})
@@ -153,7 +134,7 @@ func TestSetupValidation(t *testing.T) {
 			s := newService(t)
 			req := valid
 			mutate(&req)
-			if _, err := s.Setup(t.Context(), req); !errors.Is(err, ErrInvalidArgument) {
+			if _, err := s.Setup(t.Context(), &req); !errors.Is(err, ErrInvalidArgument) {
 				t.Fatalf("err = %v, want ErrInvalidArgument", err)
 			}
 		})
@@ -197,11 +178,11 @@ func TestAuthenticateFailures(t *testing.T) {
 		"unknown login":  {Login: "nobody", Password: password, Device: device("d")},
 		"empty":          {Device: device("d")},
 	} {
-		if _, err := s.Authenticate(t.Context(), req); !errors.Is(err, ErrUnauthenticated) {
+		if _, err := s.Authenticate(t.Context(), &req); !errors.Is(err, ErrUnauthenticated) {
 			t.Errorf("%s: err = %v, want ErrUnauthenticated", name, err)
 		}
 	}
-	_, err := s.Authenticate(t.Context(), AuthenticateRequest{Login: "admin", Password: password})
+	_, err := s.Authenticate(t.Context(), &AuthenticateRequest{Login: "admin", Password: password})
 	if !errors.Is(err, ErrInvalidArgument) {
 		t.Errorf("no device: err = %v, want ErrInvalidArgument", err)
 	}
@@ -231,7 +212,7 @@ func TestNewLoginRevokesDeviceSession(t *testing.T) {
 	if second.Session.DeviceID != first.Session.DeviceID {
 		t.Fatalf("device changed: %v != %v", second.Session.DeviceID, first.Session.DeviceID)
 	}
-	for _, res := range []AuthenticateResult{other, second} {
+	for _, res := range []*AuthenticateResult{other, second} {
 		if _, err := s.ValidateToken(t.Context(), res.Token); err != nil {
 			t.Fatalf("token of %v: %v", res.Session.DeviceID, err)
 		}
@@ -280,7 +261,7 @@ func TestGetAndList(t *testing.T) {
 
 func TestEvents(t *testing.T) {
 	rec := &recorder{}
-	s, ob := newTestService(t, rec)
+	s := newTestService(t, rec)
 
 	setup(t, s)
 	res := authenticate(t, s, "admin", "d")
@@ -291,7 +272,6 @@ func TestEvents(t *testing.T) {
 	if err := s.ResyncProfiles(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	ob.Start(t.Context())
 
 	want := []string{
 		events.AccountCreatedV1,
@@ -300,27 +280,51 @@ func TestEvents(t *testing.T) {
 		events.AccountCreatedV1,
 		events.ProfileCreatedV1,
 	}
-	if got := rec.wait(t, len(want)); !slices.Equal(got, want) {
+	if got := rec.topics(); !slices.Equal(got, want) {
 		t.Fatalf("events = %v, want %v", got, want)
 	}
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	var account map[string]any
-	if err := json.Unmarshal(rec.data[0], &account); err != nil {
+	account, err := pubsub.Decode[map[string]any](rec.msgs[0])
+	if err != nil {
 		t.Fatal(err)
 	}
+	if account.Source != events.SourceIdentity {
+		t.Errorf("source = %q, want %q", account.Source, events.SourceIdentity)
+	}
 	for _, field := range []string{"password", "password_hash"} {
-		if _, ok := account[field]; ok {
+		if _, ok := account.Data[field]; ok {
 			t.Errorf("account event has %q", field)
 		}
 	}
-	var revoked events.SessionRevokedEventV1
-	if err := json.Unmarshal(rec.data[2], &revoked); err != nil {
+	revoked, err := pubsub.Decode[events.SessionRevokedEventV1](rec.msgs[2])
+	if err != nil {
 		t.Fatal(err)
 	}
-	if revoked.SessionID != res.Session.ID || revoked.ProfileID != uuid.Nil {
-		t.Fatalf("revoked = %+v", revoked)
+	if revoked.Data.SessionID != res.Session.ID || revoked.Data.ProfileID != uuid.Nil {
+		t.Fatalf("revoked = %+v", revoked.Data)
+	}
+}
+
+// A failed publication does not undo the change: the resync heals the
+// consumers.
+func TestPublishFailureKeepsTheChange(t *testing.T) {
+	s := newTestService(t, failingPublisher{})
+
+	res := setup(t, s)
+	login := authenticate(t, s, "admin", "d")
+	if _, err := s.GetAccount(t.Context(), res.Account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ValidateToken(t.Context(), login.Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RevokeSession(t.Context(), login.Session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResyncAccounts(t.Context()); err == nil {
+		t.Fatal("ResyncAccounts hid the publication failure")
 	}
 }
 
