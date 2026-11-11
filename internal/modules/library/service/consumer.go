@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 
 	"github.com/google/uuid"
 
@@ -58,7 +59,9 @@ func (s *Service) dropInvalid(ctx context.Context, msg pubsub.Message, err error
 
 // fileUpdated catalogs a file that was indexed, moved or changed, as a
 // movie or as an episode depending on its library. A changed file loses
-// its media info until it is analyzed again.
+// its media info until it is analyzed again. Files that are not videos
+// (by their media type) are ignored, and are removed from the catalog if
+// they were cataloged before (e.g. a video renamed to something else).
 func (s *Service) fileUpdated(ctx context.Context, f *events.FileEventV1, contentChanged bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -70,6 +73,19 @@ func (s *Service) fileUpdated(ctx context.Context, f *events.FileEventV1, conten
 	oldEpisode, err := s.findEpisode(ctx, f.FileID)
 	if err != nil {
 		return err
+	}
+
+	if !isVideo(f.MimeType) {
+		s.log.DebugContext(ctx, "library: file ignored",
+			slog.String("reason", "not a video"),
+			slog.String("file_id", f.FileID.String()),
+			slog.String("mime_type", f.MimeType),
+			slog.String("path", f.Path),
+		)
+		if err := s.removeMovie(ctx, oldMovie); err != nil {
+			return err
+		}
+		return s.removeEpisode(ctx, oldEpisode)
 	}
 
 	// A file is a movie or an episode, never both: the media type of a
@@ -126,6 +142,11 @@ func (s *Service) fileRemoved(ctx context.Context, file uuid.UUID) error {
 		return err
 	}
 	return s.removeEpisode(ctx, e)
+}
+
+// isVideo reports whether a media type, as set by the storage, is a video.
+func isVideo(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "video/")
 }
 
 // findMovie returns the movie of a file, or nil if there is none.

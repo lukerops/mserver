@@ -110,7 +110,10 @@ type File struct {
 	Size    int64                  `protobuf:"varint,4,opt,name=size,proto3" json:"size,omitempty"`
 	ModTime *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=mod_time,json=modTime,proto3" json:"mod_time,omitempty"`
 	// inode is zero when the driver does not support inodes.
-	Inode         uint64 `protobuf:"varint,6,opt,name=inode,proto3" json:"inode,omitempty"`
+	Inode uint64 `protobuf:"varint,6,opt,name=inode,proto3" json:"inode,omitempty"`
+	// mime_type is the media type of the file, from its extension (e.g.
+	// "video/x-matroska"). It is "application/octet-stream" when unknown.
+	MimeType      string `protobuf:"bytes,7,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -187,12 +190,21 @@ func (x *File) GetInode() uint64 {
 	return 0
 }
 
+func (x *File) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
+	}
+	return ""
+}
+
 // Sibling is a file in the same directory as another one.
 type Sibling struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	FileId string                 `protobuf:"bytes,1,opt,name=file_id,json=fileId,proto3" json:"file_id,omitempty"`
 	// path is relative to the location.
-	Path          string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	Path string `protobuf:"bytes,2,opt,name=path,proto3" json:"path,omitempty"`
+	// mime_type is the media type of the file (see File.mime_type).
+	MimeType      string `protobuf:"bytes,3,opt,name=mime_type,json=mimeType,proto3" json:"mime_type,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -237,6 +249,13 @@ func (x *Sibling) GetFileId() string {
 func (x *Sibling) GetPath() string {
 	if x != nil {
 		return x.Path
+	}
+	return ""
+}
+
+func (x *Sibling) GetMimeType() string {
+	if x != nil {
+		return x.MimeType
 	}
 	return ""
 }
@@ -1209,7 +1228,7 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"created_at\x18\x04 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x1a:\n" +
 	"\fOptionsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xac\x01\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc9\x01\n" +
 	"\x04File\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1f\n" +
 	"\vlocation_id\x18\x02 \x01(\tR\n" +
@@ -1217,10 +1236,12 @@ const file_storage_v1_storage_proto_rawDesc = "" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x12\n" +
 	"\x04size\x18\x04 \x01(\x03R\x04size\x125\n" +
 	"\bmod_time\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\amodTime\x12\x14\n" +
-	"\x05inode\x18\x06 \x01(\x04R\x05inode\"6\n" +
+	"\x05inode\x18\x06 \x01(\x04R\x05inode\x12\x1b\n" +
+	"\tmime_type\x18\a \x01(\tR\bmimeType\"S\n" +
 	"\aSibling\x12\x17\n" +
 	"\afile_id\x18\x01 \x01(\tR\x06fileId\x12\x12\n" +
-	"\x04path\x18\x02 \x01(\tR\x04path\"l\n" +
+	"\x04path\x18\x02 \x01(\tR\x04path\x12\x1b\n" +
+	"\tmime_type\x18\x03 \x01(\tR\bmimeType\"l\n" +
 	"\n" +
 	"ScanResult\x12\x14\n" +
 	"\x05added\x18\x01 \x01(\x05R\x05added\x12\x18\n" +

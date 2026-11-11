@@ -206,6 +206,35 @@ func TestCatalogFollowsStorage(t *testing.T) {
 	rec.none(t)
 }
 
+func TestNonVideoFilesAreIgnored(t *testing.T) {
+	rec := &recorder{}
+	loc := newID()
+	s := newTestService(t, rec, newFakeStorage(loc))
+	lib := createLibrary(t, s, loc)
+
+	// The media type decides, not the extension.
+	fileEvent(t, s, events.FileIndexedV1, loc, newID(), "Alien (1979)/Alien.en.srt")
+	fileEvent(t, s, events.FileIndexedV1, loc, newID(), "Alien (1979)/poster.jpg")
+	fileEvent(t, s, events.FileIndexedV1, loc, newID(), "notes")
+	storageEvent(t, s, events.FileIndexedV1, events.FileEventV1{
+		FileID: newID(), LocationID: loc, Path: "Heat (1995).mkv", MimeType: "application/octet-stream",
+	})
+	rec.none(t)
+	if page := listMovies(t, s, &MovieQuery{LibraryID: lib.ID}); page.Total != 0 {
+		t.Fatalf("movies = %+v, want none", page)
+	}
+
+	// A video that becomes something else leaves the catalog.
+	file := newID()
+	fileEvent(t, s, events.FileIndexedV1, loc, file, "Alien (1979)/Alien.mkv")
+	nextMovie(t, rec, events.MovieAddedV1)
+	fileEvent(t, s, events.FileMovedV1, loc, file, "Alien (1979)/Alien.srt")
+	nextMovie(t, rec, events.MovieRemovedV1)
+	if _, err := s.GetMovie(t.Context(), uuid.Nil, movieID(file)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("movie of a non-video: got %v, want ErrNotFound", err)
+	}
+}
+
 func TestInvalidEventsAreDropped(t *testing.T) {
 	s := newTestService(t, &recorder{}, newFakeStorage())
 	msg := pubsub.Message{Topic: events.FileIndexedV1, Payload: []byte("{")}

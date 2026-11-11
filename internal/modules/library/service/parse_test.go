@@ -35,14 +35,11 @@ func TestParseMovie(t *testing.T) {
 
 func TestParseMovieIgnoresNonMovies(t *testing.T) {
 	for _, p := range []string{
-		"Alien (1979)/Alien.en.srt",
-		"Alien (1979)/poster.jpg",
 		"Alien (1979)/Alien-trailer.mkv",
 		"Alien (1979)/sample.mkv",
 		"Alien (1979)/Extras/Making of.mkv",
 		"Alien (1979)/Featurettes/Interview.mp4",
 		"Alien (1979)/Sample/alien.sample.mkv",
-		"notes",
 	} {
 		if got, ok := parseMovie(p, 2028); ok {
 			t.Errorf("parseMovie(%q) = %+v, want not a movie", p, got)

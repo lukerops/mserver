@@ -55,6 +55,7 @@ func publishFile(t *testing.T, bus *memory.Bus, typ, location, file, path string
 		FileID:     uuid.MustParse(file),
 		LocationID: uuid.MustParse(location),
 		Path:       path,
+		MimeType:   "video/x-matroska",
 	}))
 	if err != nil {
 		t.Fatal(err)

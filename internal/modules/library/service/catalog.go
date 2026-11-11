@@ -15,9 +15,9 @@ import (
 func (s *Service) catalogMovie(ctx context.Context, lib *Library, f *events.FileEventV1, old *Movie, contentChanged bool) error {
 	parsed, ok := parseMovie(f.Path, time.Now().Year()+2)
 	if !ok {
-		// E.g. a video renamed to something that is not a movie.
+		// E.g. a video renamed to a trailer.
 		s.log.DebugContext(ctx, "library: file ignored",
-			slog.String("reason", "not a video or an extra"),
+			slog.String("reason", "extra"),
 			slog.String("library_id", lib.ID.String()),
 			slog.String("file_id", f.FileID.String()),
 			slog.String("path", f.Path),
@@ -79,8 +79,8 @@ func (s *Service) catalogEpisode(ctx context.Context, lib *Library, f *events.Fi
 	parsed, ok := parseEpisode(f.Path, time.Now().Year()+2)
 	if !ok {
 		reason := "no series name in the path"
-		if _, video := mainVideo(f.Path); !video {
-			reason = "not a video or an extra"
+		if _, main := mainVideo(f.Path); !main {
+			reason = "extra"
 		}
 		s.log.DebugContext(ctx, "library: file ignored",
 			slog.String("reason", reason),

@@ -4,9 +4,10 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
-	"strings"
 
 	"github.com/google/uuid"
+
+	"github.com/lukerops/mserver/internal/modules/storage/service"
 )
 
 // Mux returns the routes of the data plane: the content of the files as
@@ -43,7 +44,8 @@ func (h *Handler) fileContent(w http.ResponseWriter, r *http.Request) {
 		h.contentError(w, r, err)
 		return
 	}
-	if typ := contentType(f.Path); typ != "" {
+	// Unknown types are left for http.ServeContent to sniff.
+	if typ := service.MimeType(f.Path); typ != service.DefaultMimeType {
 		w.Header().Set("Content-Type", typ)
 	}
 	http.ServeContent(w, r, path.Base(f.Path), info.ModTime(), content)
@@ -61,28 +63,4 @@ func (h *Handler) contentError(w http.ResponseWriter, r *http.Request, err error
 		return
 	}
 	http.Error(w, err.Error(), status)
-}
-
-// contentTypes are the media types of the extensions that
-// mime.TypeByExtension does not know on every system. The others are
-// guessed by http.ServeContent.
-var contentTypes = map[string]string{
-	".mkv":  "video/x-matroska",
-	".mka":  "audio/x-matroska",
-	".webm": "video/webm",
-	".mp4":  "video/mp4",
-	".m4v":  "video/mp4",
-	".mov":  "video/quicktime",
-	".avi":  "video/x-msvideo",
-	".ts":   "video/mp2t",
-	".m2ts": "video/mp2t",
-	".mts":  "video/mp2t",
-	".srt":  "application/x-subrip",
-	".vtt":  "text/vtt",
-	".ass":  "text/x-ssa",
-	".ssa":  "text/x-ssa",
-}
-
-func contentType(p string) string {
-	return contentTypes[strings.ToLower(path.Ext(p))]
 }

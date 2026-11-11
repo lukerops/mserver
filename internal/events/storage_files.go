@@ -36,6 +36,10 @@ type FileEventV1 struct {
 	// Path is relative to the location. For removed files it is the last
 	// known path.
 	Path string `json:"path"`
+	// MimeType is the media type of the file (e.g. "video/x-matroska"), or
+	// "application/octet-stream" when unknown. Consumers use it to ignore
+	// the files they do not handle.
+	MimeType string `json:"mime_type"`
 }
 
 // FileAnalyzedEventV1 is the data of the analyzed event.

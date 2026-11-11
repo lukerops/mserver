@@ -88,7 +88,7 @@ func TestLocationsAndFiles(t *testing.T) {
 		t.Fatalf("ListFiles = %v, %v", files, err)
 	}
 	f := files.GetFiles()[0]
-	if f.GetPath() != "movie.mkv" || f.GetSize() != 10 || f.GetLocationId() != loc.GetId() {
+	if f.GetPath() != "movie.mkv" || f.GetSize() != 10 || f.GetLocationId() != loc.GetId() || f.GetMimeType() != "video/x-matroska" {
 		t.Errorf("file = %v", f)
 	}
 	if page, err := c.ListFiles(ctx, &storagev1.ListFilesRequest{LocationId: loc.GetId(), Offset: 1}); err != nil || len(page.GetFiles()) != 0 {

@@ -24,7 +24,12 @@ func toFile(f *service.File) *storagev1.File {
 		Size:       f.Size,
 		ModTime:    timestamppb.New(f.ModTime),
 		Inode:      f.Inode,
+		MimeType:   service.MimeType(f.Path),
 	}
+}
+
+func toSibling(s *service.Sibling) *storagev1.Sibling {
+	return &storagev1.Sibling{FileId: s.FileID.String(), Path: s.Path, MimeType: service.MimeType(s.Path)}
 }
 
 func toScanResult(r *service.ScanResult) *storagev1.ScanResult {

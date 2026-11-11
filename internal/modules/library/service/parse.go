@@ -7,14 +7,6 @@ import (
 	"unicode"
 )
 
-// videoExtensions are the files cataloged as movies.
-var videoExtensions = map[string]bool{
-	".3gp": true, ".asf": true, ".avi": true, ".divx": true, ".flv": true,
-	".m2ts": true, ".m4v": true, ".mkv": true, ".mov": true, ".mp4": true,
-	".mpeg": true, ".mpg": true, ".mts": true, ".ogm": true, ".ogv": true,
-	".rmvb": true, ".ts": true, ".vob": true, ".webm": true, ".wmv": true,
-}
-
 // extraDirs hold extras of a movie (trailers, samples...), not movies.
 var extraDirs = map[string]bool{
 	"behind the scenes": true, "deleted scenes": true, "extras": true,
@@ -43,13 +35,11 @@ type parsedMovie struct {
 	Year int
 }
 
-// mainVideo returns the name of the file at p without its extension, or
-// false if it is not a video or is an extra (trailer, sample...).
+// mainVideo returns the name of the video at p without its extension, or
+// false if it is an extra (trailer, sample...). Whether the file is a video
+// is not decided here: the storage tells it by the media type.
 func mainVideo(p string) (string, bool) {
 	ext := path.Ext(p)
-	if !videoExtensions[strings.ToLower(ext)] {
-		return "", false
-	}
 	name := strings.TrimSuffix(path.Base(p), ext)
 	lower := strings.ToLower(name)
 	if lower == "sample" || lower == "trailer" {
@@ -70,8 +60,8 @@ func mainVideo(p string) (string, bool) {
 
 // parseMovie identifies a movie from the path of a file relative to its
 // location, e.g. "Movies/Alien (1979)/Alien.mkv" or
-// "Alien.1979.1080p.BluRay.x264.mkv". It returns false for files that are
-// not movies (not videos, or extras such as trailers). Years after maxYear
+// "Alien.1979.1080p.BluRay.x264.mkv". It returns false for extras such as
+// trailers. The path must be of a video. Years after maxYear
 // are not years (e.g. "Blade Runner 2049").
 func parseMovie(p string, maxYear int) (parsedMovie, bool) {
 	name, ok := mainVideo(p)

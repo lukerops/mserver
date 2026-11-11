@@ -59,7 +59,7 @@ func (h *Handler) ListSiblings(ctx context.Context, req *storagev1.ListSiblingsR
 	}
 	resp := &storagev1.ListSiblingsResponse{Siblings: make([]*storagev1.Sibling, len(siblings))}
 	for i := range siblings {
-		resp.Siblings[i] = &storagev1.Sibling{FileId: siblings[i].FileID.String(), Path: siblings[i].Path}
+		resp.Siblings[i] = toSibling(&siblings[i])
 	}
 	return resp, nil
 }

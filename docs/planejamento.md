@@ -607,6 +607,7 @@ Regras:
 | `LocationID`                      | Localização cadastrada         |
 | Caminho relativo                  | Relativo à localização         |
 | Tamanho, mtime                    | Driver                         |
+| Tipo de mídia (`mime_type`)       | Storage, pela extensão         |
 | `inode`                           | Driver (quando suportado)      |
 | Container, duração, streams, caps | Analisador `ffprobe` (MVP)     |
 | SHA-256, ED2K, ...                | Analisadores de hash (pós-MVP) |

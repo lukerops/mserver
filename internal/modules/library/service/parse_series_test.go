@@ -80,8 +80,6 @@ func fmtEpisode(e parsedEpisode) string {
 
 func TestParseEpisodeIgnoresNonEpisodes(t *testing.T) {
 	for _, p := range []string{
-		"Show/Season 01/Show S01E01.en.srt",
-		"Show/poster.jpg",
 		"Show/Extras/Behind the Scenes.mkv",
 		"Show/Season 01/sample.mkv",
 		"Show/Season 01/Show S01E01-trailer.mkv",

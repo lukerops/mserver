@@ -56,6 +56,9 @@ message File {
   google.protobuf.Timestamp mod_time = 5;
   // inode is zero when the driver does not support inodes.
   uint64 inode = 6;
+  // mime_type is the media type of the file, from its extension (e.g.
+  // "video/x-matroska"). It is "application/octet-stream" when unknown.
+  string mime_type = 7;
 }
 
 // Sibling is a file in the same directory as another one.
@@ -63,6 +66,8 @@ message Sibling {
   string file_id = 1;
   // path is relative to the location.
   string path = 2;
+  // mime_type is the media type of the file (see File.mime_type).
+  string mime_type = 3;
 }
 
 // ScanResult summarizes a location scan.

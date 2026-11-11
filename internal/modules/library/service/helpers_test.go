@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -208,7 +209,23 @@ func storageEvent(t *testing.T, s *Service, topic string, data any) {
 
 func fileEvent(t *testing.T, s *Service, topic string, location, file uuid.UUID, path string) {
 	t.Helper()
-	storageEvent(t, s, topic, events.FileEventV1{FileID: file, LocationID: location, Path: path})
+	storageEvent(t, s, topic, events.FileEventV1{FileID: file, LocationID: location, Path: path, MimeType: testMimeType(path)})
+}
+
+// testMimeType is the media type the storage would set for path: only the
+// extensions the tests use.
+func testMimeType(path string) string {
+	switch filepath.Ext(path) {
+	case ".mkv":
+		return "video/x-matroska"
+	case ".mp4":
+		return "video/mp4"
+	case ".srt":
+		return "application/x-subrip"
+	case ".jpg":
+		return "image/jpeg"
+	}
+	return "application/octet-stream"
 }
 
 func analyzedEvent(t *testing.T, s *Service, location, file uuid.UUID, info *MediaInfo) {

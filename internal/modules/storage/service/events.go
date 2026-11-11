@@ -34,7 +34,7 @@ func publish[T any](ctx context.Context, pub pubsub.Publisher, typ, subject stri
 func (s *Service) publishFileChanges(ctx context.Context, location uuid.UUID, changes []fileChange) error {
 	for i := range changes {
 		c := &changes[i]
-		data := events.FileEventV1{FileID: c.ID, LocationID: location, Path: c.Path}
+		data := events.FileEventV1{FileID: c.ID, LocationID: location, Path: c.Path, MimeType: MimeType(c.Path)}
 		if err := publish(ctx, s.pub, c.Type, c.ID.String(), data); err != nil {
 			return err
 		}

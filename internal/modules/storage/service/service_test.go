@@ -313,7 +313,7 @@ func TestFileEventsArePublished(t *testing.T) {
 		case e := <-got:
 			ok := e.Type == want && e.Source == events.SourceStorage && e.SpecVersion == pubsub.SpecVersion &&
 				e.ID != "" && !e.Time.IsZero() && e.Subject == e.Data.FileID.String() &&
-				e.Data.Path == path && e.Data.LocationID != uuid.Nil
+				e.Data.Path == path && e.Data.LocationID != uuid.Nil && e.Data.MimeType == "video/x-matroska"
 			if !ok {
 				t.Fatalf("event = %+v, want %s for %s", e, want, path)
 			}
