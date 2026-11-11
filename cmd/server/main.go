@@ -4,8 +4,8 @@
 // reach it.
 //
 // The modules register their ConnectRPC services on the one server. Only
-// the migrated modules (identity, storage and library) exist yet; the
-// others are added as they are migrated.
+// the migrated modules (identity, storage, library and playback) exist
+// yet; the others are added as they are migrated.
 //
 // Variables:
 //
@@ -26,7 +26,11 @@
 //	MSERVER_LOG_FORMAT           text or json (default text)
 //
 // Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
-// and MSERVER_FFPROBE_PATH in the storage).
+// and MSERVER_FFPROBE_PATH in the storage, MSERVER_PLAYBACK_SESSION_TIMEOUT
+// in the playback).
+//
+// The shared state of the playback sessions lives in memory
+// (internal/kv/memory), so a single instance of the playback runs.
 package main
 
 import (
@@ -47,9 +51,11 @@ import (
 	"connectrpc.com/connect/v2/connecthttp"
 
 	"github.com/lukerops/mserver/internal/database"
+	kvmemory "github.com/lukerops/mserver/internal/kv/memory"
 	"github.com/lukerops/mserver/internal/logger"
 	"github.com/lukerops/mserver/internal/modules/identity"
 	"github.com/lukerops/mserver/internal/modules/library"
+	"github.com/lukerops/mserver/internal/modules/playback"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
@@ -154,6 +160,17 @@ func run(ctx context.Context) error {
 		mux.Handle("/", stor.Mux)
 	}
 
+	if enabled["playback"] {
+		sessions := kvmemory.New()
+		defer sessions.Close()
+
+		pb, err := playback.New(ctx, rpc, bus, sessions, log.With(slog.String("module", "playback")))
+		if err != nil {
+			return fmt.Errorf("playback: %w", err)
+		}
+		defer closeModule(log, "playback", pb.Close)
+	}
+
 	connecthttp.Mount(mux, rpc)
 
 	srv := newHTTPServer(mux, log)
@@ -192,7 +209,7 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 }
 
 // available are the modules migrated to ConnectRPC.
-var available = []string{"identity", "storage", "library"}
+var available = []string{"identity", "storage", "library", "playback"}
 
 // parseModules parses MSERVER_MODULES: "all" (or empty) or a
 // comma-separated list of modules.

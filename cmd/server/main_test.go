@@ -62,10 +62,11 @@ func TestParseModules(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"", []string{"identity", "storage", "library"}, false},
-		{"all", []string{"identity", "storage", "library"}, false},
+		{"", []string{"identity", "storage", "library", "playback"}, false},
+		{"all", []string{"identity", "storage", "library", "playback"}, false},
 		{"storage", []string{"storage"}, false},
 		{"library", []string{"library"}, false},
+		{"playback", []string{"playback"}, false},
 		{"identity,storage", []string{"identity", "storage"}, false},
 		{" storage , storage", []string{"storage"}, false},
 		{"nope", nil, true},
