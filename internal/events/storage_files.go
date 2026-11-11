@@ -6,6 +6,9 @@ import (
 	"github.com/google/uuid"
 )
 
+// SourceStorage is the CloudEvents source of the storage events.
+const SourceStorage = "storage"
+
 // Types of the file events. The subject is the file id.
 const (
 	// FileIndexedV1 is a new file (or a file republished by a resync).
