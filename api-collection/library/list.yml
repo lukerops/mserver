@@ -1,0 +1,20 @@
+info:
+  name: list
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/ListLibraries"
+  body:
+    type: json
+    data: |-
+      {}
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

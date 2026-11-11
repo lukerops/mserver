@@ -5,14 +5,14 @@ info:
 
 http:
   method: POST
-  url: "{{BaseURL}}/v1/libraries"
+  url: "{{BaseURL}}/library.v1.LibraryService/CreateLibrary"
   body:
     type: json
     data: |-
       {
         "name": "Filmes",
-        "media_type": "movies",
-        "location_ids": [
+        "mediaType": "movies",
+        "locationIds": [
           "{{MovieLocationID}}"
         ]
       }
@@ -23,7 +23,7 @@ runtime:
     - type: set-variable
       phase: after-response
       selector:
-        expression: res.body.id
+        expression: res.body.library.id
         method: jsonq
       variable:
         name: MovieLibraryID

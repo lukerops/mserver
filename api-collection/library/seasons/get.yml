@@ -1,0 +1,24 @@
+info:
+  name: get
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/GetSeason"
+  body:
+    type: json
+    data: |-
+      {
+        "libraryId": "{{TVLibraryID}}",
+        "seriesId": "{{SeriesID}}",
+        "id": "{{SeasonID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

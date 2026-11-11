@@ -1,0 +1,22 @@
+info:
+  name: get
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/GetLibrary"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{MovieLibraryID}}"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

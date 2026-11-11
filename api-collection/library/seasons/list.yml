@@ -4,8 +4,15 @@ info:
   seq: 1
 
 http:
-  method: GET
-  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}/series/{{SeriesID}}/seasons"
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/ListSeasons"
+  body:
+    type: json
+    data: |-
+      {
+        "libraryId": "{{TVLibraryID}}",
+        "seriesId": "{{SeriesID}}"
+      }
   auth: inherit
 
 runtime:

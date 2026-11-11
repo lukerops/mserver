@@ -4,23 +4,15 @@ info:
   seq: 2
 
 http:
-  method: DELETE
-  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}"
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/DeleteLibrary"
+  body:
+    type: json
+    data: |-
+      {
+        "id": "{{TVLibraryID}}"
+      }
   auth: inherit
-
-runtime:
-  variables:
-    - name: LibraryID
-      value: 01a1bb6c-431b-7028-9a15-31abb60b2081
-  actions:
-    - type: set-variable
-      phase: after-response
-      selector:
-        expression: res.body.id
-        method: jsonq
-      variable:
-        name: LibraryID
-        scope: runtime
 
 settings:
   encodeUrl: true

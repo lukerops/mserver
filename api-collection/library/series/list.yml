@@ -4,12 +4,16 @@ info:
   seq: 1
 
 http:
-  method: GET
-  url: "{{BaseURL}}/v1/libraries/{{TVLibraryID}}/series?sort_by=title"
-  params:
-    - name: sort_by
-      value: title
-      type: query
+  method: POST
+  url: "{{BaseURL}}/library.v1.LibraryService/ListSeries"
+  body:
+    type: json
+    data: |-
+      {
+        "libraryId": "{{TVLibraryID}}",
+        "sortBy": "title",
+        "limit": 50
+      }
   auth: inherit
 
 runtime:
