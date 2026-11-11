@@ -4,19 +4,18 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 
-	"github.com/lukerops/mserver/internal/infra/kv"
-	"github.com/lukerops/mserver/internal/infra/logging"
-
-	playback "github.com/lukerops/mserver/internal/modules/playback/client"
-	playbackrouter "github.com/lukerops/mserver/internal/modules/playback/router"
-	storage "github.com/lukerops/mserver/internal/modules/storage/client"
+	playbackv1 "github.com/lukerops/mserver/gen/playback/v1"
+	storagev1 "github.com/lukerops/mserver/gen/storage/v1"
+	"github.com/lukerops/mserver/internal/kv"
 )
 
 // playSessionTTL is how long the playback session of a PlaySessionId is
@@ -25,9 +24,8 @@ const playSessionTTL = time.Hour
 
 // video is a playable item: a movie or an episode.
 type video struct {
-	item       BaseItemDto
-	locationID uuid.UUID
-	fileID     uuid.UUID
+	item   BaseItemDto
+	fileID string
 }
 
 // lookupVideo finds the movie or episode of the itemId path value. When
@@ -40,10 +38,10 @@ func (p *plugin) lookupVideo(w http.ResponseWriter, r *http.Request) (video, boo
 	switch {
 	case ref.movie != nil:
 		m := ref.movie
-		return video{item: p.movieItem(*m, true), locationID: m.LocationID, fileID: m.FileID}, true
+		return video{item: p.movieItem(m, true), fileID: m.GetFileId()}, true
 	case ref.episode != nil:
 		e := ref.episode
-		return video{item: p.episodeItem(*e, true), locationID: e.LocationID, fileID: e.FileID}, true
+		return video{item: p.episodeItem(e, true), fileID: e.GetFileId()}, true
 	}
 	notFound(w, r, "item is not a movie or an episode")
 	return video{}, false
@@ -79,19 +77,31 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		PlaySessionId: jellyfinID(uuid.NewString()),
 	}
 	for _, source := range v.item.MediaSources {
+		attrs := []slog.Attr{
+			slog.String("item_id", v.item.Id),
+			slog.String("source_id", source.Id),
+			slog.String("container", source.Container),
+		}
 		if info.DeviceProfile == nil {
-			p.log.DebugContext(ctx, "jellyfin: playback info: direct play", "item_id", v.item.Id,
-				"source_id", source.Id, "container", source.Container, "reason", "no device profile")
+			p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback info: direct play",
+				append(attrs, slog.String("reason", "no device profile"))...)
 		} else {
 			d := directPlay(info.DeviceProfile.DirectPlayProfiles, source, audioIndex)
-			args := []any{"item_id", v.item.Id, "source_id", source.Id, "container", source.Container,
-				"video_codec", d.videoCodec, "audio_codec", d.audioCodec, "direct_playable", d.profile >= 0}
+			attrs = append(attrs,
+				slog.String("video_codec", d.videoCodec),
+				slog.String("audio_codec", d.audioCodec),
+				slog.Bool("direct_playable", d.profile >= 0),
+			)
 			if d.profile < 0 {
-				p.log.DebugContext(ctx, "jellyfin: playback info: source rejected",
-					append(args, "reason", d.rejected, "profiles", len(info.DeviceProfile.DirectPlayProfiles))...)
+				p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback info: source rejected",
+					append(attrs,
+						slog.String("reason", d.rejected),
+						slog.Int("profiles", len(info.DeviceProfile.DirectPlayProfiles)),
+					)...)
 				continue
 			}
-			p.log.DebugContext(ctx, "jellyfin: playback info: direct play", append(args, "profile", d.profile)...)
+			p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback info: direct play",
+				append(attrs, slog.Int("profile", d.profile))...)
 		}
 		source.SupportsDirectPlay = true
 		source.SupportsDirectStream = true
@@ -101,10 +111,13 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(res.MediaSources) == 0 {
 		res.ErrorCode = "NoCompatibleStream"
-		logging.Annotate(ctx, "playback_error", res.ErrorCode)
+		annotate(ctx, slog.String("playback_error", res.ErrorCode))
 	}
-	p.log.DebugContext(ctx, "jellyfin: play session created", "item_id", v.item.Id,
-		"play_session_id", res.PlaySessionId, "sources", len(res.MediaSources))
+	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session created",
+		slog.String("item_id", v.item.Id),
+		slog.String("play_session_id", res.PlaySessionId),
+		slog.Int("sources", len(res.MediaSources)),
+	)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -172,9 +185,20 @@ func listAccepts(list, value string) bool {
 	return contains(list, value)
 }
 
+// streamRequestHeaders are the headers of the player forwarded to the
+// storage, for Range requests (seeking) and caching.
+var streamRequestHeaders = []string{"Range", "If-Range", "If-Modified-Since", "If-None-Match"}
+
+// streamResponseHeaders are the headers of the storage forwarded to the
+// player.
+var streamResponseHeaders = []string{
+	"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag",
+}
+
 // stream serves the file of a movie or episode as is, at
 // /Videos/{itemId}/stream or /Videos/{itemId}/stream.{container}, with
-// Range requests (seeking). The content comes from the storage.
+// Range requests (seeking). The content comes from the storage, whose URL
+// for the file the storage module resolves.
 func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	if file := r.PathValue("file"); file != "stream" && !strings.HasPrefix(file, "stream.") {
 		notFound(w, r, "unsupported stream file name")
@@ -193,37 +217,72 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	p.log.DebugContext(ctx, "jellyfin: stream: storage request", "item_id", v.item.Id,
-		"location_id", v.locationID, "file_id", v.fileID, "range", r.Header.Get("Range"))
-	resp, err := p.storage.OpenFile(ctx, r.Method, v.locationID, v.fileID, r.Header)
+	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: storage request",
+		slog.String("item_id", v.item.Id),
+		slog.String("file_id", v.fileID),
+		slog.String("range", r.Header.Get("Range")),
+	)
+	resolved, err := p.storage.ResolveFile(ctx, &storagev1.ResolveFileRequest{Id: v.fileID})
 	switch {
 	case err == nil:
 	case ctx.Err() != nil:
-		p.log.DebugContext(ctx, "jellyfin: stream: client went away", "error", err)
-		logging.Annotate(ctx, "error", "client went away")
 		return
-	case errors.Is(err, storage.ErrNotFound):
-		p.log.WarnContext(ctx, "jellyfin: stream: file not found in storage",
-			"location_id", v.locationID, "file_id", v.fileID, "error", err)
+	case isCode(err, connect.CodeNotFound):
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: file not found in storage",
+			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
 		notFound(w, r, "file not found in storage")
 		return
-	case errors.Is(err, storage.ErrUnavailable):
-		p.log.WarnContext(ctx, "jellyfin: stream: storage unavailable",
-			"location_id", v.locationID, "file_id", v.fileID, "error", err)
+	case isCode(err, connect.CodeUnavailable), isCode(err, connect.CodeFailedPrecondition):
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: storage unavailable",
+			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
 		unavailable(w, r, "storage unavailable")
 		return
 	default:
+		p.internalError(w, r, "resolve file", err)
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, r.Method, resolved.GetUrl(), nil)
+	if err != nil {
 		p.internalError(w, r, "open file", err)
 		return
 	}
+	for _, name := range streamRequestHeaders {
+		if v := r.Header.Get(name); v != "" {
+			req.Header.Set(name, v)
+		}
+	}
+	resp, err := p.files.Do(req)
+	switch {
+	case err == nil:
+	case ctx.Err() != nil:
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: client went away",
+			slog.String("error", err.Error()))
+		annotate(ctx, slog.String("error", "client went away"))
+		return
+	default:
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: storage unavailable",
+			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
+		unavailable(w, r, "storage unavailable")
+		return
+	}
 	defer resp.Body.Close()
-	p.log.DebugContext(ctx, "jellyfin: stream: storage response", "status", resp.StatusCode,
-		"content_length", resp.ContentLength, "content_range", resp.Header.Get("Content-Range"))
+	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: storage response",
+		slog.Int("status", resp.StatusCode),
+		slog.Int64("content_length", resp.ContentLength),
+		slog.String("content_range", resp.Header.Get("Content-Range")),
+	)
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
+		notFound(w, r, "file not found in storage")
+		return
+	case resp.StatusCode >= http.StatusInternalServerError:
+		unavailable(w, r, "storage unavailable")
+		return
+	}
 
 	h := w.Header()
-	for _, name := range []string{
-		"Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag",
-	} {
+	for _, name := range streamResponseHeaders {
 		if v := resp.Header.Get(name); v != "" {
 			h.Set(name, v)
 		}
@@ -237,10 +296,11 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 	case ctx.Err() != nil:
 		// The player went away, e.g. to seek.
-		p.log.DebugContext(ctx, "jellyfin: stream: client disconnected", "bytes", n)
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: client disconnected", slog.Int64("bytes", n))
 	default:
-		p.log.WarnContext(ctx, "jellyfin: stream: copy", "bytes", n, "error", err)
-		logging.Annotate(ctx, "error", "stream copy: "+err.Error())
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: copy",
+			slog.Int64("bytes", n), slog.String("error", err.Error()))
+		annotate(ctx, slog.String("error", "stream copy: "+err.Error()))
 	}
 }
 
@@ -281,11 +341,17 @@ func (p *plugin) playbackReport(w http.ResponseWriter, r *http.Request, kind str
 		return
 	}
 	ctx := r.Context()
-	p.log.DebugContext(ctx, "jellyfin: playback report", "kind", kind, "item_id", report.ItemId,
-		"play_session_id", report.PlaySessionId, "position_ms", positionMs(report),
-		"paused", report.IsPaused, "play_method", report.PlayMethod)
+	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback report",
+		slog.String("kind", kind),
+		slog.String("item_id", report.ItemId),
+		slog.String("play_session_id", report.PlaySessionId),
+		slog.Int64("position_ms", positionMs(report)),
+		slog.Bool("paused", report.IsPaused),
+		slog.String("play_method", report.PlayMethod),
+	)
 	if p.playback == nil {
-		p.log.DebugContext(ctx, "jellyfin: playback report ignored", "reason", "no playback module")
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback report ignored",
+			slog.String("reason", "no playback module"))
 	} else {
 		var err error
 		if kind == reportStop {
@@ -315,19 +381,20 @@ func (p *plugin) pingPlayback(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case err != nil:
 		case !found:
-			p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", "ping",
-				"play_session_id", playSessionID)
+			p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: report for unknown play session",
+				slog.String("kind", "ping"), slog.String("play_session_id", playSessionID))
 		default:
-			p.log.DebugContext(ctx, "jellyfin: playback ping", "play_session_id", playSessionID,
-				"playback_session_id", id)
-			if err = p.playback.Heartbeat(ctx, id); err == nil {
+			p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback ping",
+				slog.String("play_session_id", playSessionID), slog.String("playback_session_id", id))
+			_, err = p.playback.HeartbeatSession(ctx, &playbackv1.HeartbeatSessionRequest{Id: id})
+			if err == nil {
 				err = p.renewMapping(ctx, key, id)
-			} else if errors.Is(err, playback.ErrNotFound) {
-				p.log.DebugContext(ctx, "jellyfin: playback session expired", "play_session_id", playSessionID,
-					"playback_session_id", id)
+			} else if isCode(err, connect.CodeNotFound) {
+				p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback session expired",
+					slog.String("play_session_id", playSessionID), slog.String("playback_session_id", id))
 			}
 		}
-		if err != nil && !errors.Is(err, playback.ErrNotFound) {
+		if err != nil && !isCode(err, connect.CodeNotFound) {
 			p.internalError(w, r, "playback ping", err)
 			return
 		}
@@ -340,33 +407,30 @@ func (p *plugin) pingPlayback(w http.ResponseWriter, r *http.Request) {
 // session.
 func playSessionKey(c caller, playSessionID string) string {
 	if playSessionID == "" {
-		playSessionID = "session-" + c.session.ID.String()
+		playSessionID = "session-" + c.session.GetId()
 	}
-	return "playsessions/" + c.profile.ID.String() + "/" + strings.ToLower(playSessionID)
+	return "playsessions/" + c.profile.GetId() + "/" + strings.ToLower(playSessionID)
 }
 
-// mappedSession returns the playback session of a play session, if any.
-func (p *plugin) mappedSession(ctx context.Context, key string) (uuid.UUID, bool, error) {
+// mappedSession returns the ID of the playback session of a play session,
+// if any.
+func (p *plugin) mappedSession(ctx context.Context, key string) (string, bool, error) {
 	value, err := p.kv.Get(ctx, key)
 	if errors.Is(err, kv.ErrNotFound) {
-		return uuid.Nil, false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return uuid.Nil, false, err
+		return "", false, err
 	}
-	id, err := uuid.ParseBytes(value)
-	if err != nil {
-		return uuid.Nil, false, err
-	}
-	return id, true, nil
+	return string(value), true, nil
 }
 
 // renewMapping extends the life of a play session mapping. A mapping
 // that expired meanwhile is created again.
-func (p *plugin) renewMapping(ctx context.Context, key string, id uuid.UUID) error {
-	err := p.kv.Update(ctx, key, []byte(id.String()), playSessionTTL)
+func (p *plugin) renewMapping(ctx context.Context, key, id string) error {
+	err := p.kv.Update(ctx, key, []byte(id), playSessionTTL)
 	if errors.Is(err, kv.ErrNotFound) {
-		err = p.kv.Create(ctx, key, []byte(id.String()), playSessionTTL)
+		err = p.kv.Create(ctx, key, []byte(id), playSessionTTL)
 		if errors.Is(err, kv.ErrExists) {
 			return nil
 		}
@@ -390,61 +454,75 @@ func (p *plugin) reportPlayback(ctx context.Context, c caller, report PlaybackRe
 		return err
 	}
 	if found {
-		p.log.DebugContext(ctx, "jellyfin: play session found", "play_session_id", report.PlaySessionId,
-			"playback_session_id", id)
-		_, err := p.playback.Progress(ctx, id, playbackrouter.ProgressRequestV1{
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session found",
+			slog.String("play_session_id", report.PlaySessionId), slog.String("playback_session_id", id))
+		_, err := p.playback.ReportProgress(ctx, &playbackv1.ReportProgressRequest{
+			Id:         id,
 			PositionMs: positionMs(report),
 			Paused:     report.IsPaused,
 		})
-		if !errors.Is(err, playback.ErrNotFound) {
+		if !isCode(err, connect.CodeNotFound) {
 			if err != nil {
 				return err
 			}
 			return p.renewMapping(ctx, key, id)
 		}
 		// The playback session timed out: start another one.
-		p.log.DebugContext(ctx, "jellyfin: playback session expired", "play_session_id", report.PlaySessionId,
-			"playback_session_id", id)
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback session expired",
+			slog.String("play_session_id", report.PlaySessionId), slog.String("playback_session_id", id))
 	} else if kind != reportStart {
-		p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", kind,
-			"play_session_id", report.PlaySessionId, "item_id", report.ItemId)
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: report for unknown play session",
+			slog.String("kind", kind),
+			slog.String("play_session_id", report.PlaySessionId),
+			slog.String("item_id", report.ItemId),
+		)
 	}
 
-	sess, ok, err := p.startPlayback(ctx, c, report)
-	if err != nil || !ok {
+	sess, err := p.startPlayback(ctx, c, report)
+	if err != nil || sess == nil {
 		return err
 	}
 	if found {
-		p.log.DebugContext(ctx, "jellyfin: play session mapped", "play_session_id", report.PlaySessionId,
-			"playback_session_id", sess.ID, "replaces", id)
-		return p.renewMapping(ctx, key, sess.ID)
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session mapped",
+			slog.String("play_session_id", report.PlaySessionId),
+			slog.String("playback_session_id", sess.GetId()),
+			slog.String("replaces", id),
+		)
+		return p.renewMapping(ctx, key, sess.GetId())
 	}
-	err = p.kv.Create(ctx, key, []byte(sess.ID.String()), playSessionTTL)
+	err = p.kv.Create(ctx, key, []byte(sess.GetId()), playSessionTTL)
 	if errors.Is(err, kv.ErrExists) {
 		// A concurrent report of the same play session started its own
 		// playback session first: keep that one.
-		p.log.DebugContext(ctx, "jellyfin: play session mapped concurrently", "play_session_id", report.PlaySessionId,
-			"dropped_playback_session_id", sess.ID)
-		if err := p.playback.Stop(ctx, sess.ID, playbackrouter.StopRequestV1{}); err != nil &&
-			!errors.Is(err, playback.ErrNotFound) {
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session mapped concurrently",
+			slog.String("play_session_id", report.PlaySessionId),
+			slog.String("dropped_playback_session_id", sess.GetId()),
+		)
+		if _, err := p.playback.StopSession(ctx, &playbackv1.StopSessionRequest{Id: sess.GetId()}); err != nil &&
+			!isCode(err, connect.CodeNotFound) {
 			return err
 		}
 		return p.reportPlayback(ctx, c, report, kind)
 	}
 	if err == nil {
-		p.log.DebugContext(ctx, "jellyfin: play session mapped", "play_session_id", report.PlaySessionId,
-			"playback_session_id", sess.ID)
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session mapped",
+			slog.String("play_session_id", report.PlaySessionId),
+			slog.String("playback_session_id", sess.GetId()),
+		)
 	}
 	return err
 }
 
 // startPlayback starts a playback session for the item of a report. It
-// returns false if the item is not a movie or an episode.
-func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackReport) (playbackrouter.PlaybackSessionV1, bool, error) {
-	ignored := func(reason string) (playbackrouter.PlaybackSessionV1, bool, error) {
-		p.log.DebugContext(ctx, "jellyfin: playback report ignored", "reason", reason,
-			"item_id", report.ItemId, "play_session_id", report.PlaySessionId)
-		return playbackrouter.PlaybackSessionV1{}, false, nil
+// returns nil if the item is not a movie or an episode.
+func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackReport) (*playbackv1.Session, error) {
+	ignored := func(reason string) (*playbackv1.Session, error) {
+		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: playback report ignored",
+			slog.String("reason", reason),
+			slog.String("item_id", report.ItemId),
+			slog.String("play_session_id", report.PlaySessionId),
+		)
+		return nil, nil
 	}
 	itemID, err := uuid.Parse(report.ItemId)
 	if err != nil {
@@ -455,30 +533,33 @@ func (p *plugin) startPlayback(ctx context.Context, c caller, report PlaybackRep
 	}
 	ref, err := p.findItem(ctx, itemID)
 	if err != nil {
-		return playbackrouter.PlaybackSessionV1{}, false, err
+		return nil, err
 	}
-	var fileID uuid.UUID
+	var fileID string
 	switch {
 	case ref.movie != nil:
-		fileID = ref.movie.FileID
+		fileID = ref.movie.GetFileId()
 	case ref.episode != nil:
-		fileID = ref.episode.FileID
+		fileID = ref.episode.GetFileId()
 	default:
 		return ignored("item is not a movie or an episode")
 	}
-	sess, err := p.playback.CreateSession(ctx, playbackrouter.CreatePlaybackSessionRequestV1{
-		AccountID: c.session.AccountID,
-		ProfileID: c.session.ProfileID,
-		DeviceID:  c.session.DeviceID,
-		ItemID:    itemID,
-		FileID:    fileID,
+	res, err := p.playback.StartSession(ctx, &playbackv1.StartSessionRequest{
+		AccountId: c.session.GetAccountId(),
+		ProfileId: c.session.GetProfileId(),
+		DeviceId:  c.session.GetDeviceId(),
+		ItemId:    itemID.String(),
+		FileId:    fileID,
 		// Every source is served as is: direct play and direct stream
 		// (the file through /Videos/{id}/stream) are both direct play.
 		PlayMethod: "direct_play",
 		PositionMs: positionMs(report),
 		Paused:     report.IsPaused,
 	})
-	return sess, err == nil, err
+	if err != nil {
+		return nil, err
+	}
+	return res.GetSession(), nil
 }
 
 // stopPlayback stops the playback session of a play session, if any.
@@ -489,18 +570,21 @@ func (p *plugin) stopPlayback(ctx context.Context, c caller, report PlaybackRepo
 		return err
 	}
 	if !found {
-		p.log.WarnContext(ctx, "jellyfin: report for unknown play session", "kind", reportStop,
-			"play_session_id", report.PlaySessionId, "item_id", report.ItemId)
+		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: report for unknown play session",
+			slog.String("kind", reportStop),
+			slog.String("play_session_id", report.PlaySessionId),
+			slog.String("item_id", report.ItemId),
+		)
 		return nil
 	}
-	p.log.DebugContext(ctx, "jellyfin: play session stopped", "play_session_id", report.PlaySessionId,
-		"playback_session_id", id)
-	req := playbackrouter.StopRequestV1{}
+	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: play session stopped",
+		slog.String("play_session_id", report.PlaySessionId), slog.String("playback_session_id", id))
+	req := &playbackv1.StopSessionRequest{Id: id}
 	if report.PositionTicks != nil {
 		pos := positionMs(report)
 		req.PositionMs = &pos
 	}
-	if err := p.playback.Stop(ctx, id, req); err != nil && !errors.Is(err, playback.ErrNotFound) {
+	if _, err := p.playback.StopSession(ctx, req); err != nil && !isCode(err, connect.CodeNotFound) {
 		return err
 	}
 	if err := p.kv.Delete(ctx, key); err != nil && !errors.Is(err, kv.ErrNotFound) {

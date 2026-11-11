@@ -3,7 +3,6 @@ package jellyfin_test
 import (
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -13,37 +12,25 @@ import (
 
 	"github.com/google/uuid"
 
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
+	storagev1 "github.com/lukerops/mserver/gen/storage/v1"
 	"github.com/lukerops/mserver/internal/clients"
-	"github.com/lukerops/mserver/internal/infra/ffmpeg/ffmpegtest"
-	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/identity"
-	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
-	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
-	"github.com/lukerops/mserver/internal/modules/library"
-	libraryclient "github.com/lukerops/mserver/internal/modules/library/client"
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
-	"github.com/lukerops/mserver/internal/modules/playback"
-	playbackclient "github.com/lukerops/mserver/internal/modules/playback/client"
-	"github.com/lukerops/mserver/internal/modules/storage"
-	storageclient "github.com/lukerops/mserver/internal/modules/storage/client"
-	storagerouter "github.com/lukerops/mserver/internal/modules/storage/router"
-	"github.com/lukerops/mserver/plugins/api/jellyfin"
 )
 
 // startWithMovies serves the plugin on identity, storage and library
 // modules, with a movie library holding two analyzed movies. It returns
 // the client, the authorization of a logged in user and the library.
-func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
+func startWithMovies(t *testing.T) (client, string, *libraryv1.Library) {
 	t.Helper()
 	return startWithLibrary(t, "Filmes", "movies",
 		[]string{"Heat (1995).mkv", "Heat (1995).en.srt", "Alien (1979)/Alien.mkv"},
 		func(c clients.Clients) (bool, any) {
-			page, err := c.Library.ListMovies(t.Context(), uuid.Nil, libraryrouter.MovieQueryV1{})
+			res, err := c.Library.ListMovies(t.Context(), &libraryv1.ListMoviesRequest{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			return len(page.Movies) == 2 && page.Movies[0].MediaInfo != nil && page.Movies[1].MediaInfo != nil, page
+			movies := res.GetMovies()
+			return len(movies) == 2 && movies[0].GetMediaInfo() != nil && movies[1].GetMediaInfo() != nil, movies
 		})
 }
 
@@ -52,69 +39,23 @@ func startWithMovies(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 // .mkv, subtitles otherwise). It waits until ready reports that the files
 // are cataloged (and returns what to report otherwise). It returns the
 // client, the authorization of a logged in user and the library.
-func startWithLibrary(t *testing.T, name, mediaType string, files []string, ready func(clients.Clients) (bool, any)) (client, string, libraryrouter.LibraryV1) {
+func startWithLibrary(t *testing.T, name, mediaType string, files []string, ready func(clients.Clients) (bool, any)) (client, string, *libraryv1.Library) {
 	t.Helper()
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
-	t.Setenv("MSERVER_FFPROBE_PATH", ffmpegtest.FFprobe(t))
+	t.Setenv("MSERVER_FFPROBE_PATH", ffprobePath(t))
 	ctx := t.Context()
-	dir := t.TempDir()
 
-	mux := http.NewServeMux()
-	modules := httptest.NewServer(mux)
-	t.Cleanup(modules.Close)
-	c := clients.Clients{
-		Identity: identityclient.New(modules.Client(), modules.URL),
-		Storage:  storageclient.New(modules.Client(), modules.URL),
-		Library:  libraryclient.New(modules.Client(), modules.URL),
-		Playback: playbackclient.New(modules.Client(), modules.URL),
-	}
-	bus := memory.New()
-	ident, err := identity.New(ctx, dir, bus, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ident.Close() })
-	lib, err := library.New(ctx, dir, bus, bus, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { lib.Close() })
-	stor, err := storage.New(ctx, dir, bus, c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { stor.Close() })
-	pb, err := playback.New(ctx, dir, bus, kvmemory.New(), c, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { pb.Close() })
-	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, m := range []*http.ServeMux{ident.Mux, lib.Mux, stor.Mux, pb.Mux} {
-			if _, pattern := m.Handler(r); pattern != "" {
-				m.ServeHTTP(w, r)
-				return
-			}
-		}
-		http.NotFound(w, r)
-	}))
-
-	_, err = c.Identity.Setup(ctx, identityrouter.SetupRequestV1{
-		Username: "admin",
-		Email:    "admin@example.com",
-		Password: password,
-		Profile:  identityrouter.NewProfileV1{Handle: "lucas", DisplayName: "Lucas"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	e := newEnv(t)
+	e.startIdentity()
+	e.startCatalog()
+	c := e.clients
 
 	media := t.TempDir()
 	old := time.Now().Add(-time.Hour)
 	for _, f := range files {
 		p := filepath.Join(media, f)
 		if filepath.Ext(p) == ".mkv" {
-			ffmpegtest.WriteMovie(t, p)
+			writeMovie(t, p)
 		} else if err := os.WriteFile(p, []byte("1\n00:00:00,000 --> 00:00:01,000\nHello\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -122,17 +63,17 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 			t.Fatal(err)
 		}
 	}
-	loc, err := c.Storage.CreateLocation(ctx, storagerouter.CreateLocationRequestV1{
+	loc, err := c.Storage.CreateLocation(ctx, &storagev1.CreateLocationRequest{
 		Driver: "local", Options: map[string]string{"dir": media},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Storage.ScanLocation(ctx, loc.ID); err != nil {
+	if _, err := c.Storage.ScanLocation(ctx, &storagev1.ScanLocationRequest{Id: loc.GetLocation().GetId()}); err != nil {
 		t.Fatal(err)
 	}
-	created, err := c.Library.CreateLibrary(ctx, libraryrouter.CreateLibraryRequestV1{
-		Name: name, MediaType: mediaType, LocationIDs: []uuid.UUID{loc.ID},
+	created, err := c.Library.CreateLibrary(ctx, &libraryv1.CreateLibraryRequest{
+		Name: name, MediaType: mediaType, LocationIds: []string{loc.GetLocation().GetId()},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -148,14 +89,13 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	srv := httptest.NewServer(jellyfin.New(c, nil, nil))
-	t.Cleanup(srv.Close)
+	srv := serve(t, c)
 	jc := client{t: t, base: srv.URL, modules: c}
 
 	var auth struct{ AccessToken string }
 	jc.expect("POST", "/Users/AuthenticateByName", authHeader,
 		map[string]string{"Username": "admin#lucas", "Pw": password}, &auth, http.StatusOK)
-	return jc, authHeader + `, Token="` + auth.AccessToken + `"`, created
+	return jc, authHeader + `, Token="` + auth.AccessToken + `"`, created.GetLibrary()
 }
 
 type mediaStream struct {
@@ -192,11 +132,11 @@ type itemsResult struct {
 	StartIndex       int
 }
 
-func hex(id uuid.UUID) string { return strings.ReplaceAll(id.String(), "-", "") }
+func hex(id string) string { return strings.ReplaceAll(id, "-", "") }
 
 func TestMovieNavigation(t *testing.T) {
 	c, token, lib := startWithMovies(t)
-	libID := hex(lib.ID)
+	libID := hex(lib.GetId())
 
 	c.expect("GET", "/Items", "", nil, nil, http.StatusUnauthorized)
 
@@ -267,7 +207,7 @@ func TestMovieNavigation(t *testing.T) {
 	var movie item
 	c.expect("GET", "/Items/"+heat.Id+"?userId=x", token, nil, &movie, http.StatusOK)
 	if movie.Type != "Movie" || movie.Name != "Heat" || movie.ProductionYear != 1995 ||
-		movie.RunTimeTicks < ffmpegtest.MovieMinDurationMs*10_000 || movie.Container != "mkv" || movie.MediaType != "Video" ||
+		movie.RunTimeTicks < movieMinDurationMs*10_000 || movie.Container != "mkv" || movie.MediaType != "Video" ||
 		movie.UserData.Key != movie.Id || len(movie.MediaSources) != 1 || len(movie.MediaStreams) != 2 {
 		t.Fatalf("movie = %+v", movie)
 	}
@@ -278,7 +218,7 @@ func TestMovieNavigation(t *testing.T) {
 		t.Errorf("media source = %+v", src)
 	}
 	video, audio := movie.MediaStreams[0], movie.MediaStreams[1]
-	if video.Type != "Video" || video.DisplayTitle != "1080p H264 SDR" || video.Width != ffmpegtest.MovieWidth {
+	if video.Type != "Video" || video.DisplayTitle != "1080p H264 SDR" || video.Width != movieWidth {
 		t.Errorf("video = %+v", video)
 	}
 	if audio.Type != "Audio" || audio.DisplayTitle != "English - AAC - Stereo - Default" || audio.Index != 1 {
@@ -290,15 +230,15 @@ func TestMovieNavigation(t *testing.T) {
 	if folder.Type != "CollectionFolder" || folder.Id != libID {
 		t.Errorf("library item = %+v", folder)
 	}
-	c.expect("GET", "/Items/"+hex(uuid.New()), token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Items/"+hex(uuid.NewString()), token, nil, nil, http.StatusNotFound)
 
 	// The legacy route jellyfin-web loads the movie page from.
 	var legacy item
-	c.expect("GET", "/Users/"+hex(uuid.New())+"/Items/"+heat.Id, token, nil, &legacy, http.StatusOK)
+	c.expect("GET", "/Users/"+hex(uuid.NewString())+"/Items/"+heat.Id, token, nil, &legacy, http.StatusOK)
 	if legacy.Id != heat.Id || legacy.Type != "Movie" || len(legacy.MediaSources) != 1 {
 		t.Errorf("legacy item = %+v", legacy)
 	}
-	c.expect("GET", "/Users/"+hex(uuid.New())+"/Items/"+hex(uuid.New()), token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Users/"+hex(uuid.NewString())+"/Items/"+hex(uuid.NewString()), token, nil, nil, http.StatusNotFound)
 
 	var ancestors []item
 	c.expect("GET", "/Items/"+heat.Id+"/Ancestors", token, nil, &ancestors, http.StatusOK)
@@ -309,7 +249,7 @@ func TestMovieNavigation(t *testing.T) {
 	if ancestors == nil || len(ancestors) != 0 {
 		t.Errorf("library ancestors = %+v", ancestors)
 	}
-	c.expect("GET", "/Items/"+hex(uuid.New())+"/Ancestors", token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Items/"+hex(uuid.NewString())+"/Ancestors", token, nil, nil, http.StatusNotFound)
 
 	var theme struct {
 		ThemeVideosResult, ThemeSongsResult, SoundtrackSongsResult *struct {
@@ -323,7 +263,7 @@ func TestMovieNavigation(t *testing.T) {
 		v.Items == nil || len(v.Items) != 0 || v.OwnerId != heat.Id || s.Items == nil || len(s.Items) != 0 {
 		t.Errorf("theme media = %+v", theme)
 	}
-	c.expect("GET", "/Items/"+hex(uuid.New())+"/ThemeMedia", token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Items/"+hex(uuid.NewString())+"/ThemeMedia", token, nil, nil, http.StatusNotFound)
 
 	var intros itemsResult
 	c.expect("GET", "/Items/"+heat.Id+"/Intros", token, nil, &intros, http.StatusOK)
@@ -393,7 +333,7 @@ func TestMovieNavigation(t *testing.T) {
 	if collections.Items == nil || len(collections.Items) != 0 {
 		t.Errorf("collections = %+v", collections)
 	}
-	c.expect("GET", "/Items/"+hex(uuid.New())+"/Collections", token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Items/"+hex(uuid.NewString())+"/Collections", token, nil, nil, http.StatusNotFound)
 	c.expect("GET", "/Studios", "", nil, nil, http.StatusUnauthorized)
 	c.expect("GET", "/Items/Filters", "", nil, nil, http.StatusUnauthorized)
 	c.expect("GET", "/Items/Filters2", "", nil, nil, http.StatusUnauthorized)

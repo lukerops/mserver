@@ -1,38 +1,54 @@
 package jellyfin
 
 import (
-	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
+	"connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 
-	library "github.com/lukerops/mserver/internal/modules/library/client"
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
 )
 
 // lookupSeries finds the series of the seriesId path value. When there is
-// none, it answers 404 and returns false.
-func (p *plugin) lookupSeries(w http.ResponseWriter, r *http.Request) (libraryrouter.SeriesV1, bool) {
+// none, it answers 404 and returns nil.
+func (p *plugin) lookupSeries(w http.ResponseWriter, r *http.Request) *libraryv1.Series {
 	id, err := uuid.Parse(r.PathValue("seriesId"))
 	if err != nil {
 		notFound(w, r, "invalid seriesId")
-		return libraryrouter.SeriesV1{}, false
+		return nil
 	}
 	if p.library == nil {
 		notFound(w, r, "series not found: no library module")
-		return libraryrouter.SeriesV1{}, false
+		return nil
 	}
-	s, err := p.library.GetSeries(r.Context(), uuid.Nil, id)
-	if errors.Is(err, library.ErrNotFound) {
+	res, err := p.library.GetSeries(r.Context(), &libraryv1.GetSeriesRequest{Id: id.String()})
+	if isCode(err, connect.CodeNotFound) {
 		notFound(w, r, "series not found")
-		return libraryrouter.SeriesV1{}, false
+		return nil
 	}
 	if err != nil {
 		p.internalError(w, r, "get series", err)
-		return libraryrouter.SeriesV1{}, false
+		return nil
 	}
-	return s, true
+	return res.GetSeries()
+}
+
+// listSeasons lists the seasons of a series. A series removed meanwhile
+// has no seasons.
+func (p *plugin) listSeasons(r *http.Request, series *libraryv1.Series) ([]*libraryv1.Season, error) {
+	res, err := p.library.ListSeasons(r.Context(), &libraryv1.ListSeasonsRequest{
+		LibraryId: series.GetLibraryId(),
+		SeriesId:  series.GetId(),
+	})
+	if isCode(err, connect.CodeNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return res.GetSeasons(), nil
 }
 
 // seasons lists the seasons of a series by number, the specials (season
@@ -42,21 +58,19 @@ func (p *plugin) seasons(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	series, ok := p.lookupSeries(w, r)
-	if !ok {
+	series := p.lookupSeries(w, r)
+	if series == nil {
 		return
 	}
 	q := lowerQuery(r)
-	seasons, err := p.library.ListSeasons(r.Context(), series.LibraryID, series.ID, libraryrouter.SeasonQueryV1{})
-	if errors.Is(err, library.ErrNotFound) {
-		seasons = nil // the series was removed meanwhile
-	} else if err != nil {
+	seasons, err := p.listSeasons(r, series)
+	if err != nil {
 		p.internalError(w, r, "list seasons", err)
 		return
 	}
 	res := BaseItemDtoQueryResult{Items: []any{}}
 	for _, s := range seasons {
-		if special := q["isspecialseason"]; special != "" && isTrue(special) != (s.Number == 0) {
+		if special := q["isspecialseason"]; special != "" && isTrue(special) != (s.GetNumber() == 0) {
 			continue
 		}
 		res.Items = append(res.Items, p.seasonItem(s))
@@ -73,8 +87,8 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	if _, ok := p.authenticate(w, r); !ok {
 		return
 	}
-	series, ok := p.lookupSeries(w, r)
-	if !ok {
+	series := p.lookupSeries(w, r)
+	if series == nil {
 		return
 	}
 	q := lowerQuery(r)
@@ -90,7 +104,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var seasonID uuid.UUID
+	var seasonID string
 	switch {
 	case q["seasonid"] != "":
 		id, err := uuid.Parse(q["seasonid"])
@@ -98,30 +112,34 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 			badRequest(w, r, "invalid seasonId")
 			return
 		}
-		seasonID = id
+		seasonID = id.String()
 	case q["season"] != "":
 		number, err := strconv.Atoi(q["season"])
 		if err != nil {
 			badRequest(w, r, "invalid season")
 			return
 		}
-		seasons, err := p.library.ListSeasons(r.Context(), series.LibraryID, series.ID, libraryrouter.SeasonQueryV1{})
-		if err != nil && !errors.Is(err, library.ErrNotFound) {
+		seasons, err := p.listSeasons(r, series)
+		if err != nil {
 			p.internalError(w, r, "list seasons", err)
 			return
 		}
 		for _, s := range seasons {
-			if s.Number == number {
-				seasonID = s.ID
+			if int(s.GetNumber()) == number {
+				seasonID = s.GetId()
 			}
 		}
-		if seasonID == uuid.Nil {
+		if seasonID == "" {
 			writeJSON(w, http.StatusOK, empty)
 			return
 		}
 	}
-	page, err := p.library.ListEpisodes(r.Context(), series.LibraryID, series.ID, seasonID, libraryrouter.EpisodeQueryV1{})
-	if errors.Is(err, library.ErrNotFound) {
+	episodes, _, err := p.listEpisodes(r.Context(), itemQuery{
+		libraryID: series.GetLibraryId(),
+		seriesID:  series.GetId(),
+		seasonID:  seasonID,
+	}, 0, 0)
+	if isCode(err, connect.CodeNotFound) {
 		// The season is not of the series, or was removed meanwhile.
 		writeJSON(w, http.StatusOK, empty)
 		return
@@ -130,7 +148,6 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 		p.internalError(w, r, "list episodes", err)
 		return
 	}
-	episodes := page.Episodes
 	if s := q["startitemid"]; s != "" {
 		id, err := uuid.Parse(s)
 		if err != nil {
@@ -138,7 +155,7 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for i, e := range episodes {
-			if e.ID == id {
+			if e.GetId() == id.String() {
 				episodes = episodes[i:]
 				break
 			}
@@ -146,8 +163,14 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	}
 
 	full := wantsField(q, "MediaSources") || wantsField(q, "MediaStreams")
-	p.log.DebugContext(r.Context(), "jellyfin: episodes query", "series_id", series.ID, "season_id", seasonID,
-		"start_item_id", q["startitemid"], "start_index", start, "limit", limit, "total", len(episodes))
+	p.log.LogAttrs(r.Context(), slog.LevelDebug, "jellyfin: episodes query",
+		slog.String("series_id", series.GetId()),
+		slog.String("season_id", seasonID),
+		slog.String("start_item_id", q["startitemid"]),
+		slog.Int("start_index", start),
+		slog.Int("limit", limit),
+		slog.Int("total", len(episodes)),
+	)
 	res := BaseItemDtoQueryResult{Items: []any{}, TotalRecordCount: len(episodes), StartIndex: start}
 	for _, e := range paginate(episodes, start, limit) {
 		res.Items = append(res.Items, p.episodeItem(e, full))

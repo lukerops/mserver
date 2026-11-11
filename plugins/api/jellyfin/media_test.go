@@ -3,43 +3,41 @@ package jellyfin
 import (
 	"testing"
 
-	"github.com/google/uuid"
-
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
 )
 
 func TestDisplayTitle(t *testing.T) {
 	for _, tt := range []struct {
-		stream libraryrouter.StreamV1
+		stream *libraryv1.Stream
 		want   string
 	}{
-		{libraryrouter.StreamV1{Type: "video", Codec: "h264", Width: 1920, Height: 1080}, "1080p H264 SDR"},
-		{libraryrouter.StreamV1{Type: "video", Codec: "hevc", Width: 3840, Height: 1600, ColorTransfer: "smpte2084"}, "4K HEVC HDR"},
-		{libraryrouter.StreamV1{Type: "video", Codec: "mpeg2video", Width: 720, Height: 480, Interlaced: true}, "480i MPEG2VIDEO SDR"},
-		{libraryrouter.StreamV1{Type: "audio", Codec: "aac", Language: "eng", Channels: 2, Default: true}, "English - AAC - Stereo - Default"},
-		{libraryrouter.StreamV1{Type: "audio", Codec: "eac3", Language: "xyz", Channels: 6}, "XYZ - EAC3 - 5.1"},
-		{libraryrouter.StreamV1{Type: "audio", Codec: "dts", Title: "Commentary", Channels: 3, ChannelLayout: "2.1"}, "Commentary - DTS - 2.1"},
-		{libraryrouter.StreamV1{Type: "subtitle", Codec: "subrip", Language: "por", Forced: true}, "Portuguese - SUBRIP - Forced"},
-		{libraryrouter.StreamV1{Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "und"}, "HDMV_PGS_SUBTITLE"},
+		{&libraryv1.Stream{Type: "video", Codec: "h264", Width: 1920, Height: 1080}, "1080p H264 SDR"},
+		{&libraryv1.Stream{Type: "video", Codec: "hevc", Width: 3840, Height: 1600, ColorTransfer: "smpte2084"}, "4K HEVC HDR"},
+		{&libraryv1.Stream{Type: "video", Codec: "mpeg2video", Width: 720, Height: 480, Interlaced: true}, "480i MPEG2VIDEO SDR"},
+		{&libraryv1.Stream{Type: "audio", Codec: "aac", Language: "eng", Channels: 2, Default: true}, "English - AAC - Stereo - Default"},
+		{&libraryv1.Stream{Type: "audio", Codec: "eac3", Language: "xyz", Channels: 6}, "XYZ - EAC3 - 5.1"},
+		{&libraryv1.Stream{Type: "audio", Codec: "dts", Title: "Commentary", Channels: 3, ChannelLayout: "2.1"}, "Commentary - DTS - 2.1"},
+		{&libraryv1.Stream{Type: "subtitle", Codec: "subrip", Language: "por", Forced: true}, "Portuguese - SUBRIP - Forced"},
+		{&libraryv1.Stream{Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "und"}, "HDMV_PGS_SUBTITLE"},
 	} {
 		if got := mediaStream(tt.stream).DisplayTitle; got != tt.want {
-			t.Errorf("displayTitle(%+v) = %q, want %q", tt.stream, got, tt.want)
+			t.Errorf("displayTitle(%v) = %q, want %q", tt.stream, got, tt.want)
 		}
 	}
 }
 
 func TestMovieItem(t *testing.T) {
 	p := &plugin{}
-	m := libraryrouter.MovieV1{
-		ID:        uuid.MustParse("0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b"),
-		LibraryID: uuid.MustParse("0198a1b2-c3d4-7e5f-8a9b-000000000001"),
+	m := &libraryv1.Movie{
+		Id:        "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
+		LibraryId: "0198a1b2-c3d4-7e5f-8a9b-000000000001",
 		Path:      "Alien (1979)/Alien.MKV",
 		Title:     "Alien",
 		SortTitle: "alien",
 		Year:      1979,
-		MediaInfo: &libraryrouter.MediaInfoV1{
+		MediaInfo: &libraryv1.MediaInfo{
 			DurationMs: 1500, Size: 100, BitRate: 2000,
-			Streams: []libraryrouter.StreamV1{
+			Streams: []*libraryv1.Stream{
 				{Index: 0, Type: "video", Codec: "h264", Width: 1280, Height: 720},
 				{Index: 1, Type: "audio", Codec: "aac"},
 				{Index: 2, Type: "audio", Codec: "ac3", Default: true},

@@ -7,7 +7,16 @@ import (
 	"testing"
 
 	"github.com/lukerops/mserver/internal/clients"
+	kvmemory "github.com/lukerops/mserver/internal/kv/memory"
 )
+
+// newPlugin returns a plugin without modules, on an in-memory kv store.
+func newPlugin(t *testing.T) *http.ServeMux {
+	t.Helper()
+	st := kvmemory.New()
+	t.Cleanup(func() { st.Close() })
+	return New(clients.Clients{}, st, nil, nil)
+}
 
 func TestRequestAuthorization(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
@@ -59,7 +68,7 @@ func TestServerIDIsFixed(t *testing.T) {
 		t.Fatalf("server id = %q", serverID)
 	}
 	rec := httptest.NewRecorder()
-	New(clients.Clients{}, nil, nil).ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
+	newPlugin(t).ServeHTTP(rec, httptest.NewRequest("GET", "/System/Info/Public", nil))
 	if !strings.Contains(rec.Body.String(), `"Id":"`+serverID+`"`) {
 		t.Fatalf("body = %s", rec.Body)
 	}
@@ -85,7 +94,7 @@ func TestEndpoint(t *testing.T) {
 }
 
 func TestLocalAddressHasMountPath(t *testing.T) {
-	mux := New(clients.Clients{}, nil, nil)
+	mux := newPlugin(t)
 	root := http.NewServeMux()
 	root.Handle("/plugins/jellyfin/", http.StripPrefix("/plugins/jellyfin", mux))
 

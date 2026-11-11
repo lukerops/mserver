@@ -5,13 +5,15 @@
 //
 // The modules register their ConnectRPC services on the one server. Only
 // the migrated modules (identity, storage, library and playback) exist
-// yet; the others are added as they are migrated.
+// yet; the others are added as they are migrated. The API plugins (so far
+// the jellyfin, under /plugins/jellyfin) call the modules through their
+// clients.
 //
 // Variables:
 //
 //	MSERVER_HTTP_ADDR            HTTP listen address (default ":8096")
 //	MSERVER_MODULES              "all" or a comma-separated list of the
-//	                             modules to run (default all)
+//	                             modules and plugins to run (default all)
 //	MSERVER_DB_DRIVER            sqlite or postgres (default sqlite)
 //	MSERVER_DATA_DIR             directory of the SQLite databases
 //	                             (default "data")
@@ -19,9 +21,10 @@
 //	MSERVER_STORAGE_PUBLIC_URL   address of this server as the readers of
 //	                             the files reach it (default: the listen
 //	                             address, on the loopback)
-//	MSERVER_STORAGE_URL          address of the storage when it runs in
-//	                             another instance (default: the storage
-//	                             module of this process)
+//	MSERVER_<MODULE>_URL         address of a module (IDENTITY, STORAGE,
+//	                             LIBRARY or PLAYBACK) when it runs in
+//	                             another instance (default: the module of
+//	                             this process)
 //	MSERVER_LOG_LEVEL            debug, info, warn or error (default info)
 //	MSERVER_LOG_FORMAT           text or json (default text)
 //
@@ -29,8 +32,8 @@
 // and MSERVER_FFPROBE_PATH in the storage, MSERVER_PLAYBACK_SESSION_TIMEOUT
 // in the playback).
 //
-// The shared state of the playback sessions lives in memory
-// (internal/kv/memory), so a single instance of the playback runs.
+// The shared state of the playback sessions and of the jellyfin plugin
+// lives in memory (internal/kv/memory), so a single instance of each runs.
 package main
 
 import (
@@ -58,6 +61,7 @@ import (
 	"github.com/lukerops/mserver/internal/modules/playback"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
+	"github.com/lukerops/mserver/plugins/api/jellyfin"
 )
 
 func main() {
@@ -171,6 +175,19 @@ func run(ctx context.Context) error {
 		defer closeModule(log, "playback", pb.Close)
 	}
 
+	// The plugins start after the modules they call.
+	if enabled["jellyfin"] {
+		c, err := newClients(rpc, enabled, log)
+		if err != nil {
+			return fmt.Errorf("jellyfin: %w", err)
+		}
+		state := kvmemory.New()
+		defer state.Close()
+
+		jf := jellyfin.New(c, state, nil, log.With(slog.String("plugin", "jellyfin")))
+		mount(mux, "/plugins/jellyfin", jf)
+	}
+
 	connecthttp.Mount(mux, rpc)
 
 	srv := newHTTPServer(mux, log)
@@ -208,8 +225,8 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 	}
 }
 
-// available are the modules migrated to ConnectRPC.
-var available = []string{"identity", "storage", "library", "playback"}
+// available are the modules migrated to ConnectRPC, and the plugins.
+var available = []string{"identity", "storage", "library", "playback", "jellyfin"}
 
 // parseModules parses MSERVER_MODULES: "all" (or empty) or a
 // comma-separated list of modules.
@@ -239,6 +256,11 @@ func localURL(addr net.Addr) string {
 		host = "127.0.0.1"
 	}
 	return "http://" + net.JoinHostPort(host, port)
+}
+
+// mount serves h under prefix, with the prefix removed from the path.
+func mount(mux *http.ServeMux, prefix string, h http.Handler) {
+	mux.Handle(prefix+"/", http.StripPrefix(prefix, h))
 }
 
 func closeModule(log *slog.Logger, name string, closeFn func() error) {

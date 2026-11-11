@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	"github.com/lukerops/mserver/internal/clients"
-	"github.com/lukerops/mserver/internal/infra/logging"
+	kvmemory "github.com/lukerops/mserver/internal/kv/memory"
 )
 
 // logRecords decodes the JSON records written to buf.
@@ -41,8 +41,10 @@ func findRecord(recs []map[string]any, msg string) map[string]any {
 
 func TestUnknownRoutes(t *testing.T) {
 	var buf bytes.Buffer
-	log := slog.New(logging.NewHandler(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	h := logging.Handler(log, New(clients.Clients{}, nil, log))
+	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	st := kvmemory.New()
+	t.Cleanup(func() { st.Close() })
+	h := New(clients.Clients{}, st, nil, log)
 
 	for _, tc := range []struct {
 		method, path string

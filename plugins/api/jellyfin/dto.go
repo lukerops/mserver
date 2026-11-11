@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
+	identityv1 "github.com/lukerops/mserver/gen/identity/v1"
 )
 
 // The DTOs follow the schemas of the Jellyfin 12.4.0 OpenAPI. Field names
@@ -453,12 +453,12 @@ type UtcTimeResponse struct {
 
 // userDto maps a profile to a Jellyfin user: a Jellyfin user is a profile,
 // and its id is the profile id.
-func (p *plugin) userDto(account identityrouter.AccountV1, profile identityrouter.ProfileV1) UserDto {
+func (p *plugin) userDto(account *identityv1.Account, profile *identityv1.Profile) UserDto {
 	return UserDto{
-		Name:                  profile.DisplayName,
+		Name:                  profile.GetDisplayName(),
 		ServerId:              serverID,
 		ServerName:            serverName,
-		Id:                    jellyfinID(profile.ID.String()),
+		Id:                    jellyfinID(profile.GetId()),
 		HasPassword:           true,
 		HasConfiguredPassword: true,
 		Configuration: UserConfiguration{
@@ -476,7 +476,7 @@ func (p *plugin) userDto(account identityrouter.AccountV1, profile identityroute
 		Policy: UserPolicy{
 			// To Jellyfin evereone isn't admin
 			IsAdministrator:                  false,
-			IsDisabled:                       account.Disabled,
+			IsDisabled:                       account.GetDisabled(),
 			BlockedTags:                      []string{},
 			AllowedTags:                      []string{},
 			EnableUserPreferenceAccess:       true,
@@ -506,11 +506,11 @@ func (p *plugin) userDto(account identityrouter.AccountV1, profile identityroute
 
 // sessionInfoDto describes a session. The device data comes from the
 // authorization of the request.
-func (p *plugin) sessionInfoDto(session identityrouter.SessionV1, profile identityrouter.ProfileV1, a authorization) SessionInfoDto {
+func (p *plugin) sessionInfoDto(session *identityv1.Session, profile *identityv1.Profile, a authorization) SessionInfoDto {
 	return SessionInfoDto{
-		Id:                 jellyfinID(session.ID.String()),
-		UserId:             jellyfinID(profile.ID.String()),
-		UserName:           profile.DisplayName,
+		Id:                 jellyfinID(session.GetId()),
+		UserId:             jellyfinID(profile.GetId()),
+		UserName:           profile.GetDisplayName(),
 		Client:             a.Client,
 		LastActivityDate:   time.Now().UTC(),
 		DeviceName:         a.Device,

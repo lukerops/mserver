@@ -9,10 +9,7 @@ import (
 	"testing"
 
 	"github.com/lukerops/mserver/internal/clients"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/identity"
-	identityclient "github.com/lukerops/mserver/internal/modules/identity/client"
-	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
+	kvmemory "github.com/lukerops/mserver/internal/kv/memory"
 	"github.com/lukerops/mserver/plugins/api/jellyfin"
 )
 
@@ -28,33 +25,24 @@ type client struct {
 	modules clients.Clients
 }
 
+// serve starts the plugin on the clients of the modules, on its own
+// in-memory kv store.
+func serve(t *testing.T, c clients.Clients) *httptest.Server {
+	t.Helper()
+	st := kvmemory.New()
+	t.Cleanup(func() { st.Close() })
+	srv := httptest.NewServer(jellyfin.New(c, st, nil, nil))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // start serves the plugin on an identity with the account admin and the
-// profile lucas. The identity runs behind its own HTTP server, as it
-// would in another process.
+// profile lucas, the only module it has.
 func start(t *testing.T) client {
 	t.Helper()
-	dir := t.TempDir()
-	ident, err := identity.New(t.Context(), dir, memory.New(), clients.Clients{}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { ident.Close() })
-	identitySrv := httptest.NewServer(ident.Mux)
-	t.Cleanup(identitySrv.Close)
-	c := clients.Clients{Identity: identityclient.New(identitySrv.Client(), identitySrv.URL)}
-
-	_, err = c.Identity.Setup(t.Context(), identityrouter.SetupRequestV1{
-		Username: "admin",
-		Email:    "admin@example.com",
-		Password: password,
-		Profile:  identityrouter.NewProfileV1{Handle: "lucas", DisplayName: "Lucas"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	srv := httptest.NewServer(jellyfin.New(c, nil, nil))
-	t.Cleanup(srv.Close)
+	e := newEnv(t)
+	e.startIdentity()
+	srv := serve(t, clients.Clients{Identity: e.clients.Identity})
 	return client{t: t, base: srv.URL}
 }
 

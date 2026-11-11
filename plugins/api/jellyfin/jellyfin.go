@@ -6,16 +6,19 @@ package jellyfin
 import (
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 
+	"connectrpc.com/connect/v2"
+
+	"github.com/lukerops/mserver/gen/identity/v1/identityv1connect"
+	"github.com/lukerops/mserver/gen/library/v1/libraryv1connect"
+	"github.com/lukerops/mserver/gen/playback/v1/playbackv1connect"
+	"github.com/lukerops/mserver/gen/storage/v1/storagev1connect"
 	"github.com/lukerops/mserver/internal/clients"
-	"github.com/lukerops/mserver/internal/infra/kv"
-	kvmemory "github.com/lukerops/mserver/internal/infra/kv/memory"
-	identity "github.com/lukerops/mserver/internal/modules/identity/client"
-	library "github.com/lukerops/mserver/internal/modules/library/client"
-	playback "github.com/lukerops/mserver/internal/modules/playback/client"
-	storage "github.com/lukerops/mserver/internal/modules/storage/client"
+	"github.com/lukerops/mserver/internal/kv"
 )
 
 const (
@@ -28,31 +31,42 @@ const (
 )
 
 type plugin struct {
-	identity *identity.Client
+	identity identityv1connect.IdentityServiceClient
 	// library is nil when the library module is not available: there are
 	// no items then.
-	library *library.Client
+	library libraryv1connect.LibraryServiceClient
 	// storage is nil when the storage module is not available: nothing
 	// can be streamed then.
-	storage *storage.Client
+	storage storagev1connect.StorageServiceClient
 	// playback is nil when the playback module is not available: the
 	// playback reports are ignored then.
-	playback *playback.Client
+	playback playbackv1connect.PlaybackServiceClient
 	// kv maps the Jellyfin PlaySessionIds to playback sessions. It is
 	// shared by every instance of the plugin.
-	kv  kv.Store
-	log *slog.Logger
+	kv kv.Store
+	// files reads the content of the files from the address the storage
+	// resolves them to.
+	files *http.Client
+	log   *slog.Logger
 }
 
 // New returns the routes of the Jellyfin API. It talks to the modules only
-// through their clients. Its state lives in st (in memory when nil), which
-// every instance of the plugin must share.
-func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
+// through their clients; the clients of the modules that are not available
+// may be nil, except the identity. Its state lives in st, which every
+// instance of the plugin must share. The content of the files is read from
+// the storage with files (nil means a client that uses no proxy).
+func New(c clients.Clients, st kv.Store, files *http.Client, log *slog.Logger) *http.ServeMux {
 	if log == nil {
 		log = slog.Default()
 	}
-	if st == nil {
-		st = kvmemory.New()
+	log = slog.New(requestIDHandler{log.Handler()})
+	if files == nil {
+		files = &http.Client{Transport: &http.Transport{
+			DialContext:         (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+			IdleConnTimeout:     90 * time.Second,
+		}}
 	}
 	p := &plugin{
 		identity: c.Identity,
@@ -60,6 +74,7 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 		storage:  c.Storage,
 		playback: c.Playback,
 		kv:       st,
+		files:    files,
 		log:      log,
 	}
 
@@ -129,7 +144,7 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 	// Every response allows any origin: jellyfin-web is often served from
 	// another origin.
 	cors := http.NewServeMux()
-	cors.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	cors.Handle("/", accessLog(log, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Origin", "*")
 		h.Set("Access-Control-Allow-Methods", "GET, HEAD, POST, DELETE, OPTIONS")
@@ -159,7 +174,7 @@ func New(c clients.Clients, st kv.Store, log *slog.Logger) *http.ServeMux {
 
 		p.checkRoute(mux, r, path, a)
 		mux.ServeHTTP(w, r)
-	})
+	})))
 	return cors
 }
 
@@ -167,4 +182,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// isCode reports whether err is an error of a module with the code.
+func isCode(err error, code connect.Code) bool {
+	return connect.CodeOf(err) == code
 }

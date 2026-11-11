@@ -8,8 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-
-	"github.com/lukerops/mserver/internal/infra/logging"
 )
 
 // maxBodySize bounds the JSON bodies the plugin reads.
@@ -21,7 +19,7 @@ const maxLoggedBody = 4 << 10
 // fail answers an error with body, as http.Error, and adds the reason to
 // the access log of the request.
 func fail(w http.ResponseWriter, r *http.Request, status int, body, reason string) {
-	logging.Annotate(r.Context(), "error", reason)
+	annotate(r.Context(), slog.String("error", reason))
 	http.Error(w, body, status)
 }
 
@@ -37,7 +35,7 @@ func unauthorized(w http.ResponseWriter, r *http.Request, reason string) {
 
 // notFound answers 404 as http.NotFound; the reason is only logged.
 func notFound(w http.ResponseWriter, r *http.Request, reason string) {
-	logging.Annotate(r.Context(), "error", reason)
+	annotate(r.Context(), slog.String("error", reason))
 	http.NotFound(w, r)
 }
 
@@ -48,7 +46,7 @@ func unavailable(w http.ResponseWriter, r *http.Request, reason string) {
 
 // internalError logs err and answers 500.
 func (p *plugin) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
-	p.log.ErrorContext(r.Context(), "jellyfin: "+op, "error", err)
+	p.log.ErrorContext(r.Context(), "jellyfin: "+op, slog.String("error", err.Error()))
 	fail(w, r, http.StatusInternalServerError, "Internal Server Error", op+": "+err.Error())
 }
 
@@ -78,7 +76,11 @@ func (p *plugin) decode(w http.ResponseWriter, r *http.Request, v any, allowEmpt
 		return true
 	}
 
-	args := []any{"method", r.Method, "path", r.URL.Path, "error", err}
+	attrs := []slog.Attr{
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+		slog.String("error", err.Error()),
+	}
 	if logBody {
 		// The decoder stops at the error: read the rest of what is logged.
 		_, _ = io.CopyN(&raw, body, int64(maxLoggedBody-raw.Len()))
@@ -86,9 +88,9 @@ func (p *plugin) decode(w http.ResponseWriter, r *http.Request, v any, allowEmpt
 		if raw.truncated || raw.Len() >= maxLoggedBody {
 			s += "…"
 		}
-		args = append(args, "body", s)
+		attrs = append(attrs, slog.String("body", s))
 	}
-	p.log.WarnContext(ctx, "jellyfin: invalid request body", args...)
+	p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: invalid request body", attrs...)
 	fail(w, r, http.StatusBadRequest, "invalid body", "invalid body: "+err.Error())
 	return false
 }
@@ -112,7 +114,7 @@ func (b *prefixWriter) Write(p []byte) (int, error) {
 // annotateClient adds the Jellyfin client of a request to its access log.
 // The token is never logged.
 func annotateClient(r *http.Request, a authorization) {
-	var args []any
+	var attrs []slog.Attr
 	for _, kv := range [][2]string{
 		{"client", a.Client},
 		{"device", a.Device},
@@ -120,11 +122,11 @@ func annotateClient(r *http.Request, a authorization) {
 		{"client_version", a.Version},
 	} {
 		if kv[1] != "" {
-			args = append(args, kv[0], kv[1])
+			attrs = append(attrs, slog.String(kv[0], kv[1]))
 		}
 	}
-	if args != nil {
-		logging.Annotate(r.Context(), args...)
+	if attrs != nil {
+		annotate(r.Context(), attrs...)
 	}
 }
 
@@ -152,11 +154,19 @@ func (p *plugin) checkRoute(mux *http.ServeMux, r *http.Request, path string, a 
 	}
 	ctx := r.Context()
 	if allowed != nil {
-		p.log.WarnContext(ctx, "jellyfin: method not allowed", "method", r.Method, "path", path,
-			"allowed", strings.Join(allowed, ", "), "client", a.Client)
-		logging.Annotate(ctx, "error", "method not allowed")
+		p.log.WarnContext(ctx, "jellyfin: method not allowed",
+			slog.String("method", r.Method),
+			slog.String("path", path),
+			slog.String("allowed", strings.Join(allowed, ", ")),
+			slog.String("client", a.Client),
+		)
+		annotate(ctx, slog.String("error", "method not allowed"))
 		return
 	}
-	p.log.WarnContext(ctx, "jellyfin: endpoint not implemented", "method", r.Method, "path", path, "client", a.Client)
-	logging.Annotate(ctx, "error", "endpoint not implemented")
+	p.log.WarnContext(ctx, "jellyfin: endpoint not implemented",
+		slog.String("method", r.Method),
+		slog.String("path", path),
+		slog.String("client", a.Client),
+	)
+	annotate(ctx, slog.String("error", "endpoint not implemented"))
 }

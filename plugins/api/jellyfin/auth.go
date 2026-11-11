@@ -1,16 +1,14 @@
 package jellyfin
 
 import (
-	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
-	"github.com/google/uuid"
+	"connectrpc.com/connect/v2"
 
-	"github.com/lukerops/mserver/internal/infra/logging"
-	identity "github.com/lukerops/mserver/internal/modules/identity/client"
-	identityrouter "github.com/lukerops/mserver/internal/modules/identity/router"
+	identityv1 "github.com/lukerops/mserver/gen/identity/v1"
 )
 
 // authorization is the content of the Authorization (or
@@ -96,9 +94,9 @@ func parseParams(s string) authorization {
 // caller is the authenticated user of a request: a session with a
 // selected profile.
 type caller struct {
-	session identityrouter.SessionV1
-	account identityrouter.AccountV1
-	profile identityrouter.ProfileV1
+	session *identityv1.Session
+	account *identityv1.Account
+	profile *identityv1.Profile
 }
 
 // authenticate checks the token of the request. When it fails, the error
@@ -106,46 +104,51 @@ type caller struct {
 func (p *plugin) authenticate(w http.ResponseWriter, r *http.Request) (c caller, ok bool) {
 	ctx := r.Context()
 	token := requestAuthorization(r).Token
-	var err error
-	c.session, err = p.identity.ValidateToken(ctx, token)
+	res, err := p.identity.ValidateToken(ctx, &identityv1.ValidateTokenRequest{Token: token})
 	if err != nil {
-		switch {
-		case token == "" && errors.Is(err, identity.ErrUnauthenticated):
+		switch code := connect.CodeOf(err); {
+		case token == "" && code == connect.CodeUnauthenticated:
 			unauthorized(w, r, "missing token")
-		case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
+		case code == connect.CodeUnauthenticated, code == connect.CodeNotFound:
 			unauthorized(w, r, "invalid token: "+err.Error())
 		default:
 			p.internalError(w, r, "validate token", err)
 		}
 		return caller{}, false
 	}
-	if c.session.ProfileID == uuid.Nil {
+	c.session = res.GetSession()
+	if c.session.GetProfileId() == "" {
 		unauthorized(w, r, "session has no profile selected")
 		return caller{}, false
 	}
 
-	c.account, err = p.identity.GetAccount(ctx, c.session.AccountID)
+	account, err := p.identity.GetAccount(ctx, &identityv1.GetAccountRequest{Id: c.session.GetAccountId()})
 	switch {
-	case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
+	case isCode(err, connect.CodeUnauthenticated), isCode(err, connect.CodeNotFound):
 		unauthorized(w, r, "account not found")
 		return caller{}, false
 	case err != nil:
 		p.internalError(w, r, "get account", err)
 		return caller{}, false
-	case c.account.Disabled:
+	case account.GetAccount().GetDisabled():
 		unauthorized(w, r, "account disabled")
 		return caller{}, false
 	}
+	c.account = account.GetAccount()
 
-	c.profile, err = p.identity.GetProfile(ctx, c.session.ProfileID)
+	profile, err := p.identity.GetProfile(ctx, &identityv1.GetProfileRequest{Id: c.session.GetProfileId()})
 	switch {
-	case errors.Is(err, identity.ErrUnauthenticated), errors.Is(err, identity.ErrNotFound):
+	case isCode(err, connect.CodeUnauthenticated), isCode(err, connect.CodeNotFound):
 		unauthorized(w, r, "profile not found")
 		return caller{}, false
 	case err != nil:
 		p.internalError(w, r, "get profile", err)
 		return caller{}, false
 	}
-	logging.Annotate(ctx, "account_id", c.account.ID, "profile_id", c.profile.ID)
+	c.profile = profile.GetProfile()
+	annotate(ctx,
+		slog.String("account_id", c.account.GetId()),
+		slog.String("profile_id", c.profile.GetId()),
+	)
 	return c, true
 }

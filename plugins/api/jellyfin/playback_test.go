@@ -7,10 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/uuid"
-
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
-	playbackrouter "github.com/lukerops/mserver/internal/modules/playback/router"
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
+	playbackv1 "github.com/lukerops/mserver/gen/playback/v1"
 )
 
 type playbackInfo struct {
@@ -44,13 +42,13 @@ func (c client) raw(method, path string, h http.Header) (*http.Response, []byte)
 	return res, body
 }
 
-func sessions(t *testing.T, c client) []playbackrouter.PlaybackSessionV1 {
+func sessions(t *testing.T, c client) []*playbackv1.Session {
 	t.Helper()
-	list, err := c.modules.Playback.ListSessions(t.Context())
+	res, err := c.modules.Playback.ListSessions(t.Context(), &playbackv1.ListSessionsRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return list
+	return res.GetSessions()
 }
 
 func TestPlayback(t *testing.T) {
@@ -58,15 +56,15 @@ func TestPlayback(t *testing.T) {
 	_, token, _ := strings.Cut(auth, `Token="`)
 	token = strings.TrimSuffix(token, `"`)
 
-	page, err := c.modules.Library.ListMovies(t.Context(), uuid.Nil, libraryrouter.MovieQueryV1{})
+	page, err := c.modules.Library.ListMovies(t.Context(), &libraryv1.ListMoviesRequest{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	heat := page.Movies[1]
-	if heat.Title != "Heat" {
-		t.Fatalf("movies = %+v", page.Movies)
+	heat := page.GetMovies()[1]
+	if heat.GetTitle() != "Heat" {
+		t.Fatalf("movies = %+v", page.GetMovies())
 	}
-	heatID := hex(heat.ID)
+	heatID := hex(heat.GetId())
 
 	// The device profile of a browser that plays Matroska.
 	var info playbackInfo
@@ -117,7 +115,7 @@ func TestPlayback(t *testing.T) {
 	if len(web.MediaSources) != 1 || web.ErrorCode != "" {
 		t.Errorf("jellyfin-web playback info = %+v", web)
 	}
-	c.expect("GET", "/Items/"+hex(heat.LibraryID)+"/PlaybackInfo", auth, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Items/"+hex(heat.GetLibraryId())+"/PlaybackInfo", auth, nil, nil, http.StatusNotFound)
 	c.expect("GET", "/Items/"+heatID+"/PlaybackInfo", "", nil, nil, http.StatusUnauthorized)
 
 	// The stream, as the video element asks for it.
@@ -156,18 +154,18 @@ func TestPlayback(t *testing.T) {
 	}
 	report("/Sessions/Playing", 0, false)
 	list := sessions(t, c)
-	if len(list) != 1 || list[0].ItemID != heat.ID || list[0].FileID != heat.FileID || list[0].PlayMethod != "direct_play" {
+	if len(list) != 1 || list[0].GetItemId() != heat.GetId() || list[0].GetFileId() != heat.GetFileId() || list[0].GetPlayMethod() != "direct_play" {
 		t.Fatalf("sessions after start = %+v", list)
 	}
-	id := list[0].ID
+	id := list[0].GetId()
 	report("/Sessions/Playing/Progress", 5000*10_000, true)
-	if list := sessions(t, c); len(list) != 1 || list[0].ID != id || !list[0].Paused || list[0].PositionMs != 5000 {
+	if list := sessions(t, c); len(list) != 1 || list[0].GetId() != id || !list[0].GetPaused() || list[0].GetPositionMs() != 5000 {
 		t.Fatalf("sessions after pause = %+v", list)
 	}
 	report("/Sessions/Playing/Progress", 5000*10_000, false)
 	c.expect("POST", "/Sessions/Playing/Ping?playSessionId="+playSession, auth, nil, nil, http.StatusNoContent)
 	c.expect("POST", "/Sessions/Playing/Ping?playSessionId=unknown", auth, nil, nil, http.StatusNoContent)
-	if list := sessions(t, c); len(list) != 1 || list[0].Paused || list[0].Sequence != 5 {
+	if list := sessions(t, c); len(list) != 1 || list[0].GetPaused() || list[0].GetSequence() != 5 {
 		t.Fatalf("sessions after resume = %+v", list)
 	}
 	report("/Sessions/Playing/Stopped", 7000*10_000, false)
@@ -181,7 +179,7 @@ func TestPlayback(t *testing.T) {
 	// (e.g. it timed out) starts one.
 	playSession = "other"
 	report("/Sessions/Playing/Progress", 1000*10_000, false)
-	if list := sessions(t, c); len(list) != 1 || list[0].ID == id || list[0].PositionMs != 1000 {
+	if list := sessions(t, c); len(list) != 1 || list[0].GetId() == id || list[0].GetPositionMs() != 1000 {
 		t.Fatalf("sessions after orphan progress = %+v", list)
 	}
 	report("/Sessions/Playing/Stopped", 2000*10_000, false)

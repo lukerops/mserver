@@ -9,14 +9,14 @@ import (
 
 	"github.com/google/uuid"
 
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
 	"github.com/lukerops/mserver/internal/clients"
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
 )
 
 // startWithShows serves the plugin with a series library holding two
 // series: one with a season, a double episode and a special, and an anime
 // in absolute numbering.
-func startWithShows(t *testing.T) (client, string, libraryrouter.LibraryV1) {
+func startWithShows(t *testing.T) (client, string, *libraryv1.Library) {
 	t.Helper()
 	return startWithLibrary(t, "Séries", "tvshows", []string{
 		"Breaking Bad (2008)/Season 01/Breaking Bad - S01E01 - Pilot.mkv",
@@ -24,16 +24,17 @@ func startWithShows(t *testing.T) (client, string, libraryrouter.LibraryV1) {
 		"Breaking Bad (2008)/Specials/Breaking Bad - S00E01 - Minisode.mkv",
 		"One Piece/[Group] One Piece - 105 [1080p].mkv",
 	}, func(c clients.Clients) (bool, any) {
-		page, err := c.Library.ListEpisodes(t.Context(), uuid.Nil, uuid.Nil, uuid.Nil, libraryrouter.EpisodeQueryV1{})
+		res, err := c.Library.ListEpisodes(t.Context(), &libraryv1.ListEpisodesRequest{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, e := range page.Episodes {
-			if e.MediaInfo == nil {
-				return false, page
+		episodes := res.GetEpisodes()
+		for _, e := range episodes {
+			if e.GetMediaInfo() == nil {
+				return false, episodes
 			}
 		}
-		return len(page.Episodes) == 4, page
+		return len(episodes) == 4, episodes
 	})
 }
 
@@ -68,7 +69,7 @@ func ptr(n *int) string {
 
 func TestSeriesNavigation(t *testing.T) {
 	c, token, lib := startWithShows(t)
-	libID := hex(lib.ID)
+	libID := hex(lib.GetId())
 
 	var views showsResult
 	c.expect("GET", "/UserViews", token, nil, &views, http.StatusOK)
@@ -123,7 +124,7 @@ func TestSeriesNavigation(t *testing.T) {
 	if next.Items == nil || len(next.Items) != 0 {
 		t.Errorf("next up = %+v", next)
 	}
-	c.expect("GET", "/Shows/"+hex(uuid.New())+"/Seasons", token, nil, nil, http.StatusNotFound)
+	c.expect("GET", "/Shows/"+hex(uuid.NewString())+"/Seasons", token, nil, nil, http.StatusNotFound)
 	c.expect("GET", "/Shows/"+bb.Id+"/Seasons", "", nil, nil, http.StatusUnauthorized)
 
 	// The season page.

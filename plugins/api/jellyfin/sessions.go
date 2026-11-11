@@ -2,7 +2,10 @@ package jellyfin
 
 import (
 	"io"
+	"log/slog"
 	"net/http"
+
+	identityv1 "github.com/lukerops/mserver/gen/identity/v1"
 )
 
 // capabilities accepts the client capabilities. They are not used yet.
@@ -20,11 +23,14 @@ func (p *plugin) logout(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := p.identity.RevokeSession(r.Context(), c.session.ID); err != nil {
+	if _, err := p.identity.RevokeSession(r.Context(), &identityv1.RevokeSessionRequest{SessionId: c.session.GetId()}); err != nil {
 		p.internalError(w, r, "logout", err)
 		return
 	}
-	p.log.InfoContext(r.Context(), "jellyfin: user logged out", "account_id", c.account.ID,
-		"profile_id", c.profile.ID, "session_id", c.session.ID)
+	p.log.InfoContext(r.Context(), "jellyfin: user logged out",
+		slog.String("account_id", c.account.GetId()),
+		slog.String("profile_id", c.profile.GetId()),
+		slog.String("session_id", c.session.GetId()),
+	)
 	w.WriteHeader(http.StatusNoContent)
 }

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	libraryrouter "github.com/lukerops/mserver/internal/modules/library/router"
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
 )
 
 // ticksPerMs converts milliseconds to Jellyfin ticks (100 ns).
@@ -44,82 +44,90 @@ func (p *plugin) newItem(id, name string) BaseItemDto {
 }
 
 // libraryItem maps a library to a Jellyfin collection folder (a "view").
-func (p *plugin) libraryItem(l libraryrouter.LibraryV1) BaseItemDto {
-	item := p.newItem(jellyfinID(l.ID.String()), l.Name)
-	created := l.CreatedAt
+func (p *plugin) libraryItem(l *libraryv1.Library) BaseItemDto {
+	item := p.newItem(jellyfinID(l.GetId()), l.GetName())
+	created := l.GetCreatedAt().AsTime()
 	item.DateCreated = &created
 	item.IsFolder = true
 	item.Type = "CollectionFolder"
-	item.CollectionType = l.MediaType // "movies" and "tvshows" in both
+	item.CollectionType = l.GetMediaType() // "movies" and "tvshows" in both
 	item.MediaType = "Unknown"
 	return item
 }
 
 // movieItem maps a movie to a Jellyfin movie. The media sources and
 // streams are included only when full is set.
-func (p *plugin) movieItem(m libraryrouter.MovieV1, full bool) BaseItemDto {
-	item := p.videoItem(m.ID.String(), m.Title, m.Path, m.CreatedAt, m.MediaInfo, full)
-	item.SortName = m.SortTitle
-	item.ProductionYear = m.Year
-	item.ParentId = jellyfinID(m.LibraryID.String())
+func (p *plugin) movieItem(m *libraryv1.Movie, full bool) BaseItemDto {
+	item := p.videoItem(m.GetId(), m.GetTitle(), m.GetPath(), m.GetCreatedAt().AsTime(), m.GetMediaInfo(), full)
+	item.SortName = m.GetSortTitle()
+	item.ProductionYear = int(m.GetYear())
+	item.ParentId = jellyfinID(m.GetLibraryId())
 	item.Type = "Movie"
 	return item
 }
 
 // seriesItem maps a series to a Jellyfin series: a folder of seasons.
-func (p *plugin) seriesItem(s libraryrouter.SeriesV1) BaseItemDto {
-	item := p.newItem(jellyfinID(s.ID.String()), s.Title)
-	created := s.CreatedAt
+func (p *plugin) seriesItem(s *libraryv1.Series) BaseItemDto {
+	item := p.newItem(jellyfinID(s.GetId()), s.GetTitle())
+	created := s.GetCreatedAt().AsTime()
 	item.DateCreated = &created
-	item.SortName = s.SortTitle
-	item.ProductionYear = s.Year
-	item.ParentId = jellyfinID(s.LibraryID.String())
+	item.SortName = s.GetSortTitle()
+	item.ProductionYear = int(s.GetYear())
+	item.ParentId = jellyfinID(s.GetLibraryId())
 	item.IsFolder = true
 	item.Type = "Series"
 	item.MediaType = "Unknown"
-	item.ChildCount = &s.SeasonCount
-	item.RecursiveItemCount = &s.EpisodeCount
-	item.UserData.UnplayedItemCount = &s.EpisodeCount
+	seasons, episodes := int(s.GetSeasonCount()), int(s.GetEpisodeCount())
+	item.ChildCount = &seasons
+	item.RecursiveItemCount = &episodes
+	item.UserData.UnplayedItemCount = &episodes
 	return item
 }
 
 // seasonItem maps a season to a Jellyfin season: a folder of episodes.
-func (p *plugin) seasonItem(s libraryrouter.SeasonV1) BaseItemDto {
-	name := seasonName(s.Number)
-	item := p.newItem(jellyfinID(s.ID.String()), name)
-	created := s.CreatedAt
+func (p *plugin) seasonItem(s *libraryv1.Season) BaseItemDto {
+	number, episodes := int(s.GetNumber()), int(s.GetEpisodeCount())
+	item := p.newItem(jellyfinID(s.GetId()), seasonName(number))
+	created := s.GetCreatedAt().AsTime()
 	item.DateCreated = &created
 	// Sorted by number: "Season 10" after "Season 9".
-	item.SortName = fmt.Sprintf("%04d", s.Number)
-	item.ProductionYear = s.SeriesYear
-	item.ParentId = jellyfinID(s.SeriesID.String())
+	item.SortName = fmt.Sprintf("%04d", number)
+	item.ProductionYear = int(s.GetSeriesYear())
+	item.ParentId = jellyfinID(s.GetSeriesId())
 	item.IsFolder = true
 	item.Type = "Season"
 	item.MediaType = "Unknown"
-	item.IndexNumber = &s.Number
-	item.SeriesId = jellyfinID(s.SeriesID.String())
-	item.SeriesName = s.SeriesTitle
-	item.ChildCount = &s.EpisodeCount
-	item.RecursiveItemCount = &s.EpisodeCount
-	item.UserData.UnplayedItemCount = &s.EpisodeCount
+	item.IndexNumber = &number
+	item.SeriesId = jellyfinID(s.GetSeriesId())
+	item.SeriesName = s.GetSeriesTitle()
+	item.ChildCount = &episodes
+	item.RecursiveItemCount = &episodes
+	item.UserData.UnplayedItemCount = &episodes
 	return item
 }
 
 // episodeItem maps an episode to a Jellyfin episode. The media sources
 // and streams are included only when full is set.
-func (p *plugin) episodeItem(e libraryrouter.EpisodeV1, full bool) BaseItemDto {
-	item := p.videoItem(e.ID.String(), e.Title, e.Path, e.CreatedAt, e.MediaInfo, full)
+func (p *plugin) episodeItem(e *libraryv1.Episode, full bool) BaseItemDto {
+	item := p.videoItem(e.GetId(), e.GetTitle(), e.GetPath(), e.GetCreatedAt().AsTime(), e.GetMediaInfo(), full)
 	item.SortName = episodeSortName(e)
-	item.ProductionYear = e.SeriesYear
-	item.ParentId = jellyfinID(e.SeasonID.String())
+	item.ProductionYear = int(e.GetSeriesYear())
+	item.ParentId = jellyfinID(e.GetSeasonId())
 	item.Type = "Episode"
-	item.IndexNumber = e.Number
-	item.IndexNumberEnd = e.EndNumber
-	item.ParentIndexNumber = &e.SeasonNumber
-	item.SeriesId = jellyfinID(e.SeriesID.String())
-	item.SeriesName = e.SeriesTitle
-	item.SeasonId = jellyfinID(e.SeasonID.String())
-	item.SeasonName = seasonName(e.SeasonNumber)
+	if e.Number != nil {
+		number := int(e.GetNumber())
+		item.IndexNumber = &number
+	}
+	if e.EndNumber != nil {
+		end := int(e.GetEndNumber())
+		item.IndexNumberEnd = &end
+	}
+	season := int(e.GetSeasonNumber())
+	item.ParentIndexNumber = &season
+	item.SeriesId = jellyfinID(e.GetSeriesId())
+	item.SeriesName = e.GetSeriesTitle()
+	item.SeasonId = jellyfinID(e.GetSeasonId())
+	item.SeasonName = seasonName(season)
 	return item
 }
 
@@ -133,16 +141,16 @@ func seasonName(number int) string {
 
 // episodeSortName sorts the episodes of a season by number, the ones
 // without number last, by name.
-func episodeSortName(e libraryrouter.EpisodeV1) string {
+func episodeSortName(e *libraryv1.Episode) string {
 	if e.Number == nil {
-		return "9999 - " + strings.ToLower(e.Title)
+		return "9999 - " + strings.ToLower(e.GetTitle())
 	}
-	return fmt.Sprintf("%04d - %s", *e.Number, strings.ToLower(e.Title))
+	return fmt.Sprintf("%04d - %s", e.GetNumber(), strings.ToLower(e.GetTitle()))
 }
 
 // videoItem maps a video file to a Jellyfin video item, without its type.
 // The media sources and streams are included only when full is set.
-func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, info *libraryrouter.MediaInfoV1, full bool) BaseItemDto {
+func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, info *libraryv1.MediaInfo, full bool) BaseItemDto {
 	id := jellyfinID(rawID)
 	item := p.newItem(id, name)
 	item.DateCreated = &createdAt
@@ -167,23 +175,24 @@ func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, in
 		Formats:              []string{},
 	}
 	if info != nil {
-		item.RunTimeTicks = info.DurationMs * ticksPerMs
+		item.RunTimeTicks = info.GetDurationMs() * ticksPerMs
 		source.RunTimeTicks = item.RunTimeTicks
-		source.Size = info.Size
-		source.Bitrate = info.BitRate
+		source.Size = info.GetSize()
+		source.Bitrate = info.GetBitRate()
 		var defaultAudio bool // the chosen audio stream is flagged default
-		for _, s := range info.Streams {
+		for _, s := range info.GetStreams() {
 			ms := mediaStream(s)
 			source.MediaStreams = append(source.MediaStreams, ms)
-			switch s.Type {
+			switch s.GetType() {
 			case "video":
 				if item.Width == 0 {
-					item.Width, item.Height = s.Width, s.Height
+					item.Width, item.Height = int(s.GetWidth()), int(s.GetHeight())
 				}
 			case "audio":
-				if source.DefaultAudioStreamIndex == nil || (s.Default && !defaultAudio) {
-					source.DefaultAudioStreamIndex = &ms.Index
-					defaultAudio = s.Default
+				if source.DefaultAudioStreamIndex == nil || (s.GetDefault() && !defaultAudio) {
+					index := ms.Index
+					source.DefaultAudioStreamIndex = &index
+					defaultAudio = s.GetDefault()
 				}
 			case "subtitle":
 				item.HasSubtitles = true
@@ -204,43 +213,43 @@ func container(p string) string {
 	return strings.TrimPrefix(strings.ToLower(path.Ext(p)), ".")
 }
 
-func mediaStream(s libraryrouter.StreamV1) MediaStream {
+func mediaStream(s *libraryv1.Stream) MediaStream {
 	ms := MediaStream{
-		Codec:              s.Codec,
-		Language:           s.Language,
-		ColorTransfer:      s.ColorTransfer,
-		ColorPrimaries:     s.ColorPrimaries,
-		ColorSpace:         s.ColorSpace,
+		Codec:              s.GetCodec(),
+		Language:           s.GetLanguage(),
+		ColorTransfer:      s.GetColorTransfer(),
+		ColorPrimaries:     s.GetColorPrimaries(),
+		ColorSpace:         s.GetColorSpace(),
 		AudioSpatialFormat: "None",
-		Title:              s.Title,
-		IsInterlaced:       s.Interlaced,
-		BitRate:            s.BitRate,
-		BitDepth:           s.BitDepth,
-		ChannelLayout:      s.ChannelLayout,
-		Channels:           s.Channels,
-		SampleRate:         s.SampleRate,
-		IsDefault:          s.Default,
-		IsForced:           s.Forced,
-		IsHearingImpaired:  s.HearingImpaired,
-		Height:             s.Height,
-		Width:              s.Width,
-		AverageFrameRate:   s.FrameRate,
-		RealFrameRate:      s.FrameRate,
-		Profile:            s.Profile,
-		AspectRatio:        s.AspectRatio,
-		Index:              s.Index,
-		PixelFormat:        s.PixelFormat,
-		Level:              s.Level,
+		Title:              s.GetTitle(),
+		IsInterlaced:       s.GetInterlaced(),
+		BitRate:            s.GetBitRate(),
+		BitDepth:           int(s.GetBitDepth()),
+		ChannelLayout:      s.GetChannelLayout(),
+		Channels:           int(s.GetChannels()),
+		SampleRate:         int(s.GetSampleRate()),
+		IsDefault:          s.GetDefault(),
+		IsForced:           s.GetForced(),
+		IsHearingImpaired:  s.GetHearingImpaired(),
+		Height:             int(s.GetHeight()),
+		Width:              int(s.GetWidth()),
+		AverageFrameRate:   s.GetFrameRate(),
+		RealFrameRate:      s.GetFrameRate(),
+		Profile:            s.GetProfile(),
+		AspectRatio:        s.GetAspectRatio(),
+		Index:              int(s.GetIndex()),
+		PixelFormat:        s.GetPixelFormat(),
+		Level:              int(s.GetLevel()),
 	}
-	switch s.Type {
+	switch s.GetType() {
 	case "video":
 		ms.Type = "Video"
-		ms.VideoRange, ms.VideoRangeType = videoRange(s.ColorTransfer)
+		ms.VideoRange, ms.VideoRangeType = videoRange(s.GetColorTransfer())
 	case "audio":
 		ms.Type = "Audio"
 	case "subtitle":
 		ms.Type = "Subtitle"
-		ms.IsTextSubtitleStream = textSubtitleCodecs[s.Codec]
+		ms.IsTextSubtitleStream = textSubtitleCodecs[s.GetCodec()]
 		ms.SupportsExternalStream = ms.IsTextSubtitleStream
 	default:
 		ms.Type = "Data"
@@ -268,32 +277,32 @@ func videoRange(transfer string) (videoRange, rangeType string) {
 
 // displayTitle describes a stream the way Jellyfin does, e.g. "1080p H264
 // SDR" or "English - AAC - Stereo - Default".
-func displayTitle(s libraryrouter.StreamV1, videoRange string) string {
-	codec := strings.ToUpper(s.Codec)
-	switch s.Type {
+func displayTitle(s *libraryv1.Stream, videoRange string) string {
+	codec := strings.ToUpper(s.GetCodec())
+	switch s.GetType() {
 	case "video":
 		parts := []string{}
-		if r := resolution(s.Width, s.Height, s.Interlaced); r != "" {
+		if r := resolution(int(s.GetWidth()), int(s.GetHeight()), s.GetInterlaced()); r != "" {
 			parts = append(parts, r)
 		}
 		return strings.Join(append(parts, codec, videoRange), " ")
 	case "audio", "subtitle":
 		var parts []string
-		if s.Title != "" {
-			parts = append(parts, s.Title)
-		} else if l := languageName(s.Language); l != "" {
+		if s.GetTitle() != "" {
+			parts = append(parts, s.GetTitle())
+		} else if l := languageName(s.GetLanguage()); l != "" {
 			parts = append(parts, l)
 		}
 		parts = append(parts, codec)
-		if s.Type == "audio" {
-			if c := channelsName(s.Channels, s.ChannelLayout); c != "" {
+		if s.GetType() == "audio" {
+			if c := channelsName(int(s.GetChannels()), s.GetChannelLayout()); c != "" {
 				parts = append(parts, c)
 			}
 		}
-		if s.Default {
+		if s.GetDefault() {
 			parts = append(parts, "Default")
 		}
-		if s.Forced {
+		if s.GetForced() {
 			parts = append(parts, "Forced")
 		}
 		return strings.Join(parts, " - ")

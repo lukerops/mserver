@@ -62,11 +62,12 @@ func TestParseModules(t *testing.T) {
 		want    []string
 		wantErr bool
 	}{
-		{"", []string{"identity", "storage", "library", "playback"}, false},
-		{"all", []string{"identity", "storage", "library", "playback"}, false},
+		{"", []string{"identity", "storage", "library", "playback", "jellyfin"}, false},
+		{"all", []string{"identity", "storage", "library", "playback", "jellyfin"}, false},
 		{"storage", []string{"storage"}, false},
 		{"library", []string{"library"}, false},
 		{"playback", []string{"playback"}, false},
+		{"jellyfin", []string{"jellyfin"}, false},
 		{"identity,storage", []string{"identity", "storage"}, false},
 		{" storage , storage", []string{"storage"}, false},
 		{"nope", nil, true},
@@ -122,5 +123,29 @@ func TestNewStorageClient(t *testing.T) {
 		if c, err := newStorageClient(rpc, tc.url, tc.local); err != nil || c == nil {
 			t.Errorf("%s: client = %v, %v", name, c, err)
 		}
+	}
+}
+
+func TestNewClients(t *testing.T) {
+	rpc := connect.NewServer()
+	log := slog.New(slog.DiscardHandler)
+
+	if _, err := newClients(rpc, map[string]bool{"jellyfin": true}, log); err == nil {
+		t.Error("a plugin without an identity was accepted")
+	}
+
+	t.Setenv("MSERVER_IDENTITY_URL", "http://identity.test:8096")
+	c, err := newClients(rpc, map[string]bool{"jellyfin": true}, log)
+	if err != nil || c.Identity == nil {
+		t.Fatalf("identity: client = %v, %v", c.Identity, err)
+	}
+	if c.Storage != nil || c.Library != nil || c.Playback != nil {
+		t.Errorf("clients of modules that are nowhere: %+v", c)
+	}
+
+	t.Setenv("MSERVER_PLAYBACK_URL", "http://playback.test:8096")
+	c, err = newClients(rpc, map[string]bool{"jellyfin": true, "library": true, "storage": true}, log)
+	if err != nil || c.Storage == nil || c.Library == nil || c.Playback == nil {
+		t.Errorf("clients = %+v, %v", c, err)
 	}
 }
