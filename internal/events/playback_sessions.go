@@ -1,11 +1,3 @@
-// Package events is the event API of the playback module: the types and
-// the data of the events it publishes. Like the DTOs of the router
-// package, every type carries the version of the event.
-//
-// Events are wrapped in queue.Envelope and published on the topic named
-// after their type. Delivery is at-least-once: consumers must tolerate
-// duplicates. The events of a session carry a sequence that grows by one
-// on every event, to order them and detect duplicates.
 package events
 
 import (
@@ -14,36 +6,34 @@ import (
 	"github.com/google/uuid"
 )
 
-// Source is the CloudEvents source of the playback events.
-const Source = "playback"
+// SourcePlayback is the CloudEvents source of the playback events.
+const SourcePlayback = "playback"
 
-// Types of the playback events. The subject of every event is the
-// playback session id.
+// Types of the playback session events. The subject of every event is the
+// playback session id. The events of a session carry a sequence that grows
+// by one on every event, to order them and detect duplicates.
 const (
-	// SessionStartedV1 is a new playback session. The data is
+	// SessionStartedV1 is a new playback session. Its data is
 	// SessionStartedEventV1.
 	SessionStartedV1 = "playback.session.started.v1"
-	// SessionProgressedV1 is a progress report of a session. The data is
+	// SessionProgressedV1 is a progress report of a session. Its data is
 	// SessionProgressedEventV1.
 	SessionProgressedV1 = "playback.session.progressed.v1"
-	// SessionPausedV1 is a session that was paused. The data is
+	// SessionPausedV1 is a session that was paused. Its data is
 	// SessionPausedEventV1.
 	SessionPausedV1 = "playback.session.paused.v1"
-	// SessionResumedV1 is a paused session that was resumed. The data is
+	// SessionResumedV1 is a paused session that was resumed. Its data is
 	// SessionResumedEventV1.
 	SessionResumedV1 = "playback.session.resumed.v1"
-	// SessionStoppedV1 is the end of a session. The data is
+	// SessionStoppedV1 is the end of a session. Its data is
 	// SessionStoppedEventV1.
 	SessionStoppedV1 = "playback.session.stopped.v1"
 )
 
-// Play methods.
-const (
-	// PlayMethodDirectPlay is the original file, served as is.
-	PlayMethodDirectPlay = "direct_play"
-)
+// PlayMethodDirectPlay is the original file, served as is.
+const PlayMethodDirectPlay = "direct_play"
 
-// Reasons of the stopped event.
+// Reasons of the session stopped event.
 const (
 	// StopReasonUser is a session stopped by the client.
 	StopReasonUser = "user"
@@ -52,7 +42,7 @@ const (
 	StopReasonTimeout = "timeout"
 )
 
-// SessionStartedEventV1 is the data of the started event.
+// SessionStartedEventV1 is the data of the session started event.
 type SessionStartedEventV1 struct {
 	PlaybackSessionID uuid.UUID `json:"playback_session_id"`
 	AccountID         uuid.UUID `json:"account_id"`
@@ -66,7 +56,7 @@ type SessionStartedEventV1 struct {
 	StartedAt         time.Time `json:"started_at"`
 }
 
-// SessionProgressedEventV1 is the data of the progressed event.
+// SessionProgressedEventV1 is the data of the session progressed event.
 type SessionProgressedEventV1 struct {
 	PlaybackSessionID uuid.UUID `json:"playback_session_id"`
 	ProfileID         uuid.UUID `json:"profile_id"`
@@ -78,7 +68,7 @@ type SessionProgressedEventV1 struct {
 	ReportedAt        time.Time `json:"reported_at"`
 }
 
-// SessionPausedEventV1 is the data of the paused event.
+// SessionPausedEventV1 is the data of the session paused event.
 type SessionPausedEventV1 struct {
 	PlaybackSessionID uuid.UUID `json:"playback_session_id"`
 	ProfileID         uuid.UUID `json:"profile_id"`
@@ -88,7 +78,7 @@ type SessionPausedEventV1 struct {
 	PausedAt          time.Time `json:"paused_at"`
 }
 
-// SessionResumedEventV1 is the data of the resumed event.
+// SessionResumedEventV1 is the data of the session resumed event.
 type SessionResumedEventV1 struct {
 	PlaybackSessionID uuid.UUID `json:"playback_session_id"`
 	ProfileID         uuid.UUID `json:"profile_id"`
@@ -98,7 +88,7 @@ type SessionResumedEventV1 struct {
 	ResumedAt         time.Time `json:"resumed_at"`
 }
 
-// SessionStoppedEventV1 is the data of the stopped event.
+// SessionStoppedEventV1 is the data of the session stopped event.
 type SessionStoppedEventV1 struct {
 	PlaybackSessionID uuid.UUID `json:"playback_session_id"`
 	AccountID         uuid.UUID `json:"account_id"`
