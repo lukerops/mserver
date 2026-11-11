@@ -914,7 +914,8 @@ func (x *GetFileResponse) GetFile() *File {
 type ListFilesRequest struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	LocationId string                 `protobuf:"bytes,1,opt,name=location_id,json=locationId,proto3" json:"location_id,omitempty"`
-	// limit is the maximum number of files returned. Zero means no limit.
+	// limit is the maximum number of files returned. Zero, or a value above
+	// the maximum page (1000), means the maximum page.
 	Limit int32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
 	// offset is the number of files to skip.
 	Offset        int32 `protobuf:"varint,3,opt,name=offset,proto3" json:"offset,omitempty"`

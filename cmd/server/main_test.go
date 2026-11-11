@@ -55,3 +55,50 @@ func TestServerAcceptsH2C(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModules(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    []string
+		wantErr bool
+	}{
+		{"", []string{"storage"}, false},
+		{"all", []string{"storage"}, false},
+		{"storage", []string{"storage"}, false},
+		{" storage , storage", []string{"storage"}, false},
+		{"nope", nil, true},
+		{"storage,", nil, true},
+	} {
+		got, err := parseModules(tc.in)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("parseModules(%q) error = %v, wantErr %v", tc.in, err, tc.wantErr)
+			continue
+		}
+		if err == nil && len(got) != len(tc.want) {
+			t.Errorf("parseModules(%q) = %v, want %v", tc.in, got, tc.want)
+		}
+		for _, m := range tc.want {
+			if !got[m] {
+				t.Errorf("parseModules(%q): %s not enabled", tc.in, m)
+			}
+		}
+	}
+}
+
+func TestLocalURL(t *testing.T) {
+	for addr, want := range map[string]string{
+		"[::]:8096":      "http://127.0.0.1:8096",
+		"0.0.0.0:8096":   "http://127.0.0.1:8096",
+		"10.0.0.2:8096":  "http://10.0.0.2:8096",
+		"[::1]:8096":     "http://[::1]:8096",
+		"127.0.0.1:9000": "http://127.0.0.1:9000",
+	} {
+		a, err := net.ResolveTCPAddr("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := localURL(a); got != want {
+			t.Errorf("localURL(%s) = %s, want %s", addr, got, want)
+		}
+	}
+}

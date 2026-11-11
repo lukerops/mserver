@@ -1,16 +1,22 @@
 package storage
 
 import (
+	"io"
+	"log/slog"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/lukerops/mserver/internal/clients"
-	"github.com/lukerops/mserver/internal/infra/queue/memory"
-	"github.com/lukerops/mserver/internal/modules/storage/client"
-	"github.com/lukerops/mserver/internal/modules/storage/router"
+	"connectrpc.com/connect/v2"
+	"connectrpc.com/connect/v2/connectinprocess"
+
+	storagev1 "github.com/lukerops/mserver/gen/storage/v1"
+	"github.com/lukerops/mserver/gen/storage/v1/storagev1connect"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
 func TestScanInterval(t *testing.T) {
@@ -36,7 +42,9 @@ func TestScanIntervalRejectsInvalid(t *testing.T) {
 
 func TestNewRejectsInvalidScanInterval(t *testing.T) {
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "often")
-	if m, err := New(t.Context(), t.TempDir(), memory.New(), clients.Clients{}, nil); err == nil {
+	cfg := database.Config{DataDir: t.TempDir()}
+	m, err := New(t.Context(), cfg, connect.NewServer(), memory.New(), "", nil)
+	if err == nil {
 		m.Close()
 		t.Fatal("New accepted an invalid scan interval")
 	}
@@ -44,33 +52,37 @@ func TestNewRejectsInvalidScanInterval(t *testing.T) {
 
 func TestModuleScansOnStart(t *testing.T) {
 	t.Setenv("MSERVER_STORAGE_SCAN_INTERVAL", "0")
-	dataDir := t.TempDir()
+	cfg := database.Config{DataDir: t.TempDir()}
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "movie.mkv"), []byte("movie"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	start := func() (*Module, *client.Client) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	start := func() (*Module, storagev1connect.StorageServiceClient) {
 		t.Helper()
-		m, err := New(t.Context(), dataDir, memory.New(), clients.Clients{}, nil)
+		bus := memory.New()
+		t.Cleanup(func() { bus.Close() })
+		server := connect.NewServer()
+		m, err := New(t.Context(), cfg, server, bus, "http://storage.test", log)
 		if err != nil {
 			t.Fatal(err)
 		}
-		srv := httptest.NewServer(m.Mux)
-		t.Cleanup(srv.Close)
-		return m, client.New(srv.Client(), srv.URL)
+		c := storagev1connect.NewStorageServiceClient(connect.NewClient(connectinprocess.New(server)))
+		return m, c
 	}
 
 	// Register the location in a first run. Its startup scan may run
 	// before the location exists.
 	m, c := start()
-	loc, err := c.CreateLocation(t.Context(), router.CreateLocationRequestV1{
+	created, err := c.CreateLocation(t.Context(), &storagev1.CreateLocationRequest{
 		Driver:  "local",
 		Options: map[string]string{"dir": dir},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	loc := created.GetLocation()
 	if err := m.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -79,18 +91,33 @@ func TestModuleScansOnStart(t *testing.T) {
 	m, c = start()
 	defer m.Close()
 
+	var file *storagev1.File
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		files, err := c.ListFiles(t.Context(), loc.ID)
+	for file == nil {
+		files, err := c.ListFiles(t.Context(), &storagev1.ListFilesRequest{LocationId: loc.GetId()})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(files) == 1 {
+		if len(files.GetFiles()) == 1 {
+			file = files.GetFiles()[0]
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("location was not scanned on start")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+
+	// The data plane is served by the module.
+	srv := httptest.NewServer(m.Mux)
+	defer srv.Close()
+	resp, err := srv.Client().Get(srv.URL + "/locations/" + loc.GetId() + "/files/" + file.GetId())
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "movie" {
+		t.Errorf("content: status %d, body %q", resp.StatusCode, body)
 	}
 }

@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/ffmpeg"
+	"github.com/lukerops/mserver/internal/events"
+	"github.com/lukerops/mserver/internal/ffmpeg"
 	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
-	"github.com/lukerops/mserver/internal/modules/storage/events"
 )
 
 const (
@@ -63,8 +63,12 @@ func (*Analyzer) Accepts(p string) bool {
 func (a *Analyzer) Analyze(ctx context.Context, localPath string) (any, error) {
 	start := time.Now()
 	p, err := a.prober.Probe(ctx, localPath)
-	a.log.DebugContext(ctx, "storage: ffprobe run", "binary", a.binary(), "file", localPath,
-		"duration", time.Since(start), "ok", err == nil)
+	a.log.DebugContext(ctx, "storage: ffprobe run",
+		slog.String("binary", a.binary()),
+		slog.String("file", localPath),
+		slog.Int64("duration", int64(time.Since(start))),
+		slog.Bool("ok", err == nil),
+	)
 	if errors.Is(err, ffmpeg.ErrInvalidMedia) {
 		return nil, fmt.Errorf("%w: %w", analyzer.ErrInvalidFile, truncatedError{err})
 	}
@@ -95,7 +99,7 @@ func (e truncatedError) Error() string {
 
 func (e truncatedError) Unwrap() error { return e.err }
 
-func toResult(p ffmpeg.Probe) events.FFprobeResultV1 {
+func toResult(p *ffmpeg.Probe) events.FFprobeResultV1 {
 	r := events.FFprobeResultV1{
 		Container:  p.Container,
 		DurationMs: p.Duration.Milliseconds(),

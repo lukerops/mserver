@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lukerops/mserver/internal/infra/ffmpeg"
+	"github.com/lukerops/mserver/internal/ffmpeg"
 )
 
 func TestAccepts(t *testing.T) {
@@ -23,7 +23,7 @@ func TestAccepts(t *testing.T) {
 }
 
 func TestToResult(t *testing.T) {
-	r := toResult(ffmpeg.Probe{
+	r := toResult(&ffmpeg.Probe{
 		Container: "matroska,webm",
 		Duration:  90*time.Minute + 1500*time.Microsecond,
 		BitRate:   8_000_000,

@@ -3,15 +3,27 @@
 // gRPC and Connect clients, curl and the other mserver instances can all
 // reach it.
 //
-// The modules are disabled while they are migrated to ConnectRPC: the
-// server starts without any service registered.
+// The modules register their ConnectRPC services on the one server. Only
+// the migrated modules (storage) exist yet; the others are added as they
+// are migrated.
 //
 // Variables:
 //
-//	MSERVER_HTTP_ADDR   HTTP listen address (default ":8096")
-//	MSERVER_DATA_DIR    directory of the databases (default "data")
-//	MSERVER_LOG_LEVEL   debug, info, warn or error (default info)
-//	MSERVER_LOG_FORMAT  text or json (default text)
+//	MSERVER_HTTP_ADDR            HTTP listen address (default ":8096")
+//	MSERVER_MODULES              "all" or a comma-separated list of the
+//	                             modules to run (default all)
+//	MSERVER_DB_DRIVER            sqlite or postgres (default sqlite)
+//	MSERVER_DATA_DIR             directory of the SQLite databases
+//	                             (default "data")
+//	MSERVER_POSTGRES_URL         connection URL of the Postgres
+//	MSERVER_STORAGE_PUBLIC_URL   address of this server as the readers of
+//	                             the files reach it (default: the listen
+//	                             address, on the loopback)
+//	MSERVER_LOG_LEVEL            debug, info, warn or error (default info)
+//	MSERVER_LOG_FORMAT           text or json (default text)
+//
+// Each module reads its own variables (e.g. MSERVER_STORAGE_SCAN_INTERVAL
+// and MSERVER_FFPROBE_PATH in the storage).
 package main
 
 import (
@@ -23,13 +35,17 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
 
+	"github.com/lukerops/mserver/internal/database"
 	"github.com/lukerops/mserver/internal/logger"
+	"github.com/lukerops/mserver/internal/modules/storage"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
@@ -57,33 +73,65 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("MSERVER_LOG_LEVEL/MSERVER_LOG_FORMAT: %w", err)
 	}
 	log := slog.Default()
-	log.Info("mserver: starting", "addr", addr, "data_dir", dataDir)
 
-	bus := memory.New()
-	defer func() {
-		if err := bus.Close(); err != nil {
-			log.Error("mserver: close pubsub", "error", err)
-		}
-	}()
+	enabled, err := parseModules(os.Getenv("MSERVER_MODULES"))
+	if err != nil {
+		return fmt.Errorf("MSERVER_MODULES: %w", err)
+	}
+	driver, err := database.ParseDriver(os.Getenv("MSERVER_DB_DRIVER"))
+	if err != nil {
+		return fmt.Errorf("MSERVER_DB_DRIVER: %w", err)
+	}
+	dbCfg := database.Config{
+		Driver:      driver,
+		DataDir:     dataDir,
+		PostgresURL: os.Getenv("MSERVER_POSTGRES_URL"),
+	}
+	log.Info("mserver: starting",
+		slog.String("addr", addr),
+		slog.String("data_dir", dataDir),
+		slog.String("db_driver", string(driver)),
+	)
 
-	// The modules register their services here (e.g.
-	// identityv1connect.RegisterIdentityServiceHandler(rpc, h)) once they
-	// are migrated.
-	rpc := connect.NewServer()
-
-	mux := http.NewServeMux()
-	connecthttp.Mount(mux, rpc)
-
+	// Listen first: the modules need the address to hand out. Requests
+	// wait in the backlog until the server starts serving.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
 	defer ln.Close()
 
+	bus := memory.New()
+	defer func() {
+		if err := bus.Close(); err != nil {
+			log.Error("mserver: close pubsub", slog.String("error", err.Error()))
+		}
+	}()
+
+	// The modules register their services on rpc. The routes of the plain
+	// HTTP data planes go to mux, next to the ConnectRPC ones.
+	rpc := connect.NewServer()
+	mux := http.NewServeMux()
+
+	if enabled["storage"] {
+		baseURL := os.Getenv("MSERVER_STORAGE_PUBLIC_URL")
+		if baseURL == "" {
+			baseURL = localURL(ln.Addr())
+		}
+		stor, err := storage.New(ctx, dbCfg, rpc, bus, baseURL, log.With(slog.String("module", "storage")))
+		if err != nil {
+			return fmt.Errorf("storage: %w", err)
+		}
+		defer closeModule(log, "storage", stor.Close)
+		mux.Handle("/", stor.Mux)
+	}
+
+	connecthttp.Mount(mux, rpc)
+
 	srv := newHTTPServer(mux, log)
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(ln) }()
-	log.Info("mserver: listening", "addr", ln.Addr().String())
+	log.Info("mserver: listening", slog.String("addr", ln.Addr().String()))
 
 	select {
 	case err := <-serveErr:
@@ -111,6 +159,48 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 		Handler:           h,
 		Protocols:         &protocols,
 		ReadHeaderTimeout: 10 * time.Second,
-		ErrorLog:          slog.NewLogLogger(log.With("component", "http").Handler(), slog.LevelWarn),
+		ErrorLog:          slog.NewLogLogger(log.With(slog.String("component", "http")).Handler(), slog.LevelWarn),
+	}
+}
+
+// available are the modules migrated to ConnectRPC.
+var available = []string{"storage"}
+
+// parseModules parses MSERVER_MODULES: "all" (or empty) or a
+// comma-separated list of modules.
+func parseModules(v string) (map[string]bool, error) {
+	enabled := make(map[string]bool)
+	if v = strings.TrimSpace(v); v == "" || v == "all" {
+		for _, m := range available {
+			enabled[m] = true
+		}
+		return enabled, nil
+	}
+	for name := range strings.SplitSeq(v, ",") {
+		name = strings.TrimSpace(name)
+		if !slices.Contains(available, name) {
+			return nil, fmt.Errorf("unknown module %q (available: %s)", name, strings.Join(available, ", "))
+		}
+		enabled[name] = true
+	}
+	return enabled, nil
+}
+
+// localURL is the URL to reach the listener from this process: a
+// wildcard address is reached on the loopback.
+func localURL(addr net.Addr) string {
+	host, port, err := net.SplitHostPort(addr.String())
+	if ip := net.ParseIP(host); err != nil || ip == nil || ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return "http://" + net.JoinHostPort(host, port)
+}
+
+func closeModule(log *slog.Logger, name string, closeFn func() error) {
+	if err := closeFn(); err != nil {
+		log.Error("mserver: close module",
+			slog.String("module", name),
+			slog.String("error", err.Error()),
+		)
 	}
 }

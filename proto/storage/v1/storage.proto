@@ -127,7 +127,8 @@ message GetFileResponse {
 
 message ListFilesRequest {
   string location_id = 1;
-  // limit is the maximum number of files returned. Zero means no limit.
+  // limit is the maximum number of files returned. Zero, or a value above
+  // the maximum page (1000), means the maximum page.
   int32 limit = 2;
   // offset is the number of files to skip.
   int32 offset = 3;

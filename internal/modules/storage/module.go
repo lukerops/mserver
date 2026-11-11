@@ -1,29 +1,29 @@
 // Package storage is the storage module: the VFS that owns every physical
-// path and indexes files into IDs. Other modules reach it only through its
-// REST API (see the client package).
+// path and indexes files into IDs. Other modules reach its control plane
+// through the ConnectRPC StorageService (storagev1connect) and read the
+// content of the files from the HTTP data plane (Module.Mux).
 package storage
 
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/lukerops/mserver/internal/clients"
-	database "github.com/lukerops/mserver/internal/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/outbox"
-	"github.com/lukerops/mserver/internal/infra/queue"
+	"connectrpc.com/connect/v2"
+
+	"github.com/lukerops/mserver/gen/storage/v1/storagev1connect"
+	"github.com/lukerops/mserver/internal/database"
 	"github.com/lukerops/mserver/internal/modules/storage/analyzer"
-	"github.com/lukerops/mserver/internal/modules/storage/router"
+	"github.com/lukerops/mserver/internal/modules/storage/handler"
 	"github.com/lukerops/mserver/internal/modules/storage/service"
-	"github.com/lukerops/mserver/internal/modules/storage/store/sqlite"
+	"github.com/lukerops/mserver/internal/modules/storage/store"
+	"github.com/lukerops/mserver/internal/pubsub"
 	"github.com/lukerops/mserver/plugins/storage/ffprobe"
 )
 
@@ -36,21 +36,25 @@ const analysisInterval = time.Minute
 
 // Module is a running storage module.
 type Module struct {
-	// Mux serves the storage API.
+	// Mux serves the data plane: the content of the files as plain HTTP.
+	// The caller mounts it next to the ConnectRPC routes.
 	Mux *http.ServeMux
 
 	db     *sql.DB
-	outbox *outbox.Outbox
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
 
-// New opens the database <dataDir>/storage.db, starts publishing the saved
-// events on pub and builds the API. It scans every location now and then
-// every MSERVER_STORAGE_SCAN_INTERVAL (a duration, default 6h; 0 disables
-// the periodic scans). Files are analyzed in the background by the
-// analyzer plugins (see analyzers). The storage uses no other module.
-func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Clients, log *slog.Logger) (*Module, error) {
+// New opens the database of the module, registers the StorageService
+// handler on server and starts the background work. Events are published
+// on pub. baseURL is the address of the HTTP server that serves Mux, which
+// ResolveFile hands out (e.g. "http://127.0.0.1:8096").
+//
+// It scans every location now and then every MSERVER_STORAGE_SCAN_INTERVAL
+// (a duration, default 6h; 0 disables the periodic scans). Files are
+// analyzed in the background by the analyzer plugins (see newAnalyzers).
+// The storage uses no other module.
+func New(ctx context.Context, cfg database.Config, server *connect.Server, pub pubsub.Publisher, baseURL string, log *slog.Logger) (*Module, error) {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -58,34 +62,33 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 	if err != nil {
 		return nil, err
 	}
+
 	ffprobePath := os.Getenv("MSERVER_FFPROBE_PATH")
 	if ffprobePath == "" {
 		ffprobePath = "ffprobe"
 	}
+
 	analyzers := newAnalyzers(ctx, ffprobePath, log)
-	dataFile := filepath.Join(dataDir, "storage.db")
-	db, err := database.Open(ctx, dataFile)
+	db, err := database.Open(ctx, cfg, "storage", store.Migrations)
 	if err != nil {
 		return nil, err
 	}
-	ob, err := outbox.New(ctx, db, pub, log)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	st, err := sqlite.New(ctx, db)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	ob.Start(ctx)
 
-	svc := service.New(st, ob, log, analyzers...)
+	svc := service.New(store.New(db), pub, log, analyzers...)
+	h := handler.New(svc, baseURL, log)
+	storagev1connect.RegisterStorageServiceHandler(server, h)
+
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	m := &Module{Mux: router.New(svc, log), db: db, outbox: ob, cancel: cancel}
+	m := &Module{Mux: h.Mux(), db: db, cancel: cancel}
 	m.wg.Go(func() { scanLoop(runCtx, svc, interval) })
 	m.wg.Go(func() { svc.RunAnalysis(runCtx, analysisInterval) })
-	log.InfoContext(ctx, "storage: module started", "data_file", dataFile,
-		"scan_interval", interval, "analysis_interval", analysisInterval,
-		"stable_after", service.StableAfter, "ffprobe_path", ffprobePath)
+	log.InfoContext(ctx, "storage: module started",
+		slog.String("db_driver", string(cfg.Driver)),
+		slog.Int64("scan_interval", int64(interval)),
+		slog.Int64("analysis_interval", int64(analysisInterval)),
+		slog.Int64("stable_after", int64(service.StableAfter)),
+		slog.String("ffprobe_path", ffprobePath),
+	)
 	return m, nil
 }
 
@@ -99,7 +102,9 @@ func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Cli
 func newAnalyzers(ctx context.Context, ffprobePath string, log *slog.Logger) []analyzer.Analyzer {
 	if _, err := exec.LookPath(ffprobePath); err != nil {
 		log.WarnContext(ctx, "storage: ffprobe not found, video files will not be analyzed",
-			"path", ffprobePath, "error", err)
+			slog.String("path", ffprobePath),
+			slog.String("error", err.Error()),
+		)
 	}
 	return []analyzer.Analyzer{ffprobe.New(ffprobePath, log)}
 }
@@ -119,7 +124,7 @@ func scanInterval(v string) (time.Duration, error) {
 
 // scanLoop scans every location now and then every interval, until ctx is
 // canceled. A zero interval scans only once.
-func scanLoop(ctx context.Context, svc service.Service, interval time.Duration) {
+func scanLoop(ctx context.Context, svc *service.Service, interval time.Duration) {
 	svc.ScanAll(ctx)
 	if interval == 0 {
 		return
@@ -137,11 +142,9 @@ func scanLoop(ctx context.Context, svc service.Service, interval time.Duration) 
 	}
 }
 
-// Close stops the background scans and the event publishing, and closes
-// the database.
+// Close stops the background work and closes the database.
 func (m *Module) Close() error {
 	m.cancel()
 	m.wg.Wait()
-	m.outbox.Stop()
 	return m.db.Close()
 }
