@@ -1,0 +1,364 @@
+syntax = "proto3";
+
+// The library module: the global catalog of media (libraries, movies,
+// series, seasons and episodes), built from the events of the storage. It
+// knows nothing about users.
+//
+// The catalog is a hierarchy: a library holds movies and series, a series
+// holds seasons and a season holds episodes. The parent IDs in the requests
+// are optional: when set, the item must belong to that parent (NOT_FOUND if
+// not); when empty, any parent matches. The lists fail with NOT_FOUND when a
+// parent set in the request does not exist or does not belong to its own
+// parents.
+package library.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service LibraryService {
+  // CreateLibrary registers a library and asks the storage to resync its
+  // locations, so that their files are cataloged. A location belongs to at
+  // most one library (ALREADY_EXISTS otherwise). A failed resync is retried
+  // a few times and then only logged: the library is created anyway.
+  rpc CreateLibrary(CreateLibraryRequest) returns (CreateLibraryResponse);
+  rpc GetLibrary(GetLibraryRequest) returns (GetLibraryResponse);
+  // ListLibraries lists the libraries ordered by name.
+  rpc ListLibraries(ListLibrariesRequest) returns (ListLibrariesResponse);
+  // DeleteLibrary removes a library with its movies, series, seasons and
+  // episodes, publishing their removed events. Its locations can then join
+  // another library.
+  rpc DeleteLibrary(DeleteLibraryRequest) returns (DeleteLibraryResponse);
+  // ResyncLibrary publishes again the added event of every movie, series,
+  // season and episode of the library, so that consumers can rebuild their
+  // projections.
+  rpc ResyncLibrary(ResyncLibraryRequest) returns (ResyncLibraryResponse);
+
+  rpc GetMovie(GetMovieRequest) returns (GetMovieResponse);
+  rpc ListMovies(ListMoviesRequest) returns (ListMoviesResponse);
+
+  rpc GetSeries(GetSeriesRequest) returns (GetSeriesResponse);
+  rpc ListSeries(ListSeriesRequest) returns (ListSeriesResponse);
+
+  rpc GetSeason(GetSeasonRequest) returns (GetSeasonResponse);
+  // ListSeasons lists the seasons ordered by series and number.
+  rpc ListSeasons(ListSeasonsRequest) returns (ListSeasonsResponse);
+
+  rpc GetEpisode(GetEpisodeRequest) returns (GetEpisodeResponse);
+  rpc ListEpisodes(ListEpisodesRequest) returns (ListEpisodesResponse);
+}
+
+// Library groups locations of the storage holding one type of media.
+message Library {
+  // id is a UUIDv7.
+  string id = 1;
+  string name = 2;
+  // media_type is "movies" or "tvshows".
+  string media_type = 3;
+  // location_ids are the storage locations of the library, in the order
+  // they were given.
+  repeated string location_ids = 4;
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// Movie is a movie identified from a file of the storage.
+message Movie {
+  // id is derived from file_id.
+  string id = 1;
+  string library_id = 2;
+  string file_id = 3;
+  string location_id = 4;
+  // path is relative to the location.
+  string path = 5;
+  string title = 6;
+  string sort_title = 7;
+  // year is zero when unknown.
+  int32 year = 8;
+  // media_info is unset until the file is analyzed.
+  MediaInfo media_info = 9;
+  // created_at is when the movie was added to the library.
+  google.protobuf.Timestamp created_at = 10;
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// MediaInfo is the technical information of the file of a movie or episode.
+message MediaInfo {
+  // container is the format name (e.g. "matroska,webm").
+  string container = 1;
+  int64 duration_ms = 2;
+  // bit_rate is in bits per second.
+  int64 bit_rate = 3;
+  int64 size = 4;
+  repeated Stream streams = 5;
+}
+
+// Stream is a video, audio or subtitle stream embedded in a media file.
+message Stream {
+  int32 index = 1;
+  // type is "video", "audio" or "subtitle".
+  string type = 2;
+  string codec = 3;
+  string profile = 4;
+  int32 level = 5;
+  // language is the tag of the file (usually ISO 639-2, e.g. "eng").
+  string language = 6;
+  string title = 7;
+  bool default = 8;
+  bool forced = 9;
+  bool hearing_impaired = 10;
+  int64 bit_rate = 11;
+
+  int32 width = 12;
+  int32 height = 13;
+  string aspect_ratio = 14;
+  double frame_rate = 15;
+  string pixel_format = 16;
+  int32 bit_depth = 17;
+  bool interlaced = 18;
+  string color_space = 19;
+  string color_transfer = 20;
+  string color_primaries = 21;
+
+  int32 channels = 22;
+  string channel_layout = 23;
+  int32 sample_rate = 24;
+}
+
+// Series is the episodes of a library with the same title and year,
+// whatever their folder or location.
+message Series {
+  string id = 1;
+  string library_id = 2;
+  string title = 3;
+  string sort_title = 4;
+  // year is zero when unknown.
+  int32 year = 5;
+  int32 season_count = 6;
+  int32 episode_count = 7;
+  // created_at is when the first episode of the series was added.
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// Season is a season of a series.
+message Season {
+  string id = 1;
+  string series_id = 2;
+  string library_id = 3;
+  // number is 0 for the specials.
+  int32 number = 4;
+  string series_title = 5;
+  int32 series_year = 6;
+  int32 episode_count = 7;
+  // created_at is when the first episode of the season was added.
+  google.protobuf.Timestamp created_at = 8;
+}
+
+// Episode is an episode identified from a file of the storage. A file may
+// hold several episodes: number to end_number.
+message Episode {
+  // id is derived from file_id.
+  string id = 1;
+  string library_id = 2;
+  string series_id = 3;
+  string season_id = 4;
+  string file_id = 5;
+  string location_id = 6;
+  // path is relative to the location.
+  string path = 7;
+  string title = 8;
+  string series_title = 9;
+  // series_year is zero when unknown.
+  int32 series_year = 10;
+  // season_number is 0 for the specials.
+  int32 season_number = 11;
+  // number is unset when unknown; end_number unless the file holds several
+  // episodes.
+  optional int32 number = 12;
+  optional int32 end_number = 13;
+  // media_info is unset until the file is analyzed.
+  MediaInfo media_info = 14;
+  // created_at is when the episode was added to the library.
+  google.protobuf.Timestamp created_at = 15;
+  google.protobuf.Timestamp updated_at = 16;
+}
+
+message CreateLibraryRequest {
+  string name = 1;
+  // media_type must be "movies" or "tvshows".
+  string media_type = 2;
+  // location_ids are storage locations that belong to no other library.
+  repeated string location_ids = 3;
+}
+
+message CreateLibraryResponse {
+  Library library = 1;
+}
+
+message GetLibraryRequest {
+  string id = 1;
+}
+
+message GetLibraryResponse {
+  Library library = 1;
+}
+
+message ListLibrariesRequest {}
+
+message ListLibrariesResponse {
+  repeated Library libraries = 1;
+}
+
+message DeleteLibraryRequest {
+  string id = 1;
+}
+
+message DeleteLibraryResponse {}
+
+message ResyncLibraryRequest {
+  string id = 1;
+}
+
+message ResyncLibraryResponse {}
+
+message GetMovieRequest {
+  // library_id is optional.
+  string library_id = 1;
+  string id = 2;
+}
+
+message GetMovieResponse {
+  Movie movie = 1;
+}
+
+message ListMoviesRequest {
+  // library_id restricts the movies to a library, unless it is empty.
+  string library_id = 1;
+  // ids restricts the movies to these IDs, unless it is empty.
+  repeated string ids = 2;
+  // years restricts the movies to these years, unless it is empty.
+  repeated int32 years = 3;
+  // audio_languages and subtitle_languages restrict the movies to the ones
+  // with an audio (subtitle) stream in one of these languages, unless they
+  // are empty. Languages match case-insensitively.
+  repeated string audio_languages = 4;
+  repeated string subtitle_languages = 5;
+  // sort_by is "title" (default), "added" or "year". Ties are broken by
+  // title and then by ID.
+  string sort_by = 6;
+  bool descending = 7;
+  // limit is the maximum number of movies. Zero, or a value above the
+  // maximum page (1000), means the maximum page.
+  int32 limit = 8;
+  // offset is the number of movies to skip.
+  int32 offset = 9;
+}
+
+message ListMoviesResponse {
+  repeated Movie movies = 1;
+  // total is the number of movies matching the request, ignoring the offset
+  // and limit.
+  int32 total = 2;
+}
+
+message GetSeriesRequest {
+  // library_id is optional.
+  string library_id = 1;
+  string id = 2;
+}
+
+message GetSeriesResponse {
+  Series series = 1;
+}
+
+message ListSeriesRequest {
+  // library_id restricts the series to a library, unless it is empty.
+  string library_id = 1;
+  // ids restricts the series to these IDs, unless it is empty.
+  repeated string ids = 2;
+  // years restricts the series to these years, unless it is empty.
+  repeated int32 years = 3;
+  // audio_languages and subtitle_languages restrict the series to the ones
+  // with an episode with an audio (subtitle) stream in one of these
+  // languages, unless they are empty.
+  repeated string audio_languages = 4;
+  repeated string subtitle_languages = 5;
+  // sort_by is "title" (default), "added" or "year".
+  string sort_by = 6;
+  bool descending = 7;
+  // limit is the maximum number of series. Zero, or a value above the
+  // maximum page (1000), means the maximum page.
+  int32 limit = 8;
+  // offset is the number of series to skip.
+  int32 offset = 9;
+}
+
+message ListSeriesResponse {
+  repeated Series series = 1;
+  // total is the number of series matching the request, ignoring the offset
+  // and limit.
+  int32 total = 2;
+}
+
+message GetSeasonRequest {
+  // library_id and series_id are optional.
+  string library_id = 1;
+  string series_id = 2;
+  string id = 3;
+}
+
+message GetSeasonResponse {
+  Season season = 1;
+}
+
+message ListSeasonsRequest {
+  // library_id and series_id restrict the seasons, unless they are empty.
+  string library_id = 1;
+  string series_id = 2;
+  // ids restricts the seasons to these IDs, unless it is empty.
+  repeated string ids = 3;
+}
+
+message ListSeasonsResponse {
+  repeated Season seasons = 1;
+}
+
+message GetEpisodeRequest {
+  // library_id, series_id and season_id are optional.
+  string library_id = 1;
+  string series_id = 2;
+  string season_id = 3;
+  string id = 4;
+}
+
+message GetEpisodeResponse {
+  Episode episode = 1;
+}
+
+message ListEpisodesRequest {
+  // library_id, series_id and season_id restrict the episodes, unless they
+  // are empty.
+  string library_id = 1;
+  string series_id = 2;
+  string season_id = 3;
+  // ids restricts the episodes to these IDs, unless it is empty.
+  repeated string ids = 4;
+  // audio_languages and subtitle_languages restrict the episodes to the
+  // ones with an audio (subtitle) stream in one of these languages, unless
+  // they are empty. Languages match case-insensitively.
+  repeated string audio_languages = 5;
+  repeated string subtitle_languages = 6;
+  // sort_by is "number" (default: series, season, episode number, then file
+  // name; episodes without number last in their season) or "added".
+  string sort_by = 7;
+  bool descending = 8;
+  // limit is the maximum number of episodes. Zero, or a value above the
+  // maximum page (1000), means the maximum page.
+  int32 limit = 9;
+  // offset is the number of episodes to skip.
+  int32 offset = 10;
+}
+
+message ListEpisodesResponse {
+  repeated Episode episodes = 1;
+  // total is the number of episodes matching the request, ignoring the
+  // offset and limit.
+  int32 total = 2;
+}
