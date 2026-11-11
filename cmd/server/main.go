@@ -4,8 +4,8 @@
 // reach it.
 //
 // The modules register their ConnectRPC services on the one server. Only
-// the migrated modules (storage) exist yet; the others are added as they
-// are migrated.
+// the migrated modules (identity and storage) exist yet; the others are
+// added as they are migrated.
 //
 // Variables:
 //
@@ -45,6 +45,7 @@ import (
 
 	"github.com/lukerops/mserver/internal/database"
 	"github.com/lukerops/mserver/internal/logger"
+	"github.com/lukerops/mserver/internal/modules/identity"
 	"github.com/lukerops/mserver/internal/modules/storage"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
@@ -113,6 +114,14 @@ func run(ctx context.Context) error {
 	rpc := connect.NewServer()
 	mux := http.NewServeMux()
 
+	if enabled["identity"] {
+		ident, err := identity.New(ctx, dbCfg, rpc, bus, log.With(slog.String("module", "identity")))
+		if err != nil {
+			return fmt.Errorf("identity: %w", err)
+		}
+		defer closeModule(log, "identity", ident.Close)
+	}
+
 	if enabled["storage"] {
 		baseURL := os.Getenv("MSERVER_STORAGE_PUBLIC_URL")
 		if baseURL == "" {
@@ -164,7 +173,7 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 }
 
 // available are the modules migrated to ConnectRPC.
-var available = []string{"storage"}
+var available = []string{"identity", "storage"}
 
 // parseModules parses MSERVER_MODULES: "all" (or empty) or a
 // comma-separated list of modules.

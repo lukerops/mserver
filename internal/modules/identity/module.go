@@ -1,63 +1,48 @@
-// Package identity is the identity module: accounts, profiles, devices
-// and sessions. Other modules reach it only through its REST API (see
-// the client package).
+// Package identity is the identity module: accounts, profiles, devices and
+// sessions. Other modules reach it through the ConnectRPC IdentityService
+// (identityv1connect).
 package identity
 
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"log/slog"
-	"net/http"
-	"path/filepath"
 
-	"github.com/lukerops/mserver/internal/clients"
-	database "github.com/lukerops/mserver/internal/database/sqlite"
-	"github.com/lukerops/mserver/internal/infra/outbox"
-	"github.com/lukerops/mserver/internal/infra/queue"
-	"github.com/lukerops/mserver/internal/modules/identity/router"
+	"connectrpc.com/connect/v2"
+
+	"github.com/lukerops/mserver/gen/identity/v1/identityv1connect"
+	"github.com/lukerops/mserver/internal/database"
+	"github.com/lukerops/mserver/internal/modules/identity/handler"
 	"github.com/lukerops/mserver/internal/modules/identity/service"
-	"github.com/lukerops/mserver/internal/modules/identity/store/sqlite"
+	"github.com/lukerops/mserver/internal/modules/identity/store"
+	"github.com/lukerops/mserver/internal/pubsub"
 )
 
 // Module is a running identity module.
 type Module struct {
-	// Mux serves the identity API.
-	Mux *http.ServeMux
-
-	db     *sql.DB
-	outbox *outbox.Outbox
+	db *sql.DB
 }
 
-// New opens the database <dataDir>/identity.db, starts publishing the
-// saved events on pub and builds the API. The identity uses no other
-// module.
-func New(ctx context.Context, dataDir string, pub queue.Publisher, _ clients.Clients, log *slog.Logger) (*Module, error) {
+// New opens the database of the module and registers the IdentityService
+// handler on server. Events are published on pub. The identity uses no
+// other module.
+func New(ctx context.Context, cfg database.Config, server *connect.Server, pub pubsub.Publisher, log *slog.Logger) (*Module, error) {
 	if log == nil {
 		log = slog.Default()
 	}
-	dataFile := filepath.Join(dataDir, "identity.db")
-	db, err := database.Open(ctx, dataFile)
+	db, err := database.Open(ctx, cfg, "identity", store.Migrations)
 	if err != nil {
 		return nil, err
 	}
-	ob, err := outbox.New(ctx, db, pub, log)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	st, err := sqlite.New(ctx, db)
-	if err != nil {
-		return nil, errors.Join(err, db.Close())
-	}
-	ob.Start(ctx)
 
-	svc := service.New(st, ob, log)
-	log.InfoContext(ctx, "identity: module started", "data_file", dataFile)
-	return &Module{Mux: router.New(svc, log), db: db, outbox: ob}, nil
+	svc := service.New(store.New(db), pub, log)
+	identityv1connect.RegisterIdentityServiceHandler(server, handler.New(svc, log))
+
+	log.InfoContext(ctx, "identity: module started", slog.String("db_driver", string(cfg.Driver)))
+	return &Module{db: db}, nil
 }
 
-// Close stops publishing events and closes the database.
+// Close closes the database.
 func (m *Module) Close() error {
-	m.outbox.Stop()
 	return m.db.Close()
 }
