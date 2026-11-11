@@ -837,10 +837,11 @@ mserver/
 │   ├── library/v1/library.proto
 │   ├── playback/v1/playback.proto
 │   └── subtitles/v1/subtitles.proto
+├── gen/                                 # código gerado pelo buf (protobuf + connectrpc); versionado, não editar
 ├── cmd/
 │   └── server/                          # ponto de entrada: bootstrap híbrido (monolito / microserviços)
 ├── internal/
-│   ├── gen/                             # código gerado pelo buf (protobuf + connectrpc); versionado, não editar
+│   ├── events/                          # todos os eventos (tópicos, Source<Módulo> e payloads V1), um arquivo por contexto
 │   ├── clients/                         # struct Clients com as interfaces <Service>Client geradas
 │   ├── database/                        # abertura de banco (sqlite / postgres), runner de migrations, IsUniqueViolation
 │   ├── kv/                              # interface kv.Store (Get/Create/Update/Delete/List com TTL)
