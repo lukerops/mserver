@@ -1,4 +1,4 @@
-package jellyfin
+package handlers
 
 import (
 	"context"

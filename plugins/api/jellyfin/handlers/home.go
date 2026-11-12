@@ -1,21 +1,23 @@
-package jellyfin
+package handlers
 
 import (
 	"io"
 	"net/http"
+
+	"github.com/lukerops/mserver/plugins/api/jellyfin/service"
 )
 
 // displayPreferences returns the default preferences: they are not stored
 // yet, but jellyfin-web needs them to finish loading after login.
-func (p *plugin) displayPreferences(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
+func (h *Handler) displayPreferences(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
 		return
 	}
 	client := r.URL.Query().Get("client")
 	if client == "" {
 		client = "emby"
 	}
-	writeJSON(w, http.StatusOK, DisplayPreferencesDto{
+	writeJSON(w, http.StatusOK, service.DisplayPreferences{
 		Id:              r.PathValue("displayPreferencesId"),
 		SortBy:          "SortName",
 		CustomPrefs:     map[string]string{},
@@ -27,8 +29,8 @@ func (p *plugin) displayPreferences(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateDisplayPreferences accepts and discards the preferences.
-func (p *plugin) updateDisplayPreferences(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
+func (h *Handler) updateDisplayPreferences(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
 		return
 	}
 	_, _ = io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, 1<<20))
@@ -36,9 +38,9 @@ func (p *plugin) updateDisplayPreferences(w http.ResponseWriter, r *http.Request
 }
 
 // resumeItems lists nothing to resume until the watchstate module exists.
-func (p *plugin) resumeItems(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
+func (h *Handler) resumeItems(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, BaseItemDtoQueryResult{Items: []any{}})
+	writeJSON(w, http.StatusOK, service.ItemQueryResult{Items: []service.Item{}})
 }

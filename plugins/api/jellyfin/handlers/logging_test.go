@@ -1,4 +1,4 @@
-package jellyfin
+package handlers
 
 import (
 	"bytes"
@@ -11,6 +11,7 @@ import (
 
 	"github.com/lukerops/mserver/internal/clients"
 	kvmemory "github.com/lukerops/mserver/internal/kv/memory"
+	"github.com/lukerops/mserver/plugins/api/jellyfin/service"
 )
 
 // logRecords decodes the JSON records written to buf.
@@ -44,7 +45,7 @@ func TestUnknownRoutes(t *testing.T) {
 	log := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	st := kvmemory.New()
 	t.Cleanup(func() { st.Close() })
-	h := New(clients.Clients{}, st, nil, log)
+	h := New(service.New(clients.Clients{}, st, nil), nil, log)
 
 	for _, tc := range []struct {
 		method, path string
@@ -107,7 +108,7 @@ func TestUnknownRoutes(t *testing.T) {
 
 func TestDecodeBody(t *testing.T) {
 	var buf bytes.Buffer
-	p := &plugin{log: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
+	p := &Handler{log: slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
 
 	decode := func(path, body string, credentials bool) (*httptest.ResponseRecorder, bool) {
 		buf.Reset()

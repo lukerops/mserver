@@ -1,4 +1,4 @@
-package jellyfin
+package service
 
 import (
 	"testing"
@@ -27,22 +27,22 @@ func TestSubtitleLanguage(t *testing.T) {
 
 func TestExternalSubtitleStream(t *testing.T) {
 	for _, tt := range []struct {
-		sub  *libraryv1.ExternalSubtitle
+		sub  ExternalSubtitle
 		want MediaStream
 	}{
 		{
-			&libraryv1.ExternalSubtitle{Format: "srt", Language: "pt-BR"},
+			ExternalSubtitle{Format: "srt", Language: "pt-BR"},
 			MediaStream{Language: "por", DisplayTitle: "Portuguese (Brazil) - SRT - External"},
 		},
 		{
-			&libraryv1.ExternalSubtitle{Format: "srt", Language: "en", Forced: true, HearingImpaired: true, Title: "Commentary"},
+			ExternalSubtitle{Format: "srt", Language: "en", Forced: true, HearingImpaired: true, Title: "Commentary"},
 			MediaStream{
 				Language: "eng", Title: "Commentary", IsForced: true, IsHearingImpaired: true,
 				DisplayTitle: "English - Commentary - SRT - Forced - SDH - External",
 			},
 		},
 		{
-			&libraryv1.ExternalSubtitle{Format: "srt"},
+			ExternalSubtitle{Format: "srt"},
 			MediaStream{DisplayTitle: "Unknown - SRT - External"},
 		},
 	} {
@@ -58,7 +58,6 @@ func TestExternalSubtitleStream(t *testing.T) {
 }
 
 func TestVideoItemWithExternalSubtitles(t *testing.T) {
-	p := &plugin{}
 	m := &libraryv1.Movie{
 		Id: "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b", Path: "Alien.mkv", Title: "Alien",
 		MediaInfo: &libraryv1.MediaInfo{Streams: []*libraryv1.Stream{
@@ -70,7 +69,7 @@ func TestVideoItemWithExternalSubtitles(t *testing.T) {
 			{Id: "b", FileId: "f2", Format: "srt", Language: "pt-BR"},
 		},
 	}
-	item := p.movieItem(m, true)
+	item := movieItem(m, true)
 	if !item.HasSubtitles || len(item.MediaStreams) != 4 {
 		t.Fatalf("item = %+v", item)
 	}
@@ -89,7 +88,7 @@ func TestVideoItemWithExternalSubtitles(t *testing.T) {
 
 	// Without analysis, the external subtitles come first.
 	m.MediaInfo = nil
-	item = p.movieItem(m, true)
+	item = movieItem(m, true)
 	if len(item.MediaStreams) != 2 || item.MediaStreams[0].Index != 0 || item.MediaStreams[1].Index != 1 {
 		t.Errorf("streams without media info = %+v", item.MediaStreams)
 	}
@@ -104,25 +103,25 @@ func TestVideoItemWithExternalSubtitles(t *testing.T) {
 func TestSubtitleConversion(t *testing.T) {
 	for _, tt := range []struct {
 		original, format string
-		want             subtitleConversion
+		want             SubtitleConversion
 		ok               bool
 	}{
-		{"srt", "srt", subtitlePassthrough, true},
-		{"srt", "subrip", subtitlePassthrough, true},
-		{"srt", "vtt", subtitleVTT, true},
-		{"srt", "js", subtitleJSON, true},
-		{"srt", "json", subtitleJSON, true},
+		{"srt", "srt", SubtitlePassthrough, true},
+		{"srt", "subrip", SubtitlePassthrough, true},
+		{"srt", "vtt", SubtitleVTT, true},
+		{"srt", "js", SubtitleJSON, true},
+		{"srt", "json", SubtitleJSON, true},
 		{"srt", "ass", 0, false},
-		{"ass", "ass", subtitlePassthrough, true},
+		{"ass", "ass", SubtitlePassthrough, true},
 		{"ass", "vtt", 0, false},
-		{"ssa", "ssa", subtitlePassthrough, true},
-		{"vtt", "vtt", subtitlePassthrough, true},
+		{"ssa", "ssa", SubtitlePassthrough, true},
+		{"vtt", "vtt", SubtitlePassthrough, true},
 		{"vtt", "srt", 0, false},
 		{"srt", "txt", 0, false},
 	} {
-		got, ok := subtitleConvert(tt.original, tt.format)
+		got, ok := SubtitleConvert(tt.original, tt.format)
 		if got != tt.want || ok != tt.ok {
-			t.Errorf("subtitleConvert(%q, %q) = %v, %v; want %v, %v",
+			t.Errorf("SubtitleConvert(%q, %q) = %v, %v; want %v, %v",
 				tt.original, tt.format, got, ok, tt.want, tt.ok)
 		}
 	}
@@ -180,8 +179,8 @@ func TestSRTToVTT(t *testing.T) {
 		"utf8":  {"1\n00:00:01,000 --> 00:00:02,000\nAção\n", "WEBVTT\n\n1\n00:00:01.000 --> 00:00:02.000\nAção\n"},
 		"empty": {"", "WEBVTT\n"},
 	} {
-		if got := string(srtToVTT([]byte(tt.in))); got != tt.want {
-			t.Errorf("%s: srtToVTT = %q, want %q", name, got, tt.want)
+		if got := string(SRTToVTT([]byte(tt.in))); got != tt.want {
+			t.Errorf("%s: SRTToVTT = %q, want %q", name, got, tt.want)
 		}
 	}
 }
@@ -189,30 +188,30 @@ func TestSRTToVTT(t *testing.T) {
 func TestSRTToTrackInfo(t *testing.T) {
 	for name, tt := range map[string]struct {
 		in   string
-		want []subtitleTrackEvent
+		want []SubtitleTrackEvent
 	}{
 		"basic": {
 			"1\n00:00:01,000 --> 00:00:02,500\nHello, world\n\n2\n00:00:03,000 --> 00:00:04,000\nBye\n",
-			[]subtitleTrackEvent{
+			[]SubtitleTrackEvent{
 				{ID: "1", Text: "Hello, world", StartPositionTicks: 10_000_000, EndPositionTicks: 25_000_000},
 				{ID: "2", Text: "Bye", StartPositionTicks: 30_000_000, EndPositionTicks: 40_000_000},
 			},
 		},
 		"multiline and position": {
 			"1\n00:00:01,500 --> 00:00:02,000 X1:10 X2:20\nfirst\nsecond\n",
-			[]subtitleTrackEvent{
+			[]SubtitleTrackEvent{
 				{ID: "1", Text: "first\nsecond", StartPositionTicks: 15_000_000, EndPositionTicks: 20_000_000},
 			},
 		},
 		"no index": {
 			"00:00:00,000 --> 00:00:01,000\nHi\n",
-			[]subtitleTrackEvent{
+			[]SubtitleTrackEvent{
 				{ID: "1", Text: "Hi", StartPositionTicks: 0, EndPositionTicks: 10_000_000},
 			},
 		},
-		"empty": {"", []subtitleTrackEvent{}},
+		"empty": {"", []SubtitleTrackEvent{}},
 	} {
-		got := srtToTrackInfo([]byte(tt.in))
+		got := SRTToTrackInfo([]byte(tt.in))
 		if len(got.TrackEvents) != len(tt.want) {
 			t.Errorf("%s: got %+v, want %+v", name, got.TrackEvents, tt.want)
 			continue

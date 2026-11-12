@@ -1,4 +1,4 @@
-package jellyfin
+package handlers
 
 import (
 	"net"
@@ -7,18 +7,20 @@ import (
 	"net/url"
 	"runtime"
 	"strings"
+
+	"github.com/lukerops/mserver/plugins/api/jellyfin/service"
 )
 
-func (p *plugin) publicSystemInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, p.publicInfo(r))
+func (h *Handler) publicSystemInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, publicInfo(r))
 }
 
-func (p *plugin) systemInfo(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
+func (h *Handler) systemInfo(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, SystemInfo{
-		PublicSystemInfo:           p.publicInfo(r),
+	writeJSON(w, http.StatusOK, service.SystemInfo{
+		PublicSystemInfo:           publicInfo(r),
 		OperatingSystemDisplayName: runtime.GOOS,
 		SystemArchitecture:         runtime.GOARCH,
 		CompletedInstallations:     []any{},
@@ -26,19 +28,19 @@ func (p *plugin) systemInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (p *plugin) publicInfo(r *http.Request) PublicSystemInfo {
+func publicInfo(r *http.Request) service.PublicSystemInfo {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	return PublicSystemInfo{
+	return service.PublicSystemInfo{
 		// The address the client used to reach the plugin.
 		LocalAddress:           scheme + "://" + r.Host + "/plugins/jellyfin",
-		ServerName:             serverName,
-		Version:                version,
-		ProductName:            productName,
+		ServerName:             service.ServerName,
+		Version:                service.Version,
+		ProductName:            service.ProductName,
 		OperatingSystem:        runtime.GOOS,
-		Id:                     serverID,
+		Id:                     service.ServerID,
 		StartupWizardCompleted: true,
 	}
 }
@@ -54,23 +56,23 @@ func basePath(r *http.Request) string {
 	return strings.TrimSuffix(u.Path, r.URL.Path)
 }
 
-func (p *plugin) ping(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, serverName)
+func (h *Handler) ping(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, service.ServerName)
 }
 
 // endpointInfo tells the client whether it connects from this machine or
 // from the local network (loopback, private or link-local address). The
 // address is the one of the connection: behind a reverse proxy, it is the
 // address of the proxy.
-func (p *plugin) endpointInfo(w http.ResponseWriter, r *http.Request) {
-	if _, ok := p.authenticate(w, r); !ok {
+func (h *Handler) endpointInfo(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, endpoint(r.RemoteAddr))
 }
 
-func endpoint(remoteAddr string) EndPointInfo {
-	var info EndPointInfo
+func endpoint(remoteAddr string) service.EndPointInfo {
+	var info service.EndPointInfo
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
 		host = remoteAddr
@@ -83,16 +85,16 @@ func endpoint(remoteAddr string) EndPointInfo {
 	return info
 }
 
-func (p *plugin) brandingConfiguration(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, BrandingOptionsDto{})
+func (h *Handler) brandingConfiguration(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, service.BrandingOptions{})
 }
 
 // brandingCss has no custom CSS.
-func (p *plugin) brandingCss(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) brandingCss(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
 // quickConnectEnabled reports that Quick Connect is not supported.
-func (p *plugin) quickConnectEnabled(w http.ResponseWriter, _ *http.Request) {
+func (h *Handler) quickConnectEnabled(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, false)
 }

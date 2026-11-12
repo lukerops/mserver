@@ -1,4 +1,4 @@
-package jellyfin
+package service
 
 import (
 	"encoding/json"

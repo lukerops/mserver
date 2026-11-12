@@ -1,4 +1,4 @@
-package jellyfin
+package handlers
 
 import (
 	"bytes"
@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/lukerops/mserver/plugins/api/jellyfin/service"
 )
 
 // maxBodySize bounds the JSON bodies the plugin reads.
@@ -45,27 +47,43 @@ func unavailable(w http.ResponseWriter, r *http.Request, reason string) {
 }
 
 // internalError logs err and answers 500.
-func (p *plugin) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
-	p.log.ErrorContext(r.Context(), "jellyfin: "+op, slog.String("error", err.Error()))
+func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	h.log.ErrorContext(r.Context(), "jellyfin: "+op, slog.String("error", err.Error()))
 	fail(w, r, http.StatusInternalServerError, "Internal Server Error", op+": "+err.Error())
+}
+
+// serviceError maps a service error to the HTTP response it stands for.
+func (h *Handler) serviceError(w http.ResponseWriter, r *http.Request, op string, err error) {
+	switch {
+	case errors.Is(err, service.ErrInvalidArgument):
+		badRequest(w, r, err.Error())
+	case errors.Is(err, service.ErrUnauthenticated):
+		unauthorized(w, r, err.Error())
+	case errors.Is(err, service.ErrNotFound):
+		notFound(w, r, err.Error())
+	case errors.Is(err, service.ErrUnavailable):
+		unavailable(w, r, err.Error())
+	default:
+		h.internalError(w, r, op, err)
+	}
 }
 
 // decodeBody decodes the JSON body of r into v. An empty body is accepted
 // and leaves v as is. When the body is invalid, it answers 400 and returns
 // false.
-func (p *plugin) decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
-	return p.decode(w, r, v, true, true)
+func (h *Handler) decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	return h.decode(w, r, v, true, true)
 }
 
 // decodeCredentials decodes a JSON body that carries credentials, like
 // decodeBody, but an empty body is invalid and the body is never logged.
-func (p *plugin) decodeCredentials(w http.ResponseWriter, r *http.Request, v any) bool {
-	return p.decode(w, r, v, false, false)
+func (h *Handler) decodeCredentials(w http.ResponseWriter, r *http.Request, v any) bool {
+	return h.decode(w, r, v, false, false)
 }
 
-func (p *plugin) decode(w http.ResponseWriter, r *http.Request, v any, allowEmpty, logBody bool) bool {
+func (h *Handler) decode(w http.ResponseWriter, r *http.Request, v any, allowEmpty, logBody bool) bool {
 	ctx := r.Context()
-	logBody = logBody && p.log.Enabled(ctx, slog.LevelDebug)
+	logBody = logBody && h.log.Enabled(ctx, slog.LevelDebug)
 	var body io.Reader = http.MaxBytesReader(w, r.Body, maxBodySize)
 	var raw prefixWriter
 	if logBody {
@@ -90,7 +108,7 @@ func (p *plugin) decode(w http.ResponseWriter, r *http.Request, v any, allowEmpt
 		}
 		attrs = append(attrs, slog.String("body", s))
 	}
-	p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: invalid request body", attrs...)
+	h.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: invalid request body", attrs...)
 	fail(w, r, http.StatusBadRequest, "invalid body", "invalid body: "+err.Error())
 	return false
 }
@@ -146,7 +164,7 @@ var ignoredEndpoints = map[string]bool{
 // checkRoute logs the requests mux has no route for: an endpoint the
 // plugin does not implement (404), or a method it does not implement on
 // an existing endpoint (405). path is the path as the client sent it.
-func (p *plugin) checkRoute(mux *http.ServeMux, r *http.Request, path string, a authorization) {
+func (h *Handler) checkRoute(mux *http.ServeMux, r *http.Request, path string, a authorization) {
 	if _, pattern := mux.Handler(r); pattern != "" {
 		return
 	}
@@ -163,7 +181,7 @@ func (p *plugin) checkRoute(mux *http.ServeMux, r *http.Request, path string, a 
 	}
 	ctx := r.Context()
 	if allowed != nil {
-		p.log.WarnContext(ctx, "jellyfin: method not allowed",
+		h.log.WarnContext(ctx, "jellyfin: method not allowed",
 			slog.String("method", r.Method),
 			slog.String("path", path),
 			slog.String("allowed", strings.Join(allowed, ", ")),
@@ -177,7 +195,7 @@ func (p *plugin) checkRoute(mux *http.ServeMux, r *http.Request, path string, a 
 		level = slog.LevelDebug
 		quiet(ctx)
 	}
-	p.log.LogAttrs(ctx, level, "jellyfin: endpoint not implemented",
+	h.log.LogAttrs(ctx, level, "jellyfin: endpoint not implemented",
 		slog.String("method", r.Method),
 		slog.String("path", path),
 		slog.String("client", a.Client),

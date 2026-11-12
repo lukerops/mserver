@@ -1,15 +1,12 @@
-package jellyfin
+package service
 
 import (
 	"encoding/json"
 	"strconv"
-	"strings"
 	"time"
-
-	identityv1 "github.com/lukerops/mserver/gen/identity/v1"
 )
 
-// The DTOs follow the schemas of the Jellyfin 12.4.0 OpenAPI. Field names
+// The structs follow the schemas of the Jellyfin 12.4.0 OpenAPI. Field names
 // are the JSON names (PascalCase), so they carry no tags. Arrays are
 // always initialized: clients do not expect null.
 
@@ -39,7 +36,7 @@ type SystemInfo struct {
 	CastReceiverApplications   []any
 }
 
-type BrandingOptionsDto struct {
+type BrandingOptions struct {
 	LoginDisclaimer     string
 	CustomCss           string
 	SplashscreenEnabled bool
@@ -118,7 +115,7 @@ type UserPolicy struct {
 	SyncPlayAccess                   string
 }
 
-type UserDto struct {
+type User struct {
 	Name                      string
 	ServerId                  string
 	ServerName                string
@@ -133,7 +130,7 @@ type UserDto struct {
 	Policy                    UserPolicy
 }
 
-type SessionInfoDto struct {
+type SessionInfo struct {
 	Id                    string
 	UserId                string
 	UserName              string
@@ -153,13 +150,13 @@ type SessionInfoDto struct {
 }
 
 type AuthenticationResult struct {
-	User        UserDto
-	SessionInfo SessionInfoDto
+	User        User
+	SessionInfo SessionInfo
 	AccessToken string
 	ServerId    string
 }
 
-type DisplayPreferencesDto struct {
+type DisplayPreferences struct {
 	Id                 string
 	SortBy             string
 	RememberIndexing   bool
@@ -174,15 +171,15 @@ type DisplayPreferencesDto struct {
 	Client             string
 }
 
-type BaseItemDtoQueryResult struct {
-	Items            []any
+type ItemQueryResult struct {
+	Items            []Item
 	TotalRecordCount int
 	StartIndex       int
 }
 
 // ThemeMediaResult lists the theme songs or videos of an item.
 type ThemeMediaResult struct {
-	Items            []BaseItemDto
+	Items            []Item
 	TotalRecordCount int
 	StartIndex       int
 	OwnerId          string
@@ -221,10 +218,10 @@ type NameValuePair struct {
 	Value string
 }
 
-// BaseItemDto describes a library (Type "CollectionFolder"), a movie
-// ("Movie"), a series ("Series"), a season ("Season") or an episode
-// ("Episode"). Optional fields are omitted when unknown.
-type BaseItemDto struct {
+// Item describes a library (Type "CollectionFolder"), a movie ("Movie"), a
+// series ("Series"), a season ("Season") or an episode ("Episode"). Optional
+// fields are omitted when unknown.
+type Item struct {
 	Name                     string
 	ServerId                 string
 	Id                       string
@@ -235,8 +232,8 @@ type BaseItemDto struct {
 	Container                string `json:",omitempty"`
 	SortName                 string
 	ExternalUrls             []any
-	MediaSources             []MediaSourceInfo `json:",omitempty"`
-	Path                     string            `json:",omitempty"`
+	MediaSources             []MediaSource `json:",omitempty"`
+	Path                     string        `json:",omitempty"`
 	EnableMediaSourceDisplay bool
 	Taglines                 []string
 	Genres                   []string
@@ -259,7 +256,7 @@ type BaseItemDto struct {
 	Studios              []any
 	GenreItems           []any
 	LocalTrailerCount    int
-	UserData             UserItemDataDto
+	UserData             UserItemData
 	SpecialFeatureCount  int
 	DisplayPreferencesId string
 	Tags                 []string
@@ -286,9 +283,9 @@ type BaseItemDto struct {
 	Chapters           []any
 }
 
-// UserItemDataDto is the state of an item for the user. It is always
-// empty until the watchstate module exists.
-type UserItemDataDto struct {
+// UserItemData is the state of an item for the user. It is always empty
+// until the watchstate module exists.
+type UserItemData struct {
 	PlaybackPositionTicks int64
 	PlayCount             int
 	IsFavorite            bool
@@ -300,7 +297,7 @@ type UserItemDataDto struct {
 	UnplayedItemCount *int `json:",omitempty"`
 }
 
-type MediaSourceInfo struct {
+type MediaSource struct {
 	Protocol                   string
 	Id                         string
 	Path                       string `json:",omitempty"`
@@ -371,9 +368,9 @@ type MediaStream struct {
 	Level          int
 }
 
-// PlaybackInfoDto is the body of POST /Items/{itemId}/PlaybackInfo. The
+// PlaybackInfoRequest is the body of POST /Items/{itemId}/PlaybackInfo. The
 // same fields may come as query parameters; the body wins.
-type PlaybackInfoDto struct {
+type PlaybackInfoRequest struct {
 	UserId              string
 	StartTimeTicks      *flexInt
 	AudioStreamIndex    *flexInt
@@ -420,7 +417,7 @@ type DeviceProfile struct {
 }
 
 // SubtitleProfile is a subtitle format a client plays, and how it gets it.
-// Only the "External" method is served (see subtitle).
+// Only the "External" method is served.
 type SubtitleProfile struct {
 	Format   string
 	Method   string
@@ -438,8 +435,8 @@ type DirectPlayProfile struct {
 	Type string
 }
 
-type PlaybackInfoResponse struct {
-	MediaSources  []MediaSourceInfo
+type PlaybackInfo struct {
+	MediaSources  []MediaSource
 	PlaySessionId string
 	// ErrorCode is "NoCompatibleStream" when no media source plays on
 	// the client.
@@ -462,82 +459,4 @@ type PlaybackReport struct {
 type UtcTimeResponse struct {
 	RequestReceptionTime     time.Time
 	ResponseTransmissionTime time.Time
-}
-
-// userDto maps a profile to a Jellyfin user: a Jellyfin user is a profile,
-// and its id is the profile id.
-func (p *plugin) userDto(account *identityv1.Account, profile *identityv1.Profile) UserDto {
-	return UserDto{
-		Name:                  profile.GetDisplayName(),
-		ServerId:              serverID,
-		ServerName:            serverName,
-		Id:                    jellyfinID(profile.GetId()),
-		HasPassword:           true,
-		HasConfiguredPassword: true,
-		Configuration: UserConfiguration{
-			PlayDefaultAudioTrack:      true,
-			GroupedFolders:             []string{},
-			SubtitleMode:               "Default",
-			OrderedViews:               []string{},
-			LatestItemsExcludes:        []string{},
-			MyMediaExcludes:            []string{},
-			HidePlayedInLatest:         true,
-			RememberAudioSelections:    true,
-			RememberSubtitleSelections: true,
-			EnableNextEpisodeAutoPlay:  true,
-		},
-		Policy: UserPolicy{
-			// To Jellyfin evereone isn't admin
-			IsAdministrator:                  false,
-			IsDisabled:                       account.GetDisabled(),
-			BlockedTags:                      []string{},
-			AllowedTags:                      []string{},
-			EnableUserPreferenceAccess:       true,
-			AccessSchedules:                  []any{},
-			BlockUnratedItems:                []string{},
-			EnableRemoteAccess:               true,
-			EnableMediaPlayback:              true,
-			EnableAudioPlaybackTranscoding:   true,
-			EnableVideoPlaybackTranscoding:   true,
-			EnablePlaybackRemuxing:           true,
-			EnableContentDeletionFromFolders: []string{},
-			EnableContentDownloading:         true,
-			EnabledDevices:                   []string{},
-			EnableAllDevices:                 true,
-			EnabledChannels:                  []string{},
-			EnableAllChannels:                true,
-			EnabledFolders:                   []string{},
-			EnableAllFolders:                 true,
-			BlockedMediaFolders:              []string{},
-			BlockedChannels:                  []string{},
-			AuthenticationProviderId:         "Jellyfin.Server.Implementations.Users.DefaultAuthenticationProvider",
-			PasswordResetProviderId:          "Jellyfin.Server.Implementations.Users.DefaultPasswordResetProvider",
-			SyncPlayAccess:                   "CreateAndJoinGroups",
-		},
-	}
-}
-
-// sessionInfoDto describes a session. The device data comes from the
-// authorization of the request.
-func (p *plugin) sessionInfoDto(session *identityv1.Session, profile *identityv1.Profile, a authorization) SessionInfoDto {
-	return SessionInfoDto{
-		Id:                 jellyfinID(session.GetId()),
-		UserId:             jellyfinID(profile.GetId()),
-		UserName:           profile.GetDisplayName(),
-		Client:             a.Client,
-		LastActivityDate:   time.Now().UTC(),
-		DeviceName:         a.Device,
-		DeviceId:           a.DeviceID,
-		ApplicationVersion: a.Version,
-		IsActive:           true,
-		ServerId:           serverID,
-		AdditionalUsers:    []any{},
-		PlayableMediaTypes: []string{},
-		SupportedCommands:  []string{},
-	}
-}
-
-// jellyfinID formats a UUID the way Jellyfin does: without hyphens.
-func jellyfinID(uuid string) string {
-	return strings.ReplaceAll(uuid, "-", "")
 }

@@ -1,4 +1,4 @@
-package jellyfin
+package service
 
 import (
 	"testing"
@@ -27,7 +27,6 @@ func TestDisplayTitle(t *testing.T) {
 }
 
 func TestMovieItem(t *testing.T) {
-	p := &plugin{}
 	m := &libraryv1.Movie{
 		Id:        "0198a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b",
 		LibraryId: "0198a1b2-c3d4-7e5f-8a9b-000000000001",
@@ -46,11 +45,11 @@ func TestMovieItem(t *testing.T) {
 		},
 	}
 
-	brief := p.movieItem(m, false)
+	brief := movieItem(m, false)
 	if brief.MediaSources != nil || brief.MediaStreams != nil {
 		t.Errorf("brief item has media sources: %+v", brief)
 	}
-	item := p.movieItem(m, true)
+	item := movieItem(m, true)
 	if item.Id != "0198a1b2c3d47e5f8a9b0c1d2e3f4a5b" || item.ParentId != "0198a1b2c3d47e5f8a9b000000000001" ||
 		item.Type != "Movie" || item.RunTimeTicks != 15_000_000 || item.Container != "mkv" ||
 		item.ProductionYear != 1979 || !item.IsHD || !item.HasSubtitles || item.Width != 1280 ||
@@ -69,27 +68,8 @@ func TestMovieItem(t *testing.T) {
 
 	// Not analyzed yet: a media source without streams.
 	m.MediaInfo = nil
-	item = p.movieItem(m, true)
+	item = movieItem(m, true)
 	if item.RunTimeTicks != 0 || len(item.MediaSources) != 1 || item.MediaSources[0].MediaStreams == nil {
 		t.Errorf("item without media info = %+v", item)
-	}
-}
-
-func TestMovieSort(t *testing.T) {
-	for _, tt := range []struct {
-		sortBy, sortOrder string
-		by                string
-		desc              bool
-	}{
-		{"", "", "title", false},
-		{"SortName", "Ascending", "title", false},
-		{"DateCreated,SortName", "Descending", "added", true},
-		{"ProductionYear,PremiereDate,SortName", "Descending,Ascending", "year", true},
-		{"Random", "", "title", false},
-	} {
-		by, desc := movieSort(tt.sortBy, tt.sortOrder)
-		if by != tt.by || desc != tt.desc {
-			t.Errorf("movieSort(%q, %q) = %q, %v", tt.sortBy, tt.sortOrder, by, desc)
-		}
 	}
 }
