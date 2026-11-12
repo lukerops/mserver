@@ -58,7 +58,7 @@ func (p *plugin) libraryItem(l *libraryv1.Library) BaseItemDto {
 // movieItem maps a movie to a Jellyfin movie. The media sources and
 // streams are included only when full is set.
 func (p *plugin) movieItem(m *libraryv1.Movie, full bool) BaseItemDto {
-	item := p.videoItem(m.GetId(), m.GetTitle(), m.GetPath(), m.GetCreatedAt().AsTime(), m.GetMediaInfo(), full)
+	item := p.videoItem(m.GetId(), m.GetTitle(), m.GetPath(), m.GetCreatedAt().AsTime(), m.GetMediaInfo(), m.GetExternalSubtitles(), full)
 	item.SortName = m.GetSortTitle()
 	item.ProductionYear = int(m.GetYear())
 	item.ParentId = jellyfinID(m.GetLibraryId())
@@ -109,7 +109,7 @@ func (p *plugin) seasonItem(s *libraryv1.Season) BaseItemDto {
 // episodeItem maps an episode to a Jellyfin episode. The media sources
 // and streams are included only when full is set.
 func (p *plugin) episodeItem(e *libraryv1.Episode, full bool) BaseItemDto {
-	item := p.videoItem(e.GetId(), e.GetTitle(), e.GetPath(), e.GetCreatedAt().AsTime(), e.GetMediaInfo(), full)
+	item := p.videoItem(e.GetId(), e.GetTitle(), e.GetPath(), e.GetCreatedAt().AsTime(), e.GetMediaInfo(), e.GetExternalSubtitles(), full)
 	item.SortName = episodeSortName(e)
 	item.ProductionYear = int(e.GetSeriesYear())
 	item.ParentId = jellyfinID(e.GetSeasonId())
@@ -149,8 +149,10 @@ func episodeSortName(e *libraryv1.Episode) string {
 }
 
 // videoItem maps a video file to a Jellyfin video item, without its type.
-// The media sources and streams are included only when full is set.
-func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, info *libraryv1.MediaInfo, full bool) BaseItemDto {
+// The external subtitles are streams after the ones embedded in the file
+// (see externalSubtitleBase). The media sources and streams are included
+// only when full is set.
+func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, info *libraryv1.MediaInfo, subs []*libraryv1.ExternalSubtitle, full bool) BaseItemDto {
 	id := jellyfinID(rawID)
 	item := p.newItem(id, name)
 	item.DateCreated = &createdAt
@@ -199,6 +201,11 @@ func (p *plugin) videoItem(rawID, name, filePath string, createdAt time.Time, in
 			}
 		}
 		item.IsHD = item.Height >= 720
+	}
+	base := externalSubtitleBase(info)
+	for i, s := range subs {
+		source.MediaStreams = append(source.MediaStreams, externalSubtitleStream(id, base+i, s))
+		item.HasSubtitles = true
 	}
 	if full {
 		item.MediaSources = []MediaSourceInfo{source}

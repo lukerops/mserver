@@ -175,5 +175,6 @@ func (p *plugin) episodes(w http.ResponseWriter, r *http.Request) {
 	for _, e := range paginate(episodes, start, limit) {
 		res.Items = append(res.Items, p.episodeItem(e, full))
 	}
+	signItems(res.Items, requestAuthorization(r).Token)
 	writeJSON(w, http.StatusOK, res)
 }

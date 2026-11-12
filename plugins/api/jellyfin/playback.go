@@ -13,6 +13,7 @@ import (
 	"connectrpc.com/connect/v2"
 	"github.com/google/uuid"
 
+	libraryv1 "github.com/lukerops/mserver/gen/library/v1"
 	playbackv1 "github.com/lukerops/mserver/gen/playback/v1"
 	storagev1 "github.com/lukerops/mserver/gen/storage/v1"
 	"github.com/lukerops/mserver/internal/kv"
@@ -26,6 +27,10 @@ const playSessionTTL = time.Hour
 type video struct {
 	item   BaseItemDto
 	fileID string
+	// subtitles are its external subtitle files; the stream of the first
+	// has the index subtitleBase.
+	subtitles    []*libraryv1.ExternalSubtitle
+	subtitleBase int
 }
 
 // lookupVideo finds the movie or episode of the itemId path value. When
@@ -38,10 +43,16 @@ func (p *plugin) lookupVideo(w http.ResponseWriter, r *http.Request) (video, boo
 	switch {
 	case ref.movie != nil:
 		m := ref.movie
-		return video{item: p.movieItem(m, true), fileID: m.GetFileId()}, true
+		return video{
+			item: p.movieItem(m, true), fileID: m.GetFileId(),
+			subtitles: m.GetExternalSubtitles(), subtitleBase: externalSubtitleBase(m.GetMediaInfo()),
+		}, true
 	case ref.episode != nil:
 		e := ref.episode
-		return video{item: p.episodeItem(e, true), fileID: e.GetFileId()}, true
+		return video{
+			item: p.episodeItem(e, true), fileID: e.GetFileId(),
+			subtitles: e.GetExternalSubtitles(), subtitleBase: externalSubtitleBase(e.GetMediaInfo()),
+		}, true
 	}
 	notFound(w, r, "item is not a movie or an episode")
 	return video{}, false
@@ -70,6 +81,8 @@ func (p *plugin) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	applySubtitleProfile(&v.item, info.DeviceProfile)
+	signItem(&v.item, requestAuthorization(r).Token)
 
 	ctx := r.Context()
 	res := PlaybackInfoResponse{
@@ -211,45 +224,61 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	resp := p.fetchFile(w, r, v.item.Id, v.fileID, true)
+	if resp == nil {
+		return
+	}
+	defer resp.Body.Close()
+	p.copyFile(w, r, resp)
+}
+
+// fetchFile requests a file from the storage, with the method of r and,
+// when forward is set, the headers of the player for Range requests
+// (seeking) and caching. The caller closes the body of the response, and
+// copies it with copyFile. When the file cannot be had, it answers r and
+// returns nil.
+func (p *plugin) fetchFile(w http.ResponseWriter, r *http.Request, itemID, fileID string, forward bool) *http.Response {
 	if p.storage == nil {
 		unavailable(w, r, "no storage module")
-		return
+		return nil
 	}
 
 	ctx := r.Context()
 	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: storage request",
-		slog.String("item_id", v.item.Id),
-		slog.String("file_id", v.fileID),
+		slog.String("item_id", itemID),
+		slog.String("file_id", fileID),
 		slog.String("range", r.Header.Get("Range")),
 	)
-	resolved, err := p.storage.ResolveFile(ctx, &storagev1.ResolveFileRequest{Id: v.fileID})
+	resolved, err := p.storage.ResolveFile(ctx, &storagev1.ResolveFileRequest{Id: fileID})
 	switch {
 	case err == nil:
 	case ctx.Err() != nil:
-		return
+		return nil
 	case isCode(err, connect.CodeNotFound):
 		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: file not found in storage",
-			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
+			slog.String("file_id", fileID), slog.String("error", err.Error()))
 		notFound(w, r, "file not found in storage")
-		return
+		return nil
 	case isCode(err, connect.CodeUnavailable), isCode(err, connect.CodeFailedPrecondition):
 		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: storage unavailable",
-			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
+			slog.String("file_id", fileID), slog.String("error", err.Error()))
 		unavailable(w, r, "storage unavailable")
-		return
+		return nil
 	default:
 		p.internalError(w, r, "resolve file", err)
-		return
+		return nil
 	}
 
 	req, err := http.NewRequestWithContext(ctx, r.Method, resolved.GetUrl(), nil)
 	if err != nil {
 		p.internalError(w, r, "open file", err)
-		return
+		return nil
 	}
-	for _, name := range streamRequestHeaders {
-		if v := r.Header.Get(name); v != "" {
-			req.Header.Set(name, v)
+	if forward {
+		for _, name := range streamRequestHeaders {
+			if v := r.Header.Get(name); v != "" {
+				req.Header.Set(name, v)
+			}
 		}
 	}
 	resp, err := p.files.Do(req)
@@ -259,14 +288,13 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 		p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: client went away",
 			slog.String("error", err.Error()))
 		annotate(ctx, slog.String("error", "client went away"))
-		return
+		return nil
 	default:
 		p.log.LogAttrs(ctx, slog.LevelWarn, "jellyfin: stream: storage unavailable",
-			slog.String("file_id", v.fileID), slog.String("error", err.Error()))
+			slog.String("file_id", fileID), slog.String("error", err.Error()))
 		unavailable(w, r, "storage unavailable")
-		return
+		return nil
 	}
-	defer resp.Body.Close()
 	p.log.LogAttrs(ctx, slog.LevelDebug, "jellyfin: stream: storage response",
 		slog.Int("status", resp.StatusCode),
 		slog.Int64("content_length", resp.ContentLength),
@@ -274,13 +302,21 @@ func (p *plugin) stream(w http.ResponseWriter, r *http.Request) {
 	)
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
+		resp.Body.Close()
 		notFound(w, r, "file not found in storage")
-		return
+		return nil
 	case resp.StatusCode >= http.StatusInternalServerError:
+		resp.Body.Close()
 		unavailable(w, r, "storage unavailable")
-		return
+		return nil
 	}
+	return resp
+}
 
+// copyFile answers r with the response of the storage as it is: status,
+// the headers of streamResponseHeaders and the body.
+func (p *plugin) copyFile(w http.ResponseWriter, r *http.Request, resp *http.Response) {
+	ctx := r.Context()
 	h := w.Header()
 	for _, name := range streamResponseHeaders {
 		if v := resp.Header.Get(name); v != "" {

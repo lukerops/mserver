@@ -30,7 +30,10 @@ func startWithMovies(t *testing.T) (client, string, *libraryv1.Library) {
 				t.Fatal(err)
 			}
 			movies := res.GetMovies()
-			return len(movies) == 2 && movies[0].GetMediaInfo() != nil && movies[1].GetMediaInfo() != nil, movies
+			// Alien has no subtitle; Heat has one, matched after the movies
+			// are cataloged.
+			return len(movies) == 2 && movies[0].GetMediaInfo() != nil && movies[1].GetMediaInfo() != nil &&
+				len(movies[1].GetExternalSubtitles()) == 1, movies
 		})
 }
 
@@ -100,8 +103,10 @@ func startWithLibrary(t *testing.T, name, mediaType string, files []string, read
 
 type mediaStream struct {
 	Type, Codec, DisplayTitle, Language string
+	DeliveryMethod, DeliveryUrl         string
 	Index, Width, Height, Channels      int
-	IsDefault                           bool
+	IsDefault, IsExternal               bool
+	SupportsExternalStream              bool
 }
 
 type item struct {
@@ -234,7 +239,7 @@ func TestMovieNavigation(t *testing.T) {
 	c.expect("GET", "/Items/"+heat.Id+"?userId=x", token, nil, &movie, http.StatusOK)
 	if movie.Type != "Movie" || movie.Name != "Heat" || movie.ProductionYear != 1995 ||
 		movie.RunTimeTicks < movieMinDurationMs*10_000 || movie.Container != "mkv" || movie.MediaType != "Video" ||
-		movie.UserData.Key != movie.Id || len(movie.MediaSources) != 1 || len(movie.MediaStreams) != 2 {
+		movie.UserData.Key != movie.Id || len(movie.MediaSources) != 1 || len(movie.MediaStreams) != 3 {
 		t.Fatalf("movie = %+v", movie)
 	}
 	src := movie.MediaSources[0]
@@ -249,6 +254,21 @@ func TestMovieNavigation(t *testing.T) {
 	}
 	if audio.Type != "Audio" || audio.DisplayTitle != "English - AAC - Stereo - Default" || audio.Index != 1 {
 		t.Errorf("audio = %+v", audio)
+	}
+
+	// Heat (1995).en.srt is an external subtitle, after the embedded streams.
+	// Its DeliveryUrl carries the token, which clients fetch it with.
+	_, rawToken, _ := strings.Cut(token, `Token="`)
+	rawToken = strings.TrimSuffix(rawToken, `"`)
+	subtitle := movie.MediaStreams[2]
+	if subtitle.Type != "Subtitle" || subtitle.Codec != "srt" || subtitle.Index != 2 || subtitle.Language != "eng" ||
+		!subtitle.IsExternal || !subtitle.SupportsExternalStream || subtitle.DeliveryMethod != "External" ||
+		subtitle.DeliveryUrl != "/Videos/"+movie.Id+"/"+movie.Id+"/Subtitles/2/0/Stream.srt?ApiKey="+url.QueryEscape(rawToken) ||
+		subtitle.DisplayTitle != "English - SRT - External" {
+		t.Errorf("subtitle = %+v", subtitle)
+	}
+	if got := movie.MediaSources[0].MediaStreams; len(got) != 3 || got[2] != subtitle {
+		t.Errorf("media source streams = %+v", got)
 	}
 
 	var folder item

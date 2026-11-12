@@ -307,6 +307,7 @@ func (p *plugin) items(w http.ResponseWriter, r *http.Request) {
 		p.internalError(w, r, "list items", err)
 		return
 	}
+	signItems(res.Items, requestAuthorization(r).Token)
 	writeJSON(w, http.StatusOK, res)
 }
 
@@ -497,7 +498,9 @@ func (p *plugin) latestItems(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slices.SortStableFunc(all, func(a, b latest) int { return b.added.Compare(a.added) })
+	token := requestAuthorization(r).Token
 	for _, l := range paginate(all, 0, limit) {
+		signItem(&l.item, token)
 		items = append(items, l.item)
 	}
 	writeJSON(w, http.StatusOK, items)
@@ -589,6 +592,7 @@ func (p *plugin) item(w http.ResponseWriter, r *http.Request) {
 	default:
 		item = p.libraryItem(ref.library)
 	}
+	signItem(&item, requestAuthorization(r).Token)
 	writeJSON(w, http.StatusOK, item)
 }
 

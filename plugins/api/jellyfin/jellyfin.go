@@ -129,6 +129,11 @@ func New(c clients.Clients, st kv.Store, files *http.Client, log *slog.Logger) *
 	// /Videos/{itemId}/stream and /Videos/{itemId}/stream.{container}: a
 	// pattern cannot match part of a segment. GET also serves HEAD.
 	mux.HandleFunc("GET /videos/{itemId}/{file}", p.stream)
+	// The external subtitles: /Videos/{itemId}/{mediaSourceId}/Subtitles/
+	// {index}/Stream.{format}, optionally with the start position between
+	// the index and Stream.
+	mux.HandleFunc("GET /videos/{itemId}/{mediaSourceId}/subtitles/{index}/{file}", p.subtitle)
+	mux.HandleFunc("GET /videos/{itemId}/{mediaSourceId}/subtitles/{index}/{startPositionTicks}/{file}", p.subtitle)
 
 	mux.HandleFunc("GET /shows/{seriesId}/seasons", p.seasons)
 	mux.HandleFunc("GET /shows/{seriesId}/episodes", p.episodes)

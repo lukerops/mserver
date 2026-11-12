@@ -24,6 +24,7 @@ import (
 	"github.com/lukerops/mserver/internal/modules/library"
 	"github.com/lukerops/mserver/internal/modules/playback"
 	"github.com/lukerops/mserver/internal/modules/storage"
+	"github.com/lukerops/mserver/internal/modules/subtitles"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 )
 
@@ -142,17 +143,25 @@ func (e *env) startIdentity() {
 	}
 }
 
-// startCatalog runs the library, the storage and the playback modules.
+// startCatalog runs the library, the subtitles, the storage and the
+// playback modules.
 func (e *env) startCatalog() {
 	e.t.Helper()
 	ctx := e.t.Context()
 
-	// The library consumes the events of the storage: it subscribes first.
+	// The library and the subtitles consume the events of the storage: they
+	// subscribe first.
 	lib, err := library.New(ctx, e.dbConfig(), e.rpc, e.bus, e.bus, e.clients.Storage, nil)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	e.t.Cleanup(func() { lib.Close() })
+
+	subs, err := subtitles.New(ctx, e.dbConfig(), e.rpc, e.bus, e.bus, nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() { subs.Close() })
 
 	stor, err := storage.New(ctx, e.dbConfig(), e.rpc, e.bus, e.baseURL, nil)
 	if err != nil {

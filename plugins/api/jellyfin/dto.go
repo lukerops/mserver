@@ -363,8 +363,12 @@ type MediaStream struct {
 	IsExternal             bool
 	IsTextSubtitleStream   bool
 	SupportsExternalStream bool
-	PixelFormat            string `json:",omitempty"`
-	Level                  int
+	// DeliveryMethod and DeliveryUrl tell how a subtitle reaches the
+	// client: only external subtitles have them.
+	DeliveryMethod string `json:",omitempty"`
+	DeliveryUrl    string `json:",omitempty"`
+	PixelFormat    string `json:",omitempty"`
+	Level          int
 }
 
 // PlaybackInfoDto is the body of POST /Items/{itemId}/PlaybackInfo. The
@@ -408,10 +412,19 @@ func (n *flexInt) intPtr() *int {
 	return &v
 }
 
-// DeviceProfile describes what a client plays. Only the direct play
-// profiles are used.
+// DeviceProfile describes what a client plays. Only the direct play and
+// the subtitle profiles are used.
 type DeviceProfile struct {
 	DirectPlayProfiles []DirectPlayProfile
+	SubtitleProfiles   []SubtitleProfile
+}
+
+// SubtitleProfile is a subtitle format a client plays, and how it gets it.
+// Only the "External" method is served (see subtitle).
+type SubtitleProfile struct {
+	Format   string
+	Method   string
+	Language string
 }
 
 // DirectPlayProfile is a combination of container and codecs a client
