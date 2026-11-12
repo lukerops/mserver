@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+// The subtitles module: matches the subtitle files of the storage (external
+// .srt files) with the movies and episodes of the library, and publishes
+// the matches as events. The subtitle files themselves are served by the
+// storage.
+package subtitles.v1;
+
+service SubtitlesService {
+  // ResyncSubtitles publishes again the added event of every matched
+  // subtitle, so that consumers can rebuild their projections. It only
+  // republishes what the module already knows: to rebuild the module
+  // itself, resync the storage and the library as well.
+  rpc ResyncSubtitles(ResyncSubtitlesRequest) returns (ResyncSubtitlesResponse);
+}
+
+message ResyncSubtitlesRequest {}
+
+message ResyncSubtitlesResponse {}
