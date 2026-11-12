@@ -4,8 +4,8 @@
 // reach it.
 //
 // The modules register their ConnectRPC services on the one server. Only
-// the migrated modules (identity, storage, library and playback) exist
-// yet; the others are added as they are migrated. The API plugins (so far
+// the migrated modules (identity, storage, library, subtitles and
+// playback) exist yet; the others are added as they are migrated. The API plugins (so far
 // the jellyfin, under /plugins/jellyfin) call the modules through their
 // clients.
 //
@@ -60,6 +60,7 @@ import (
 	"github.com/lukerops/mserver/internal/modules/library"
 	"github.com/lukerops/mserver/internal/modules/playback"
 	"github.com/lukerops/mserver/internal/modules/storage"
+	"github.com/lukerops/mserver/internal/modules/subtitles"
 	"github.com/lukerops/mserver/internal/pubsub/memory"
 	"github.com/lukerops/mserver/plugins/api/jellyfin"
 )
@@ -136,8 +137,9 @@ func run(ctx context.Context) error {
 		defer closeModule(log, "identity", ident.Close)
 	}
 
-	// The library consumes the events of the storage: with the in-memory
-	// bus, it must subscribe before the storage starts publishing.
+	// The library and the subtitles consume the events of the storage (and
+	// the subtitles, the ones of the library): with the in-memory bus,
+	// they must subscribe before the storage starts publishing.
 	if enabled["library"] {
 		stor, err := newStorageClient(rpc, os.Getenv("MSERVER_STORAGE_URL"), enabled["storage"])
 		if err != nil {
@@ -149,6 +151,14 @@ func run(ctx context.Context) error {
 			return fmt.Errorf("library: %w", err)
 		}
 		defer closeModule(log, "library", lib.Close)
+	}
+
+	if enabled["subtitles"] {
+		sub, err := subtitles.New(ctx, dbCfg, rpc, bus, bus, log.With(slog.String("module", "subtitles")))
+		if err != nil {
+			return fmt.Errorf("subtitles: %w", err)
+		}
+		defer closeModule(log, "subtitles", sub.Close)
 	}
 
 	if enabled["storage"] {
@@ -226,7 +236,7 @@ func newHTTPServer(h http.Handler, log *slog.Logger) *http.Server {
 }
 
 // available are the modules migrated to ConnectRPC, and the plugins.
-var available = []string{"identity", "storage", "library", "playback", "jellyfin"}
+var available = []string{"identity", "storage", "library", "subtitles", "playback", "jellyfin"}
 
 // parseModules parses MSERVER_MODULES: "all" (or empty) or a
 // comma-separated list of modules.
