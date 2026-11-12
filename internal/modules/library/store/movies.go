@@ -11,7 +11,7 @@ import (
 
 // GetMovie returns ErrNotFound if the movie does not exist.
 func (s *Store) GetMovie(ctx context.Context, id uuid.UUID) (*Movie, error) {
-	movies, err := s.queryMovies(ctx, selectMovie, id)
+	movies, err := s.queryMovies(ctx, s.db, selectMovie, id)
 	if err != nil {
 		return nil, err
 	}
@@ -106,11 +106,6 @@ func (s *Store) ListMovies(ctx context.Context, q *MovieQuery) ([]Movie, int, er
 	}
 	filter := where(conds)
 
-	var total int
-	if err := s.db.QueryRowContext(ctx, countMovies+filter, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("store: count movies: %w", err)
-	}
-
 	dir := "ASC"
 	if q.Descending {
 		dir = "DESC"
@@ -124,16 +119,30 @@ func (s *Store) ListMovies(ctx context.Context, q *MovieQuery) ([]Movie, int, er
 	default:
 		order = "sort_title " + dir + ", id " + dir
 	}
-	query := paginate(selectMovies+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
-	movies, err := s.queryMovies(ctx, query, args...)
+
+	// The count and the page run in the same transaction: a movie saved
+	// between the two queries would make the total disagree with the page.
+	var (
+		movies []Movie
+		total  int
+	)
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, countMovies+filter, args...).Scan(&total); err != nil {
+			return fmt.Errorf("store: count movies: %w", err)
+		}
+		query := paginate(selectMovies+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
+		var err error
+		movies, err = s.queryMovies(ctx, tx, query, args...)
+		return err
+	})
 	if err != nil {
 		return nil, 0, err
 	}
 	return movies, total, nil
 }
 
-func (s *Store) queryMovies(ctx context.Context, query string, args ...any) ([]Movie, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+func (s *Store) queryMovies(ctx context.Context, q queryer, query string, args ...any) ([]Movie, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query movies: %w", err)
 	}

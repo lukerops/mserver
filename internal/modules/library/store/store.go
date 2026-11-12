@@ -35,6 +35,11 @@ type Store struct {
 	db *sql.DB
 }
 
+// queryer is the subset of *sql.DB and *sql.Tx used by the query helpers.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
 // New returns the Store on a database already migrated (see database.Open
 // and Migrations).
 func New(db *sql.DB) *Store {
@@ -44,7 +49,20 @@ func New(db *sql.DB) *Store {
 // withTx runs fn in a transaction, committing if fn succeeds. fn must run
 // its queries on the given transaction.
 func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	return s.withTxOptions(ctx, nil, fn)
+}
+
+// withReadTx runs fn in a read-only transaction with the strongest
+// isolation both drivers support: on Postgres the Repeatable Read level,
+// so every statement of a read (the count and the page of a list) sees the
+// same snapshot; on SQLite the level is ignored, and its single connection
+// already serializes the reads.
+func (s *Store) withReadTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
+	return s.withTxOptions(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true}, fn)
+}
+
+func (s *Store) withTxOptions(ctx context.Context, opts *sql.TxOptions, fn func(tx *sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("store: begin transaction: %w", err)
 	}

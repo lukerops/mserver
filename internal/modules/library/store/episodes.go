@@ -12,7 +12,7 @@ import (
 
 // GetEpisode returns ErrNotFound if the episode does not exist.
 func (s *Store) GetEpisode(ctx context.Context, id uuid.UUID) (*Episode, error) {
-	episodes, err := s.queryEpisodes(ctx, selectEpisodeByID, id)
+	episodes, err := s.queryEpisodes(ctx, s.db, selectEpisodeByID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -233,11 +233,6 @@ func (s *Store) ListEpisodes(ctx context.Context, q *EpisodeQuery) ([]Episode, i
 	}
 	filter := where(conds)
 
-	var total int
-	if err := s.db.QueryRowContext(ctx, countEpisodes+filter, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("store: count episodes: %w", err)
-	}
-
 	dir := "ASC"
 	if q.Descending {
 		dir = "DESC"
@@ -252,16 +247,30 @@ func (s *Store) ListEpisodes(ctx context.Context, q *EpisodeQuery) ([]Episode, i
 	if q.SortBy == SortByAdded {
 		order = "ep.created_at " + dir + ", " + byNumber("ASC")
 	}
-	query := paginate(selectEpisodeBase+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
-	episodes, err := s.queryEpisodes(ctx, query, args...)
+
+	// The count and the page run in the same transaction: an episode saved
+	// between the two queries would make the total disagree with the page.
+	var (
+		episodes []Episode
+		total    int
+	)
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, countEpisodes+filter, args...).Scan(&total); err != nil {
+			return fmt.Errorf("store: count episodes: %w", err)
+		}
+		query := paginate(selectEpisodeBase+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
+		var err error
+		episodes, err = s.queryEpisodes(ctx, tx, query, args...)
+		return err
+	})
 	if err != nil {
 		return nil, 0, err
 	}
 	return episodes, total, nil
 }
 
-func (s *Store) queryEpisodes(ctx context.Context, query string, args ...any) ([]Episode, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+func (s *Store) queryEpisodes(ctx context.Context, q queryer, query string, args ...any) ([]Episode, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query episodes: %w", err)
 	}

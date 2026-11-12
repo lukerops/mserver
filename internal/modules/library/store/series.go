@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -9,7 +10,7 @@ import (
 
 // GetSeries returns ErrNotFound if the series does not exist.
 func (s *Store) GetSeries(ctx context.Context, id uuid.UUID) (*Series, error) {
-	series, err := s.querySeries(ctx, selectSeriesByID, id)
+	series, err := s.querySeries(ctx, s.db, selectSeriesByID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -43,11 +44,6 @@ func (s *Store) ListSeries(ctx context.Context, q *SeriesQuery) ([]Series, int, 
 	}
 	filter := where(conds)
 
-	var total int
-	if err := s.db.QueryRowContext(ctx, countSeries+filter, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("store: count series: %w", err)
-	}
-
 	dir := "ASC"
 	if q.Descending {
 		dir = "DESC"
@@ -61,8 +57,22 @@ func (s *Store) ListSeries(ctx context.Context, q *SeriesQuery) ([]Series, int, 
 	default:
 		order = "sr.sort_title " + dir + ", sr.id " + dir
 	}
-	query := paginate(selectSeriesBase+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
-	series, err := s.querySeries(ctx, query, args...)
+
+	// The count and the page run in the same transaction: a series saved
+	// between the two queries would make the total disagree with the page.
+	var (
+		series []Series
+		total  int
+	)
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, countSeries+filter, args...).Scan(&total); err != nil {
+			return fmt.Errorf("store: count series: %w", err)
+		}
+		query := paginate(selectSeriesBase+filter+" ORDER BY "+order, &args, q.Limit, q.Offset)
+		var err error
+		series, err = s.querySeries(ctx, tx, query, args...)
+		return err
+	})
 	if err != nil {
 		return nil, 0, err
 	}
@@ -76,8 +86,8 @@ func episodeLanguageFilter(args *[]any, column string, languages []string) strin
 		languageFilter(args, column, languages) + `)`
 }
 
-func (s *Store) querySeries(ctx context.Context, query string, args ...any) ([]Series, error) {
-	rows, err := s.db.QueryContext(ctx, query, args...)
+func (s *Store) querySeries(ctx context.Context, q queryer, query string, args ...any) ([]Series, error) {
+	rows, err := q.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: query series: %w", err)
 	}
