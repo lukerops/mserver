@@ -21,7 +21,7 @@ const (
 )
 
 const (
-	movieColumns = `id, library_id, file_id, location_id, path, title, sort_title, year, media_info, created_at, updated_at`
+	movieColumns = `id, library_id, file_id, location_id, path, title, sort_title, year, media_info, external_subtitles, created_at, updated_at`
 
 	selectMovie  = `SELECT ` + movieColumns + ` FROM movies WHERE id = $1`
 	selectMovies = `SELECT ` + movieColumns + ` FROM movies`
@@ -29,8 +29,8 @@ const (
 
 	upsertMovie = `
 		INSERT INTO movies (id, library_id, file_id, location_id, path, title, sort_title, year,
-			media_info, audio_languages, subtitle_languages, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			media_info, audio_languages, subtitle_languages, external_subtitles, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (id) DO UPDATE SET
 			library_id = excluded.library_id,
 			file_id = excluded.file_id,
@@ -42,7 +42,9 @@ const (
 			media_info = excluded.media_info,
 			audio_languages = excluded.audio_languages,
 			subtitle_languages = excluded.subtitle_languages,
+			external_subtitles = excluded.external_subtitles,
 			updated_at = excluded.updated_at`
+	updateMovieSubtitles = `UPDATE movies SET external_subtitles = $1, updated_at = $2 WHERE id = $3`
 	updateMovieMediaInfo = `
 		UPDATE movies SET media_info = $1, audio_languages = $2, subtitle_languages = $3, updated_at = $4
 		WHERE id = $5`
@@ -81,7 +83,7 @@ const (
 
 const (
 	selectEpisodeBase = `SELECT ep.id, ep.library_id, ep.series_id, ep.season_id, ep.file_id, ep.location_id, ep.path,
-		ep.title, ep.sort_key, ep.number, ep.end_number, ep.media_info, ep.created_at, ep.updated_at,
+		ep.title, ep.sort_key, ep.number, ep.end_number, ep.media_info, ep.external_subtitles, ep.created_at, ep.updated_at,
 		sr.title, sr.year, sn.number
 		FROM episodes AS ep
 		JOIN series AS sr ON sr.id = ep.series_id
@@ -93,8 +95,8 @@ const (
 	upsertEpisode        = `
 		INSERT INTO episodes (id, library_id, series_id, season_id, file_id, location_id, path,
 			title, sort_key, number, end_number, media_info, audio_languages, subtitle_languages,
-			created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+			external_subtitles, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
 		ON CONFLICT (id) DO UPDATE SET
 			library_id = excluded.library_id,
 			series_id = excluded.series_id,
@@ -109,7 +111,9 @@ const (
 			media_info = excluded.media_info,
 			audio_languages = excluded.audio_languages,
 			subtitle_languages = excluded.subtitle_languages,
+			external_subtitles = excluded.external_subtitles,
 			updated_at = excluded.updated_at`
+	updateEpisodeSubtitles = `UPDATE episodes SET external_subtitles = $1, updated_at = $2 WHERE id = $3`
 	updateEpisodeMediaInfo = `
 		UPDATE episodes SET media_info = $1, audio_languages = $2, subtitle_languages = $3, updated_at = $4
 		WHERE id = $5`

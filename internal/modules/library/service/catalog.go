@@ -41,6 +41,7 @@ func (s *Service) catalogMovie(ctx context.Context, lib *Library, f *events.File
 	typ, msg := events.MovieAddedV1, "library: movie identified"
 	if old != nil {
 		m.CreatedAt = old.CreatedAt
+		m.ExternalSubtitles = old.ExternalSubtitles
 		if !contentChanged {
 			m.MediaInfo = old.MediaInfo
 		}
@@ -123,6 +124,7 @@ func (s *Service) catalogEpisode(ctx context.Context, lib *Library, f *events.Fi
 	typ, msg := events.EpisodeAddedV1, "library: episode identified"
 	if old != nil {
 		e.CreatedAt = old.CreatedAt
+		e.ExternalSubtitles = old.ExternalSubtitles
 		if !contentChanged {
 			e.MediaInfo = old.MediaInfo
 		}

@@ -34,7 +34,27 @@ func toMovie(m *service.Movie) *libraryv1.Movie {
 		MediaInfo:  toMediaInfo(m.MediaInfo),
 		CreatedAt:  timestamppb.New(m.CreatedAt),
 		UpdatedAt:  timestamppb.New(m.UpdatedAt),
+
+		ExternalSubtitles: toExternalSubtitles(m.ExternalSubtitles),
 	}
+}
+
+func toExternalSubtitles(subs []service.ExternalSubtitle) []*libraryv1.ExternalSubtitle {
+	out := make([]*libraryv1.ExternalSubtitle, len(subs))
+	for i := range subs {
+		s := &subs[i]
+		out[i] = &libraryv1.ExternalSubtitle{
+			Id:              s.ID.String(),
+			FileId:          s.FileID.String(),
+			Format:          s.Format,
+			Language:        s.Language,
+			Title:           s.Title,
+			Forced:          s.Forced,
+			HearingImpaired: s.HearingImpaired,
+			Source:          s.Source,
+		}
+	}
+	return out
 }
 
 // toMediaInfo returns nil for a file that was not analyzed yet.
@@ -125,6 +145,8 @@ func toEpisode(e *service.Episode) *libraryv1.Episode {
 		MediaInfo:    toMediaInfo(e.MediaInfo),
 		CreatedAt:    timestamppb.New(e.CreatedAt),
 		UpdatedAt:    timestamppb.New(e.UpdatedAt),
+
+		ExternalSubtitles: toExternalSubtitles(e.ExternalSubtitles),
 	}
 }
 

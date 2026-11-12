@@ -77,6 +77,28 @@ message Movie {
   // created_at is when the movie was added to the library.
   google.protobuf.Timestamp created_at = 10;
   google.protobuf.Timestamp updated_at = 11;
+  // external_subtitles are the subtitle files found beside the video, in a
+  // stable order.
+  repeated ExternalSubtitle external_subtitles = 12;
+}
+
+// ExternalSubtitle is a subtitle file beside the video file of a movie or
+// episode, as matched by the subtitles module. The library only keeps
+// it: the file itself is served by the storage (file_id).
+message ExternalSubtitle {
+  // id identifies the subtitle of the item.
+  string id = 1;
+  // file_id is the file of the subtitle in the storage.
+  string file_id = 2;
+  // format is the format of the file (e.g. "srt").
+  string format = 3;
+  // language is a BCP 47 tag (e.g. "pt-BR"), empty when unknown.
+  string language = 4;
+  string title = 5;
+  bool forced = 6;
+  bool hearing_impaired = 7;
+  // source tells where the subtitle came from (e.g. "local").
+  string source = 8;
 }
 
 // MediaInfo is the technical information of the file of a movie or episode.
@@ -178,6 +200,9 @@ message Episode {
   // created_at is when the episode was added to the library.
   google.protobuf.Timestamp created_at = 15;
   google.protobuf.Timestamp updated_at = 16;
+  // external_subtitles are the subtitle files found beside the video, in a
+  // stable order.
+  repeated ExternalSubtitle external_subtitles = 17;
 }
 
 message CreateLibraryRequest {

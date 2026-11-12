@@ -38,6 +38,10 @@ func (s *Store) SaveEpisode(ctx context.Context, e *Episode, series *Series, sea
 	if err != nil {
 		return nil, err
 	}
+	subs, err := encodeSubtitles(e.ExternalSubtitles)
+	if err != nil {
+		return nil, err
+	}
 
 	changes := new(ShowChanges)
 	err = s.withTx(ctx, func(tx *sql.Tx) error {
@@ -82,7 +86,7 @@ func (s *Store) SaveEpisode(ctx context.Context, e *Episode, series *Series, sea
 
 		if _, err := tx.ExecContext(ctx, upsertEpisode,
 			e.ID, e.LibraryID, e.SeriesID, e.SeasonID, e.FileID, e.LocationID, e.Path,
-			e.Title, e.SortKey, nullInt(e.Number), nullInt(e.EndNumber), info, audio, subtitle,
+			e.Title, e.SortKey, nullInt(e.Number), nullInt(e.EndNumber), info, audio, subtitle, subs,
 			nanos(e.CreatedAt), nanos(e.UpdatedAt)); err != nil {
 			return fmt.Errorf("store: save episode %s: %w", e.ID, err)
 		}
@@ -108,6 +112,23 @@ func (s *Store) UpdateEpisodeMediaInfo(ctx context.Context, id uuid.UUID, info *
 	res, err := s.db.ExecContext(ctx, updateEpisodeMediaInfo, data, audio, subtitle, nanos(updatedAt), id)
 	if err != nil {
 		return fmt.Errorf("store: update media info of episode %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: episode %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+// UpdateEpisodeSubtitles replaces the external subtitles of an episode. It
+// returns ErrNotFound if the episode does not exist.
+func (s *Store) UpdateEpisodeSubtitles(ctx context.Context, id uuid.UUID, subs []ExternalSubtitle, updatedAt time.Time) error {
+	data, err := encodeSubtitles(subs)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, updateEpisodeSubtitles, data, nanos(updatedAt), id)
+	if err != nil {
+		return fmt.Errorf("store: update subtitles of episode %s: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: episode %s", ErrNotFound, id)
@@ -251,16 +272,19 @@ func (s *Store) queryEpisodes(ctx context.Context, query string, args ...any) ([
 		var (
 			e                    Episode
 			number, endNumber    sql.NullInt64
-			info                 sql.NullString
+			info, subs           sql.NullString
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&e.ID, &e.LibraryID, &e.SeriesID, &e.SeasonID, &e.FileID, &e.LocationID, &e.Path,
-			&e.Title, &e.SortKey, &number, &endNumber, &info, &createdAt, &updatedAt,
+			&e.Title, &e.SortKey, &number, &endNumber, &info, &subs, &createdAt, &updatedAt,
 			&e.SeriesTitle, &e.SeriesYear, &e.SeasonNumber); err != nil {
 			return nil, fmt.Errorf("store: query episodes: %w", err)
 		}
 		e.Number, e.EndNumber = intPtr(number), intPtr(endNumber)
 		if e.MediaInfo, err = decodeMediaInfo(info); err != nil {
+			return nil, fmt.Errorf("episode %s: %w", e.ID, err)
+		}
+		if e.ExternalSubtitles, err = decodeSubtitles(subs); err != nil {
 			return nil, fmt.Errorf("episode %s: %w", e.ID, err)
 		}
 		e.CreatedAt = fromNanos(createdAt)

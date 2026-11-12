@@ -27,9 +27,13 @@ func (s *Store) SaveMovie(ctx context.Context, m *Movie) error {
 	if err != nil {
 		return err
 	}
+	subs, err := encodeSubtitles(m.ExternalSubtitles)
+	if err != nil {
+		return err
+	}
 	_, err = s.db.ExecContext(ctx, upsertMovie,
 		m.ID, m.LibraryID, m.FileID, m.LocationID, m.Path, m.Title, m.SortTitle, m.Year,
-		info, audio, subtitle, nanos(m.CreatedAt), nanos(m.UpdatedAt))
+		info, audio, subtitle, subs, nanos(m.CreatedAt), nanos(m.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("store: save movie %s: %w", m.ID, err)
 	}
@@ -46,6 +50,23 @@ func (s *Store) UpdateMovieMediaInfo(ctx context.Context, id uuid.UUID, info *Me
 	res, err := s.db.ExecContext(ctx, updateMovieMediaInfo, data, audio, subtitle, nanos(updatedAt), id)
 	if err != nil {
 		return fmt.Errorf("store: update media info of movie %s: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("%w: movie %s", ErrNotFound, id)
+	}
+	return nil
+}
+
+// UpdateMovieSubtitles replaces the external subtitles of a movie. It
+// returns ErrNotFound if the movie does not exist.
+func (s *Store) UpdateMovieSubtitles(ctx context.Context, id uuid.UUID, subs []ExternalSubtitle, updatedAt time.Time) error {
+	data, err := encodeSubtitles(subs)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, updateMovieSubtitles, data, nanos(updatedAt), id)
+	if err != nil {
+		return fmt.Errorf("store: update subtitles of movie %s: %w", id, err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: movie %s", ErrNotFound, id)
@@ -122,14 +143,17 @@ func (s *Store) queryMovies(ctx context.Context, query string, args ...any) ([]M
 	for rows.Next() {
 		var (
 			m                    Movie
-			info                 sql.NullString
+			info, subs           sql.NullString
 			createdAt, updatedAt int64
 		)
 		if err := rows.Scan(&m.ID, &m.LibraryID, &m.FileID, &m.LocationID, &m.Path, &m.Title,
-			&m.SortTitle, &m.Year, &info, &createdAt, &updatedAt); err != nil {
+			&m.SortTitle, &m.Year, &info, &subs, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("store: query movies: %w", err)
 		}
 		if m.MediaInfo, err = decodeMediaInfo(info); err != nil {
+			return nil, fmt.Errorf("movie %s: %w", m.ID, err)
+		}
+		if m.ExternalSubtitles, err = decodeSubtitles(subs); err != nil {
 			return nil, fmt.Errorf("movie %s: %w", m.ID, err)
 		}
 		m.CreatedAt = fromNanos(createdAt)

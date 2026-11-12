@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
+	"cmp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -41,8 +44,53 @@ type Movie struct {
 	Year int
 	// MediaInfo is nil until the file is analyzed.
 	MediaInfo *MediaInfo
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// ExternalSubtitles are the subtitle files beside the video, in a
+	// stable order (see SortSubtitles).
+	ExternalSubtitles []ExternalSubtitle
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// ExternalSubtitle is a subtitle file beside the video file of a movie or
+// episode, as matched by the subtitles module. It is saved as JSON.
+type ExternalSubtitle struct {
+	// ID identifies the subtitle of the item, as set by the subtitles
+	// module.
+	ID uuid.UUID `json:"id"`
+	// FileID is the subtitle file in the storage.
+	FileID uuid.UUID `json:"file_id"`
+	// Format is the format of the file (e.g. "srt").
+	Format string `json:"format"`
+	// Language is a BCP 47 tag (e.g. "pt-BR"), empty when unknown.
+	Language        string `json:"language,omitempty"`
+	Title           string `json:"title,omitempty"`
+	Forced          bool   `json:"forced,omitempty"`
+	HearingImpaired bool   `json:"hearing_impaired,omitempty"`
+	// Source tells where the subtitle came from (e.g. "local").
+	Source string `json:"source"`
+}
+
+// SortSubtitles orders subtitles by language, title, forced flag and ID, so
+// that the list of an item does not depend on the order they were matched.
+func SortSubtitles(subs []ExternalSubtitle) {
+	slices.SortFunc(subs, func(a, b ExternalSubtitle) int {
+		return cmp.Or(
+			strings.Compare(a.Language, b.Language),
+			strings.Compare(a.Title, b.Title),
+			boolCompare(a.Forced, b.Forced),
+			bytes.Compare(a.ID[:], b.ID[:]),
+		)
+	})
+}
+
+func boolCompare(a, b bool) int {
+	switch {
+	case a == b:
+		return 0
+	case b:
+		return -1
+	}
+	return 1
 }
 
 // MediaInfo is the technical information of a media file. It is saved as
@@ -190,8 +238,11 @@ type Episode struct {
 	EndNumber *int
 	// MediaInfo is nil until the file is analyzed.
 	MediaInfo *MediaInfo
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	// ExternalSubtitles are the subtitle files beside the video, in a
+	// stable order (see SortSubtitles).
+	ExternalSubtitles []ExternalSubtitle
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 	// SeriesTitle, SeriesYear and SeasonNumber are filled by the reads of
 	// the store and ignored by the writes.
 	SeriesTitle  string

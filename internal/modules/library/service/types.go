@@ -14,6 +14,8 @@ type (
 	Stream     = store.Stream
 	MovieQuery = store.MovieQuery
 
+	ExternalSubtitle = store.ExternalSubtitle
+
 	Series       = store.Series
 	Season       = store.Season
 	Episode      = store.Episode

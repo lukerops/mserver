@@ -3,6 +3,7 @@ package store
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ func TestStore(t *testing.T) {
 		"list series":       testListSeries,
 		"delete library":    testDeleteLibrary,
 		"pagination offset": testOffsetWithoutLimit,
+		"subtitles":         testExternalSubtitles,
 	}
 	for backend, open := range backends {
 		for name, test := range tests {
@@ -613,5 +615,75 @@ func TestMediaInfoEqual(t *testing.T) {
 		if got := tt.a.Equal(tt.b); got != tt.want {
 			t.Errorf("%s: Equal = %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+func testExternalSubtitles(t *testing.T, st *Store) {
+	ctx := t.Context()
+	lib := newLibrary(t, st, MediaTypeTVShows, newID())
+	subs := []ExternalSubtitle{
+		{ID: newID(), FileID: newID(), Format: "srt", Language: "pt-BR", Source: "local"},
+		{ID: newID(), FileID: newID(), Format: "srt", Language: "en", Title: "Commentary", Forced: true, HearingImpaired: true, Source: "local"},
+	}
+
+	m := newMovie(lib, "Alien", 1979, 0)
+	m.ExternalSubtitles = subs[:1]
+	if err := st.SaveMovie(ctx, m); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetMovie(ctx, m.ID)
+	if !slices.Equal(got.ExternalSubtitles, subs[:1]) {
+		t.Fatalf("saved movie subtitles = %+v, want %+v", got.ExternalSubtitles, subs[:1])
+	}
+	if err := st.UpdateMovieSubtitles(ctx, m.ID, subs, epoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.GetMovie(ctx, m.ID)
+	if !slices.Equal(got.ExternalSubtitles, subs) || !got.UpdatedAt.Equal(epoch.Add(time.Hour)) {
+		t.Fatalf("movie after update = %+v", got)
+	}
+	if err := st.UpdateMovieSubtitles(ctx, m.ID, nil, epoch); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = st.GetMovie(ctx, m.ID); len(got.ExternalSubtitles) != 0 {
+		t.Errorf("movie subtitles after clearing = %+v", got.ExternalSubtitles)
+	}
+	if err := st.UpdateMovieSubtitles(ctx, newID(), subs, epoch); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update of an unknown movie: got %v, want ErrNotFound", err)
+	}
+
+	e, sr, sn := newEpisode(lib, "Breaking Bad", 2008, 1, intp(1), "Pilot")
+	if _, err := st.SaveEpisode(ctx, e, sr, sn); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpdateEpisodeSubtitles(ctx, e.ID, subs, epoch.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	gotEp, _ := st.GetEpisode(ctx, e.ID)
+	if !slices.Equal(gotEp.ExternalSubtitles, subs) || !gotEp.UpdatedAt.Equal(epoch.Add(time.Hour)) {
+		t.Fatalf("episode after update = %+v", gotEp)
+	}
+	if err := st.UpdateEpisodeSubtitles(ctx, newID(), subs, epoch); !errors.Is(err, ErrNotFound) {
+		t.Errorf("update of an unknown episode: got %v, want ErrNotFound", err)
+	}
+	// The listings read them too.
+	list, _, err := st.ListEpisodes(ctx, &EpisodeQuery{})
+	if err != nil || len(list) != 1 || !slices.Equal(list[0].ExternalSubtitles, subs) {
+		t.Errorf("ListEpisodes = %+v, %v", list, err)
+	}
+}
+
+func TestSortSubtitles(t *testing.T) {
+	a := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000002"), Language: "en"}
+	b := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000001"), Language: "en"}
+	c := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000003"), Language: "en", Title: "x"}
+	d := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000004"), Language: "en", Title: "x", Forced: true}
+	e := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000005")}
+	f := ExternalSubtitle{ID: uuid.MustParse("00000000-0000-0000-0000-000000000006"), Language: "pt-BR"}
+	got := []ExternalSubtitle{f, d, a, e, c, b}
+	SortSubtitles(got)
+	want := []ExternalSubtitle{e, b, a, c, d, f}
+	if !slices.Equal(got, want) {
+		t.Errorf("SortSubtitles = %+v, want %+v", got, want)
 	}
 }

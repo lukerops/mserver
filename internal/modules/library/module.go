@@ -30,7 +30,7 @@ type Module struct {
 }
 
 // New opens the database of the module, registers the LibraryService
-// handler on server and subscribes to the storage events on sub. Events are
+// handler on server and subscribes to the storage and subtitles events on sub. Events are
 // published on pub. The library uses the storage to check and resync the
 // locations of the libraries.
 //
@@ -55,13 +55,19 @@ func New(ctx context.Context, cfg database.Config, server *connect.Server, pub p
 			return nil, errors.Join(err, db.Close())
 		}
 	}
+	for _, topic := range service.SubtitleTopics {
+		if err := sub.Subscribe(subCtx, consumer, topic, svc.HandleSubtitleEvent); err != nil {
+			cancel()
+			return nil, errors.Join(err, db.Close())
+		}
+	}
 	libraryv1connect.RegisterLibraryServiceHandler(server, handler.New(svc, log))
 
 	log.InfoContext(ctx, "library: module started", slog.String("db_driver", string(cfg.Driver)))
 	return &Module{db: db, cancel: cancel}, nil
 }
 
-// Close stops listening to the storage events and closes the database.
+// Close stops listening to the events and closes the database.
 func (m *Module) Close() error {
 	m.cancel()
 	return m.db.Close()

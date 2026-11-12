@@ -43,6 +43,30 @@ func decodeMediaInfo(data sql.NullString) (*MediaInfo, error) {
 	return info, nil
 }
 
+// encodeSubtitles returns the JSON of the external subtitles, NULL when
+// there are none.
+func encodeSubtitles(subs []ExternalSubtitle) (sql.NullString, error) {
+	if len(subs) == 0 {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(subs)
+	if err != nil {
+		return sql.NullString{}, fmt.Errorf("store: encode external subtitles: %w", err)
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func decodeSubtitles(data sql.NullString) ([]ExternalSubtitle, error) {
+	if !data.Valid {
+		return nil, nil
+	}
+	var subs []ExternalSubtitle
+	if err := json.Unmarshal([]byte(data.String), &subs); err != nil {
+		return nil, fmt.Errorf("store: decode external subtitles: %w", err)
+	}
+	return subs, nil
+}
+
 // languageList returns the languages of the streams of a type, as saved in
 // the language columns.
 func languageList(info *MediaInfo, typ string) string {

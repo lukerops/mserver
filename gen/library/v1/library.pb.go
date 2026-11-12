@@ -131,10 +131,13 @@ type Movie struct {
 	// media_info is unset until the file is analyzed.
 	MediaInfo *MediaInfo `protobuf:"bytes,9,opt,name=media_info,json=mediaInfo,proto3" json:"media_info,omitempty"`
 	// created_at is when the movie was added to the library.
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,10,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,11,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// external_subtitles are the subtitle files found beside the video, in a
+	// stable order.
+	ExternalSubtitles []*ExternalSubtitle `protobuf:"bytes,12,rep,name=external_subtitles,json=externalSubtitles,proto3" json:"external_subtitles,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Movie) Reset() {
@@ -244,6 +247,121 @@ func (x *Movie) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Movie) GetExternalSubtitles() []*ExternalSubtitle {
+	if x != nil {
+		return x.ExternalSubtitles
+	}
+	return nil
+}
+
+// ExternalSubtitle is a subtitle file beside the video file of a movie or
+// episode, as matched by the subtitles module. The library only keeps
+// it: the file itself is served by the storage (file_id).
+type ExternalSubtitle struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// id identifies the subtitle of the item.
+	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// file_id is the file of the subtitle in the storage.
+	FileId string `protobuf:"bytes,2,opt,name=file_id,json=fileId,proto3" json:"file_id,omitempty"`
+	// format is the format of the file (e.g. "srt").
+	Format string `protobuf:"bytes,3,opt,name=format,proto3" json:"format,omitempty"`
+	// language is a BCP 47 tag (e.g. "pt-BR"), empty when unknown.
+	Language        string `protobuf:"bytes,4,opt,name=language,proto3" json:"language,omitempty"`
+	Title           string `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	Forced          bool   `protobuf:"varint,6,opt,name=forced,proto3" json:"forced,omitempty"`
+	HearingImpaired bool   `protobuf:"varint,7,opt,name=hearing_impaired,json=hearingImpaired,proto3" json:"hearing_impaired,omitempty"`
+	// source tells where the subtitle came from (e.g. "local").
+	Source        string `protobuf:"bytes,8,opt,name=source,proto3" json:"source,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExternalSubtitle) Reset() {
+	*x = ExternalSubtitle{}
+	mi := &file_library_v1_library_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExternalSubtitle) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExternalSubtitle) ProtoMessage() {}
+
+func (x *ExternalSubtitle) ProtoReflect() protoreflect.Message {
+	mi := &file_library_v1_library_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExternalSubtitle.ProtoReflect.Descriptor instead.
+func (*ExternalSubtitle) Descriptor() ([]byte, []int) {
+	return file_library_v1_library_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *ExternalSubtitle) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *ExternalSubtitle) GetFileId() string {
+	if x != nil {
+		return x.FileId
+	}
+	return ""
+}
+
+func (x *ExternalSubtitle) GetFormat() string {
+	if x != nil {
+		return x.Format
+	}
+	return ""
+}
+
+func (x *ExternalSubtitle) GetLanguage() string {
+	if x != nil {
+		return x.Language
+	}
+	return ""
+}
+
+func (x *ExternalSubtitle) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *ExternalSubtitle) GetForced() bool {
+	if x != nil {
+		return x.Forced
+	}
+	return false
+}
+
+func (x *ExternalSubtitle) GetHearingImpaired() bool {
+	if x != nil {
+		return x.HearingImpaired
+	}
+	return false
+}
+
+func (x *ExternalSubtitle) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
 // MediaInfo is the technical information of the file of a movie or episode.
 type MediaInfo struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -260,7 +378,7 @@ type MediaInfo struct {
 
 func (x *MediaInfo) Reset() {
 	*x = MediaInfo{}
-	mi := &file_library_v1_library_proto_msgTypes[2]
+	mi := &file_library_v1_library_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -272,7 +390,7 @@ func (x *MediaInfo) String() string {
 func (*MediaInfo) ProtoMessage() {}
 
 func (x *MediaInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[2]
+	mi := &file_library_v1_library_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -285,7 +403,7 @@ func (x *MediaInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MediaInfo.ProtoReflect.Descriptor instead.
 func (*MediaInfo) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{2}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *MediaInfo) GetContainer() string {
@@ -358,7 +476,7 @@ type Stream struct {
 
 func (x *Stream) Reset() {
 	*x = Stream{}
-	mi := &file_library_v1_library_proto_msgTypes[3]
+	mi := &file_library_v1_library_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -370,7 +488,7 @@ func (x *Stream) String() string {
 func (*Stream) ProtoMessage() {}
 
 func (x *Stream) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[3]
+	mi := &file_library_v1_library_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -383,7 +501,7 @@ func (x *Stream) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Stream.ProtoReflect.Descriptor instead.
 func (*Stream) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{3}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *Stream) GetIndex() int32 {
@@ -574,7 +692,7 @@ type Series struct {
 
 func (x *Series) Reset() {
 	*x = Series{}
-	mi := &file_library_v1_library_proto_msgTypes[4]
+	mi := &file_library_v1_library_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -586,7 +704,7 @@ func (x *Series) String() string {
 func (*Series) ProtoMessage() {}
 
 func (x *Series) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[4]
+	mi := &file_library_v1_library_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -599,7 +717,7 @@ func (x *Series) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Series.ProtoReflect.Descriptor instead.
 func (*Series) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{4}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Series) GetId() string {
@@ -677,7 +795,7 @@ type Season struct {
 
 func (x *Season) Reset() {
 	*x = Season{}
-	mi := &file_library_v1_library_proto_msgTypes[5]
+	mi := &file_library_v1_library_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -689,7 +807,7 @@ func (x *Season) String() string {
 func (*Season) ProtoMessage() {}
 
 func (x *Season) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[5]
+	mi := &file_library_v1_library_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -702,7 +820,7 @@ func (x *Season) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Season.ProtoReflect.Descriptor instead.
 func (*Season) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{5}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Season) GetId() string {
@@ -787,15 +905,18 @@ type Episode struct {
 	// media_info is unset until the file is analyzed.
 	MediaInfo *MediaInfo `protobuf:"bytes,14,opt,name=media_info,json=mediaInfo,proto3" json:"media_info,omitempty"`
 	// created_at is when the episode was added to the library.
-	CreatedAt     *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
-	UpdatedAt     *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,15,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
+	UpdatedAt *timestamppb.Timestamp `protobuf:"bytes,16,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
+	// external_subtitles are the subtitle files found beside the video, in a
+	// stable order.
+	ExternalSubtitles []*ExternalSubtitle `protobuf:"bytes,17,rep,name=external_subtitles,json=externalSubtitles,proto3" json:"external_subtitles,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *Episode) Reset() {
 	*x = Episode{}
-	mi := &file_library_v1_library_proto_msgTypes[6]
+	mi := &file_library_v1_library_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -807,7 +928,7 @@ func (x *Episode) String() string {
 func (*Episode) ProtoMessage() {}
 
 func (x *Episode) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[6]
+	mi := &file_library_v1_library_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -820,7 +941,7 @@ func (x *Episode) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Episode.ProtoReflect.Descriptor instead.
 func (*Episode) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{6}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Episode) GetId() string {
@@ -935,6 +1056,13 @@ func (x *Episode) GetUpdatedAt() *timestamppb.Timestamp {
 	return nil
 }
 
+func (x *Episode) GetExternalSubtitles() []*ExternalSubtitle {
+	if x != nil {
+		return x.ExternalSubtitles
+	}
+	return nil
+}
+
 type CreateLibraryRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Name  string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -948,7 +1076,7 @@ type CreateLibraryRequest struct {
 
 func (x *CreateLibraryRequest) Reset() {
 	*x = CreateLibraryRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[7]
+	mi := &file_library_v1_library_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -960,7 +1088,7 @@ func (x *CreateLibraryRequest) String() string {
 func (*CreateLibraryRequest) ProtoMessage() {}
 
 func (x *CreateLibraryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[7]
+	mi := &file_library_v1_library_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -973,7 +1101,7 @@ func (x *CreateLibraryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateLibraryRequest.ProtoReflect.Descriptor instead.
 func (*CreateLibraryRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{7}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *CreateLibraryRequest) GetName() string {
@@ -1006,7 +1134,7 @@ type CreateLibraryResponse struct {
 
 func (x *CreateLibraryResponse) Reset() {
 	*x = CreateLibraryResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[8]
+	mi := &file_library_v1_library_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1018,7 +1146,7 @@ func (x *CreateLibraryResponse) String() string {
 func (*CreateLibraryResponse) ProtoMessage() {}
 
 func (x *CreateLibraryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[8]
+	mi := &file_library_v1_library_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1031,7 +1159,7 @@ func (x *CreateLibraryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateLibraryResponse.ProtoReflect.Descriptor instead.
 func (*CreateLibraryResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{8}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *CreateLibraryResponse) GetLibrary() *Library {
@@ -1050,7 +1178,7 @@ type GetLibraryRequest struct {
 
 func (x *GetLibraryRequest) Reset() {
 	*x = GetLibraryRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[9]
+	mi := &file_library_v1_library_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1062,7 +1190,7 @@ func (x *GetLibraryRequest) String() string {
 func (*GetLibraryRequest) ProtoMessage() {}
 
 func (x *GetLibraryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[9]
+	mi := &file_library_v1_library_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1075,7 +1203,7 @@ func (x *GetLibraryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLibraryRequest.ProtoReflect.Descriptor instead.
 func (*GetLibraryRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{9}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *GetLibraryRequest) GetId() string {
@@ -1094,7 +1222,7 @@ type GetLibraryResponse struct {
 
 func (x *GetLibraryResponse) Reset() {
 	*x = GetLibraryResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[10]
+	mi := &file_library_v1_library_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1106,7 +1234,7 @@ func (x *GetLibraryResponse) String() string {
 func (*GetLibraryResponse) ProtoMessage() {}
 
 func (x *GetLibraryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[10]
+	mi := &file_library_v1_library_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1119,7 +1247,7 @@ func (x *GetLibraryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetLibraryResponse.ProtoReflect.Descriptor instead.
 func (*GetLibraryResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{10}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *GetLibraryResponse) GetLibrary() *Library {
@@ -1137,7 +1265,7 @@ type ListLibrariesRequest struct {
 
 func (x *ListLibrariesRequest) Reset() {
 	*x = ListLibrariesRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[11]
+	mi := &file_library_v1_library_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1149,7 +1277,7 @@ func (x *ListLibrariesRequest) String() string {
 func (*ListLibrariesRequest) ProtoMessage() {}
 
 func (x *ListLibrariesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[11]
+	mi := &file_library_v1_library_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1162,7 +1290,7 @@ func (x *ListLibrariesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLibrariesRequest.ProtoReflect.Descriptor instead.
 func (*ListLibrariesRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{11}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{12}
 }
 
 type ListLibrariesResponse struct {
@@ -1174,7 +1302,7 @@ type ListLibrariesResponse struct {
 
 func (x *ListLibrariesResponse) Reset() {
 	*x = ListLibrariesResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[12]
+	mi := &file_library_v1_library_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1186,7 +1314,7 @@ func (x *ListLibrariesResponse) String() string {
 func (*ListLibrariesResponse) ProtoMessage() {}
 
 func (x *ListLibrariesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[12]
+	mi := &file_library_v1_library_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1199,7 +1327,7 @@ func (x *ListLibrariesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListLibrariesResponse.ProtoReflect.Descriptor instead.
 func (*ListLibrariesResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{12}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *ListLibrariesResponse) GetLibraries() []*Library {
@@ -1218,7 +1346,7 @@ type DeleteLibraryRequest struct {
 
 func (x *DeleteLibraryRequest) Reset() {
 	*x = DeleteLibraryRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[13]
+	mi := &file_library_v1_library_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1230,7 +1358,7 @@ func (x *DeleteLibraryRequest) String() string {
 func (*DeleteLibraryRequest) ProtoMessage() {}
 
 func (x *DeleteLibraryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[13]
+	mi := &file_library_v1_library_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1243,7 +1371,7 @@ func (x *DeleteLibraryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteLibraryRequest.ProtoReflect.Descriptor instead.
 func (*DeleteLibraryRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{13}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *DeleteLibraryRequest) GetId() string {
@@ -1261,7 +1389,7 @@ type DeleteLibraryResponse struct {
 
 func (x *DeleteLibraryResponse) Reset() {
 	*x = DeleteLibraryResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[14]
+	mi := &file_library_v1_library_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1273,7 +1401,7 @@ func (x *DeleteLibraryResponse) String() string {
 func (*DeleteLibraryResponse) ProtoMessage() {}
 
 func (x *DeleteLibraryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[14]
+	mi := &file_library_v1_library_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1286,7 +1414,7 @@ func (x *DeleteLibraryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteLibraryResponse.ProtoReflect.Descriptor instead.
 func (*DeleteLibraryResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{14}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{15}
 }
 
 type ResyncLibraryRequest struct {
@@ -1298,7 +1426,7 @@ type ResyncLibraryRequest struct {
 
 func (x *ResyncLibraryRequest) Reset() {
 	*x = ResyncLibraryRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[15]
+	mi := &file_library_v1_library_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1310,7 +1438,7 @@ func (x *ResyncLibraryRequest) String() string {
 func (*ResyncLibraryRequest) ProtoMessage() {}
 
 func (x *ResyncLibraryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[15]
+	mi := &file_library_v1_library_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1323,7 +1451,7 @@ func (x *ResyncLibraryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncLibraryRequest.ProtoReflect.Descriptor instead.
 func (*ResyncLibraryRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{15}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *ResyncLibraryRequest) GetId() string {
@@ -1341,7 +1469,7 @@ type ResyncLibraryResponse struct {
 
 func (x *ResyncLibraryResponse) Reset() {
 	*x = ResyncLibraryResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[16]
+	mi := &file_library_v1_library_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1353,7 +1481,7 @@ func (x *ResyncLibraryResponse) String() string {
 func (*ResyncLibraryResponse) ProtoMessage() {}
 
 func (x *ResyncLibraryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[16]
+	mi := &file_library_v1_library_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1366,7 +1494,7 @@ func (x *ResyncLibraryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncLibraryResponse.ProtoReflect.Descriptor instead.
 func (*ResyncLibraryResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{16}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{17}
 }
 
 type GetMovieRequest struct {
@@ -1380,7 +1508,7 @@ type GetMovieRequest struct {
 
 func (x *GetMovieRequest) Reset() {
 	*x = GetMovieRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[17]
+	mi := &file_library_v1_library_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1392,7 +1520,7 @@ func (x *GetMovieRequest) String() string {
 func (*GetMovieRequest) ProtoMessage() {}
 
 func (x *GetMovieRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[17]
+	mi := &file_library_v1_library_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1405,7 +1533,7 @@ func (x *GetMovieRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMovieRequest.ProtoReflect.Descriptor instead.
 func (*GetMovieRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{17}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GetMovieRequest) GetLibraryId() string {
@@ -1431,7 +1559,7 @@ type GetMovieResponse struct {
 
 func (x *GetMovieResponse) Reset() {
 	*x = GetMovieResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[18]
+	mi := &file_library_v1_library_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1443,7 +1571,7 @@ func (x *GetMovieResponse) String() string {
 func (*GetMovieResponse) ProtoMessage() {}
 
 func (x *GetMovieResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[18]
+	mi := &file_library_v1_library_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1456,7 +1584,7 @@ func (x *GetMovieResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetMovieResponse.ProtoReflect.Descriptor instead.
 func (*GetMovieResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{18}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *GetMovieResponse) GetMovie() *Movie {
@@ -1494,7 +1622,7 @@ type ListMoviesRequest struct {
 
 func (x *ListMoviesRequest) Reset() {
 	*x = ListMoviesRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[19]
+	mi := &file_library_v1_library_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1506,7 +1634,7 @@ func (x *ListMoviesRequest) String() string {
 func (*ListMoviesRequest) ProtoMessage() {}
 
 func (x *ListMoviesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[19]
+	mi := &file_library_v1_library_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1519,7 +1647,7 @@ func (x *ListMoviesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMoviesRequest.ProtoReflect.Descriptor instead.
 func (*ListMoviesRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{19}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *ListMoviesRequest) GetLibraryId() string {
@@ -1597,7 +1725,7 @@ type ListMoviesResponse struct {
 
 func (x *ListMoviesResponse) Reset() {
 	*x = ListMoviesResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[20]
+	mi := &file_library_v1_library_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1609,7 +1737,7 @@ func (x *ListMoviesResponse) String() string {
 func (*ListMoviesResponse) ProtoMessage() {}
 
 func (x *ListMoviesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[20]
+	mi := &file_library_v1_library_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1622,7 +1750,7 @@ func (x *ListMoviesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListMoviesResponse.ProtoReflect.Descriptor instead.
 func (*ListMoviesResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{20}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *ListMoviesResponse) GetMovies() []*Movie {
@@ -1650,7 +1778,7 @@ type GetSeriesRequest struct {
 
 func (x *GetSeriesRequest) Reset() {
 	*x = GetSeriesRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[21]
+	mi := &file_library_v1_library_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1662,7 +1790,7 @@ func (x *GetSeriesRequest) String() string {
 func (*GetSeriesRequest) ProtoMessage() {}
 
 func (x *GetSeriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[21]
+	mi := &file_library_v1_library_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1675,7 +1803,7 @@ func (x *GetSeriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSeriesRequest.ProtoReflect.Descriptor instead.
 func (*GetSeriesRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{21}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *GetSeriesRequest) GetLibraryId() string {
@@ -1701,7 +1829,7 @@ type GetSeriesResponse struct {
 
 func (x *GetSeriesResponse) Reset() {
 	*x = GetSeriesResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[22]
+	mi := &file_library_v1_library_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1713,7 +1841,7 @@ func (x *GetSeriesResponse) String() string {
 func (*GetSeriesResponse) ProtoMessage() {}
 
 func (x *GetSeriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[22]
+	mi := &file_library_v1_library_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1726,7 +1854,7 @@ func (x *GetSeriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSeriesResponse.ProtoReflect.Descriptor instead.
 func (*GetSeriesResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{22}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *GetSeriesResponse) GetSeries() *Series {
@@ -1763,7 +1891,7 @@ type ListSeriesRequest struct {
 
 func (x *ListSeriesRequest) Reset() {
 	*x = ListSeriesRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[23]
+	mi := &file_library_v1_library_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1775,7 +1903,7 @@ func (x *ListSeriesRequest) String() string {
 func (*ListSeriesRequest) ProtoMessage() {}
 
 func (x *ListSeriesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[23]
+	mi := &file_library_v1_library_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1788,7 +1916,7 @@ func (x *ListSeriesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSeriesRequest.ProtoReflect.Descriptor instead.
 func (*ListSeriesRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{23}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ListSeriesRequest) GetLibraryId() string {
@@ -1866,7 +1994,7 @@ type ListSeriesResponse struct {
 
 func (x *ListSeriesResponse) Reset() {
 	*x = ListSeriesResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[24]
+	mi := &file_library_v1_library_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1878,7 +2006,7 @@ func (x *ListSeriesResponse) String() string {
 func (*ListSeriesResponse) ProtoMessage() {}
 
 func (x *ListSeriesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[24]
+	mi := &file_library_v1_library_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1891,7 +2019,7 @@ func (x *ListSeriesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSeriesResponse.ProtoReflect.Descriptor instead.
 func (*ListSeriesResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{24}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ListSeriesResponse) GetSeries() []*Series {
@@ -1920,7 +2048,7 @@ type GetSeasonRequest struct {
 
 func (x *GetSeasonRequest) Reset() {
 	*x = GetSeasonRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[25]
+	mi := &file_library_v1_library_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1932,7 +2060,7 @@ func (x *GetSeasonRequest) String() string {
 func (*GetSeasonRequest) ProtoMessage() {}
 
 func (x *GetSeasonRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[25]
+	mi := &file_library_v1_library_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1945,7 +2073,7 @@ func (x *GetSeasonRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSeasonRequest.ProtoReflect.Descriptor instead.
 func (*GetSeasonRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{25}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *GetSeasonRequest) GetLibraryId() string {
@@ -1978,7 +2106,7 @@ type GetSeasonResponse struct {
 
 func (x *GetSeasonResponse) Reset() {
 	*x = GetSeasonResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[26]
+	mi := &file_library_v1_library_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1990,7 +2118,7 @@ func (x *GetSeasonResponse) String() string {
 func (*GetSeasonResponse) ProtoMessage() {}
 
 func (x *GetSeasonResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[26]
+	mi := &file_library_v1_library_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2003,7 +2131,7 @@ func (x *GetSeasonResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSeasonResponse.ProtoReflect.Descriptor instead.
 func (*GetSeasonResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{26}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *GetSeasonResponse) GetSeason() *Season {
@@ -2026,7 +2154,7 @@ type ListSeasonsRequest struct {
 
 func (x *ListSeasonsRequest) Reset() {
 	*x = ListSeasonsRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[27]
+	mi := &file_library_v1_library_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2038,7 +2166,7 @@ func (x *ListSeasonsRequest) String() string {
 func (*ListSeasonsRequest) ProtoMessage() {}
 
 func (x *ListSeasonsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[27]
+	mi := &file_library_v1_library_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2051,7 +2179,7 @@ func (x *ListSeasonsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSeasonsRequest.ProtoReflect.Descriptor instead.
 func (*ListSeasonsRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{27}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *ListSeasonsRequest) GetLibraryId() string {
@@ -2084,7 +2212,7 @@ type ListSeasonsResponse struct {
 
 func (x *ListSeasonsResponse) Reset() {
 	*x = ListSeasonsResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[28]
+	mi := &file_library_v1_library_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2096,7 +2224,7 @@ func (x *ListSeasonsResponse) String() string {
 func (*ListSeasonsResponse) ProtoMessage() {}
 
 func (x *ListSeasonsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[28]
+	mi := &file_library_v1_library_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2109,7 +2237,7 @@ func (x *ListSeasonsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListSeasonsResponse.ProtoReflect.Descriptor instead.
 func (*ListSeasonsResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{28}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *ListSeasonsResponse) GetSeasons() []*Season {
@@ -2132,7 +2260,7 @@ type GetEpisodeRequest struct {
 
 func (x *GetEpisodeRequest) Reset() {
 	*x = GetEpisodeRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[29]
+	mi := &file_library_v1_library_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2144,7 +2272,7 @@ func (x *GetEpisodeRequest) String() string {
 func (*GetEpisodeRequest) ProtoMessage() {}
 
 func (x *GetEpisodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[29]
+	mi := &file_library_v1_library_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2157,7 +2285,7 @@ func (x *GetEpisodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEpisodeRequest.ProtoReflect.Descriptor instead.
 func (*GetEpisodeRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{29}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GetEpisodeRequest) GetLibraryId() string {
@@ -2197,7 +2325,7 @@ type GetEpisodeResponse struct {
 
 func (x *GetEpisodeResponse) Reset() {
 	*x = GetEpisodeResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[30]
+	mi := &file_library_v1_library_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2209,7 +2337,7 @@ func (x *GetEpisodeResponse) String() string {
 func (*GetEpisodeResponse) ProtoMessage() {}
 
 func (x *GetEpisodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[30]
+	mi := &file_library_v1_library_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2222,7 +2350,7 @@ func (x *GetEpisodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetEpisodeResponse.ProtoReflect.Descriptor instead.
 func (*GetEpisodeResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{30}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *GetEpisodeResponse) GetEpisode() *Episode {
@@ -2261,7 +2389,7 @@ type ListEpisodesRequest struct {
 
 func (x *ListEpisodesRequest) Reset() {
 	*x = ListEpisodesRequest{}
-	mi := &file_library_v1_library_proto_msgTypes[31]
+	mi := &file_library_v1_library_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2273,7 +2401,7 @@ func (x *ListEpisodesRequest) String() string {
 func (*ListEpisodesRequest) ProtoMessage() {}
 
 func (x *ListEpisodesRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[31]
+	mi := &file_library_v1_library_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2286,7 +2414,7 @@ func (x *ListEpisodesRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEpisodesRequest.ProtoReflect.Descriptor instead.
 func (*ListEpisodesRequest) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{31}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ListEpisodesRequest) GetLibraryId() string {
@@ -2371,7 +2499,7 @@ type ListEpisodesResponse struct {
 
 func (x *ListEpisodesResponse) Reset() {
 	*x = ListEpisodesResponse{}
-	mi := &file_library_v1_library_proto_msgTypes[32]
+	mi := &file_library_v1_library_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2383,7 +2511,7 @@ func (x *ListEpisodesResponse) String() string {
 func (*ListEpisodesResponse) ProtoMessage() {}
 
 func (x *ListEpisodesResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_library_v1_library_proto_msgTypes[32]
+	mi := &file_library_v1_library_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2396,7 +2524,7 @@ func (x *ListEpisodesResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListEpisodesResponse.ProtoReflect.Descriptor instead.
 func (*ListEpisodesResponse) Descriptor() ([]byte, []int) {
-	return file_library_v1_library_proto_rawDescGZIP(), []int{32}
+	return file_library_v1_library_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ListEpisodesResponse) GetEpisodes() []*Episode {
@@ -2426,7 +2554,7 @@ const file_library_v1_library_proto_rawDesc = "" +
 	"media_type\x18\x03 \x01(\tR\tmediaType\x12!\n" +
 	"\flocation_ids\x18\x04 \x03(\tR\vlocationIds\x129\n" +
 	"\n" +
-	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xf9\x02\n" +
+	"created_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc6\x03\n" +
 	"\x05Movie\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -2445,7 +2573,17 @@ const file_library_v1_library_proto_rawDesc = "" +
 	"created_at\x18\n" +
 	" \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\"\xa7\x01\n" +
+	"updated_at\x18\v \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12K\n" +
+	"\x12external_subtitles\x18\f \x03(\v2\x1c.library.v1.ExternalSubtitleR\x11externalSubtitles\"\xe0\x01\n" +
+	"\x10ExternalSubtitle\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
+	"\afile_id\x18\x02 \x01(\tR\x06fileId\x12\x16\n" +
+	"\x06format\x18\x03 \x01(\tR\x06format\x12\x1a\n" +
+	"\blanguage\x18\x04 \x01(\tR\blanguage\x12\x14\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title\x12\x16\n" +
+	"\x06forced\x18\x06 \x01(\bR\x06forced\x12)\n" +
+	"\x10hearing_impaired\x18\a \x01(\bR\x0fhearingImpaired\x12\x16\n" +
+	"\x06source\x18\b \x01(\tR\x06source\"\xa7\x01\n" +
 	"\tMediaInfo\x12\x1c\n" +
 	"\tcontainer\x18\x01 \x01(\tR\tcontainer\x12\x1f\n" +
 	"\vduration_ms\x18\x02 \x01(\x03R\n" +
@@ -2507,7 +2645,7 @@ const file_library_v1_library_proto_rawDesc = "" +
 	"seriesYear\x12#\n" +
 	"\repisode_count\x18\a \x01(\x05R\fepisodeCount\x129\n" +
 	"\n" +
-	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\xc6\x04\n" +
+	"created_at\x18\b \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\"\x93\x05\n" +
 	"\aEpisode\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1d\n" +
 	"\n" +
@@ -2532,7 +2670,8 @@ const file_library_v1_library_proto_rawDesc = "" +
 	"\n" +
 	"created_at\x18\x0f \x01(\v2\x1a.google.protobuf.TimestampR\tcreatedAt\x129\n" +
 	"\n" +
-	"updated_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAtB\t\n" +
+	"updated_at\x18\x10 \x01(\v2\x1a.google.protobuf.TimestampR\tupdatedAt\x12K\n" +
+	"\x12external_subtitles\x18\x11 \x03(\v2\x1c.library.v1.ExternalSubtitleR\x11externalSubtitlesB\t\n" +
 	"\a_numberB\r\n" +
 	"\v_end_number\"l\n" +
 	"\x14CreateLibraryRequest\x12\x12\n" +
@@ -2673,96 +2812,99 @@ func file_library_v1_library_proto_rawDescGZIP() []byte {
 	return file_library_v1_library_proto_rawDescData
 }
 
-var file_library_v1_library_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_library_v1_library_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_library_v1_library_proto_goTypes = []any{
 	(*Library)(nil),               // 0: library.v1.Library
 	(*Movie)(nil),                 // 1: library.v1.Movie
-	(*MediaInfo)(nil),             // 2: library.v1.MediaInfo
-	(*Stream)(nil),                // 3: library.v1.Stream
-	(*Series)(nil),                // 4: library.v1.Series
-	(*Season)(nil),                // 5: library.v1.Season
-	(*Episode)(nil),               // 6: library.v1.Episode
-	(*CreateLibraryRequest)(nil),  // 7: library.v1.CreateLibraryRequest
-	(*CreateLibraryResponse)(nil), // 8: library.v1.CreateLibraryResponse
-	(*GetLibraryRequest)(nil),     // 9: library.v1.GetLibraryRequest
-	(*GetLibraryResponse)(nil),    // 10: library.v1.GetLibraryResponse
-	(*ListLibrariesRequest)(nil),  // 11: library.v1.ListLibrariesRequest
-	(*ListLibrariesResponse)(nil), // 12: library.v1.ListLibrariesResponse
-	(*DeleteLibraryRequest)(nil),  // 13: library.v1.DeleteLibraryRequest
-	(*DeleteLibraryResponse)(nil), // 14: library.v1.DeleteLibraryResponse
-	(*ResyncLibraryRequest)(nil),  // 15: library.v1.ResyncLibraryRequest
-	(*ResyncLibraryResponse)(nil), // 16: library.v1.ResyncLibraryResponse
-	(*GetMovieRequest)(nil),       // 17: library.v1.GetMovieRequest
-	(*GetMovieResponse)(nil),      // 18: library.v1.GetMovieResponse
-	(*ListMoviesRequest)(nil),     // 19: library.v1.ListMoviesRequest
-	(*ListMoviesResponse)(nil),    // 20: library.v1.ListMoviesResponse
-	(*GetSeriesRequest)(nil),      // 21: library.v1.GetSeriesRequest
-	(*GetSeriesResponse)(nil),     // 22: library.v1.GetSeriesResponse
-	(*ListSeriesRequest)(nil),     // 23: library.v1.ListSeriesRequest
-	(*ListSeriesResponse)(nil),    // 24: library.v1.ListSeriesResponse
-	(*GetSeasonRequest)(nil),      // 25: library.v1.GetSeasonRequest
-	(*GetSeasonResponse)(nil),     // 26: library.v1.GetSeasonResponse
-	(*ListSeasonsRequest)(nil),    // 27: library.v1.ListSeasonsRequest
-	(*ListSeasonsResponse)(nil),   // 28: library.v1.ListSeasonsResponse
-	(*GetEpisodeRequest)(nil),     // 29: library.v1.GetEpisodeRequest
-	(*GetEpisodeResponse)(nil),    // 30: library.v1.GetEpisodeResponse
-	(*ListEpisodesRequest)(nil),   // 31: library.v1.ListEpisodesRequest
-	(*ListEpisodesResponse)(nil),  // 32: library.v1.ListEpisodesResponse
-	(*timestamppb.Timestamp)(nil), // 33: google.protobuf.Timestamp
+	(*ExternalSubtitle)(nil),      // 2: library.v1.ExternalSubtitle
+	(*MediaInfo)(nil),             // 3: library.v1.MediaInfo
+	(*Stream)(nil),                // 4: library.v1.Stream
+	(*Series)(nil),                // 5: library.v1.Series
+	(*Season)(nil),                // 6: library.v1.Season
+	(*Episode)(nil),               // 7: library.v1.Episode
+	(*CreateLibraryRequest)(nil),  // 8: library.v1.CreateLibraryRequest
+	(*CreateLibraryResponse)(nil), // 9: library.v1.CreateLibraryResponse
+	(*GetLibraryRequest)(nil),     // 10: library.v1.GetLibraryRequest
+	(*GetLibraryResponse)(nil),    // 11: library.v1.GetLibraryResponse
+	(*ListLibrariesRequest)(nil),  // 12: library.v1.ListLibrariesRequest
+	(*ListLibrariesResponse)(nil), // 13: library.v1.ListLibrariesResponse
+	(*DeleteLibraryRequest)(nil),  // 14: library.v1.DeleteLibraryRequest
+	(*DeleteLibraryResponse)(nil), // 15: library.v1.DeleteLibraryResponse
+	(*ResyncLibraryRequest)(nil),  // 16: library.v1.ResyncLibraryRequest
+	(*ResyncLibraryResponse)(nil), // 17: library.v1.ResyncLibraryResponse
+	(*GetMovieRequest)(nil),       // 18: library.v1.GetMovieRequest
+	(*GetMovieResponse)(nil),      // 19: library.v1.GetMovieResponse
+	(*ListMoviesRequest)(nil),     // 20: library.v1.ListMoviesRequest
+	(*ListMoviesResponse)(nil),    // 21: library.v1.ListMoviesResponse
+	(*GetSeriesRequest)(nil),      // 22: library.v1.GetSeriesRequest
+	(*GetSeriesResponse)(nil),     // 23: library.v1.GetSeriesResponse
+	(*ListSeriesRequest)(nil),     // 24: library.v1.ListSeriesRequest
+	(*ListSeriesResponse)(nil),    // 25: library.v1.ListSeriesResponse
+	(*GetSeasonRequest)(nil),      // 26: library.v1.GetSeasonRequest
+	(*GetSeasonResponse)(nil),     // 27: library.v1.GetSeasonResponse
+	(*ListSeasonsRequest)(nil),    // 28: library.v1.ListSeasonsRequest
+	(*ListSeasonsResponse)(nil),   // 29: library.v1.ListSeasonsResponse
+	(*GetEpisodeRequest)(nil),     // 30: library.v1.GetEpisodeRequest
+	(*GetEpisodeResponse)(nil),    // 31: library.v1.GetEpisodeResponse
+	(*ListEpisodesRequest)(nil),   // 32: library.v1.ListEpisodesRequest
+	(*ListEpisodesResponse)(nil),  // 33: library.v1.ListEpisodesResponse
+	(*timestamppb.Timestamp)(nil), // 34: google.protobuf.Timestamp
 }
 var file_library_v1_library_proto_depIdxs = []int32{
-	33, // 0: library.v1.Library.created_at:type_name -> google.protobuf.Timestamp
-	2,  // 1: library.v1.Movie.media_info:type_name -> library.v1.MediaInfo
-	33, // 2: library.v1.Movie.created_at:type_name -> google.protobuf.Timestamp
-	33, // 3: library.v1.Movie.updated_at:type_name -> google.protobuf.Timestamp
-	3,  // 4: library.v1.MediaInfo.streams:type_name -> library.v1.Stream
-	33, // 5: library.v1.Series.created_at:type_name -> google.protobuf.Timestamp
-	33, // 6: library.v1.Season.created_at:type_name -> google.protobuf.Timestamp
-	2,  // 7: library.v1.Episode.media_info:type_name -> library.v1.MediaInfo
-	33, // 8: library.v1.Episode.created_at:type_name -> google.protobuf.Timestamp
-	33, // 9: library.v1.Episode.updated_at:type_name -> google.protobuf.Timestamp
-	0,  // 10: library.v1.CreateLibraryResponse.library:type_name -> library.v1.Library
-	0,  // 11: library.v1.GetLibraryResponse.library:type_name -> library.v1.Library
-	0,  // 12: library.v1.ListLibrariesResponse.libraries:type_name -> library.v1.Library
-	1,  // 13: library.v1.GetMovieResponse.movie:type_name -> library.v1.Movie
-	1,  // 14: library.v1.ListMoviesResponse.movies:type_name -> library.v1.Movie
-	4,  // 15: library.v1.GetSeriesResponse.series:type_name -> library.v1.Series
-	4,  // 16: library.v1.ListSeriesResponse.series:type_name -> library.v1.Series
-	5,  // 17: library.v1.GetSeasonResponse.season:type_name -> library.v1.Season
-	5,  // 18: library.v1.ListSeasonsResponse.seasons:type_name -> library.v1.Season
-	6,  // 19: library.v1.GetEpisodeResponse.episode:type_name -> library.v1.Episode
-	6,  // 20: library.v1.ListEpisodesResponse.episodes:type_name -> library.v1.Episode
-	7,  // 21: library.v1.LibraryService.CreateLibrary:input_type -> library.v1.CreateLibraryRequest
-	9,  // 22: library.v1.LibraryService.GetLibrary:input_type -> library.v1.GetLibraryRequest
-	11, // 23: library.v1.LibraryService.ListLibraries:input_type -> library.v1.ListLibrariesRequest
-	13, // 24: library.v1.LibraryService.DeleteLibrary:input_type -> library.v1.DeleteLibraryRequest
-	15, // 25: library.v1.LibraryService.ResyncLibrary:input_type -> library.v1.ResyncLibraryRequest
-	17, // 26: library.v1.LibraryService.GetMovie:input_type -> library.v1.GetMovieRequest
-	19, // 27: library.v1.LibraryService.ListMovies:input_type -> library.v1.ListMoviesRequest
-	21, // 28: library.v1.LibraryService.GetSeries:input_type -> library.v1.GetSeriesRequest
-	23, // 29: library.v1.LibraryService.ListSeries:input_type -> library.v1.ListSeriesRequest
-	25, // 30: library.v1.LibraryService.GetSeason:input_type -> library.v1.GetSeasonRequest
-	27, // 31: library.v1.LibraryService.ListSeasons:input_type -> library.v1.ListSeasonsRequest
-	29, // 32: library.v1.LibraryService.GetEpisode:input_type -> library.v1.GetEpisodeRequest
-	31, // 33: library.v1.LibraryService.ListEpisodes:input_type -> library.v1.ListEpisodesRequest
-	8,  // 34: library.v1.LibraryService.CreateLibrary:output_type -> library.v1.CreateLibraryResponse
-	10, // 35: library.v1.LibraryService.GetLibrary:output_type -> library.v1.GetLibraryResponse
-	12, // 36: library.v1.LibraryService.ListLibraries:output_type -> library.v1.ListLibrariesResponse
-	14, // 37: library.v1.LibraryService.DeleteLibrary:output_type -> library.v1.DeleteLibraryResponse
-	16, // 38: library.v1.LibraryService.ResyncLibrary:output_type -> library.v1.ResyncLibraryResponse
-	18, // 39: library.v1.LibraryService.GetMovie:output_type -> library.v1.GetMovieResponse
-	20, // 40: library.v1.LibraryService.ListMovies:output_type -> library.v1.ListMoviesResponse
-	22, // 41: library.v1.LibraryService.GetSeries:output_type -> library.v1.GetSeriesResponse
-	24, // 42: library.v1.LibraryService.ListSeries:output_type -> library.v1.ListSeriesResponse
-	26, // 43: library.v1.LibraryService.GetSeason:output_type -> library.v1.GetSeasonResponse
-	28, // 44: library.v1.LibraryService.ListSeasons:output_type -> library.v1.ListSeasonsResponse
-	30, // 45: library.v1.LibraryService.GetEpisode:output_type -> library.v1.GetEpisodeResponse
-	32, // 46: library.v1.LibraryService.ListEpisodes:output_type -> library.v1.ListEpisodesResponse
-	34, // [34:47] is the sub-list for method output_type
-	21, // [21:34] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	34, // 0: library.v1.Library.created_at:type_name -> google.protobuf.Timestamp
+	3,  // 1: library.v1.Movie.media_info:type_name -> library.v1.MediaInfo
+	34, // 2: library.v1.Movie.created_at:type_name -> google.protobuf.Timestamp
+	34, // 3: library.v1.Movie.updated_at:type_name -> google.protobuf.Timestamp
+	2,  // 4: library.v1.Movie.external_subtitles:type_name -> library.v1.ExternalSubtitle
+	4,  // 5: library.v1.MediaInfo.streams:type_name -> library.v1.Stream
+	34, // 6: library.v1.Series.created_at:type_name -> google.protobuf.Timestamp
+	34, // 7: library.v1.Season.created_at:type_name -> google.protobuf.Timestamp
+	3,  // 8: library.v1.Episode.media_info:type_name -> library.v1.MediaInfo
+	34, // 9: library.v1.Episode.created_at:type_name -> google.protobuf.Timestamp
+	34, // 10: library.v1.Episode.updated_at:type_name -> google.protobuf.Timestamp
+	2,  // 11: library.v1.Episode.external_subtitles:type_name -> library.v1.ExternalSubtitle
+	0,  // 12: library.v1.CreateLibraryResponse.library:type_name -> library.v1.Library
+	0,  // 13: library.v1.GetLibraryResponse.library:type_name -> library.v1.Library
+	0,  // 14: library.v1.ListLibrariesResponse.libraries:type_name -> library.v1.Library
+	1,  // 15: library.v1.GetMovieResponse.movie:type_name -> library.v1.Movie
+	1,  // 16: library.v1.ListMoviesResponse.movies:type_name -> library.v1.Movie
+	5,  // 17: library.v1.GetSeriesResponse.series:type_name -> library.v1.Series
+	5,  // 18: library.v1.ListSeriesResponse.series:type_name -> library.v1.Series
+	6,  // 19: library.v1.GetSeasonResponse.season:type_name -> library.v1.Season
+	6,  // 20: library.v1.ListSeasonsResponse.seasons:type_name -> library.v1.Season
+	7,  // 21: library.v1.GetEpisodeResponse.episode:type_name -> library.v1.Episode
+	7,  // 22: library.v1.ListEpisodesResponse.episodes:type_name -> library.v1.Episode
+	8,  // 23: library.v1.LibraryService.CreateLibrary:input_type -> library.v1.CreateLibraryRequest
+	10, // 24: library.v1.LibraryService.GetLibrary:input_type -> library.v1.GetLibraryRequest
+	12, // 25: library.v1.LibraryService.ListLibraries:input_type -> library.v1.ListLibrariesRequest
+	14, // 26: library.v1.LibraryService.DeleteLibrary:input_type -> library.v1.DeleteLibraryRequest
+	16, // 27: library.v1.LibraryService.ResyncLibrary:input_type -> library.v1.ResyncLibraryRequest
+	18, // 28: library.v1.LibraryService.GetMovie:input_type -> library.v1.GetMovieRequest
+	20, // 29: library.v1.LibraryService.ListMovies:input_type -> library.v1.ListMoviesRequest
+	22, // 30: library.v1.LibraryService.GetSeries:input_type -> library.v1.GetSeriesRequest
+	24, // 31: library.v1.LibraryService.ListSeries:input_type -> library.v1.ListSeriesRequest
+	26, // 32: library.v1.LibraryService.GetSeason:input_type -> library.v1.GetSeasonRequest
+	28, // 33: library.v1.LibraryService.ListSeasons:input_type -> library.v1.ListSeasonsRequest
+	30, // 34: library.v1.LibraryService.GetEpisode:input_type -> library.v1.GetEpisodeRequest
+	32, // 35: library.v1.LibraryService.ListEpisodes:input_type -> library.v1.ListEpisodesRequest
+	9,  // 36: library.v1.LibraryService.CreateLibrary:output_type -> library.v1.CreateLibraryResponse
+	11, // 37: library.v1.LibraryService.GetLibrary:output_type -> library.v1.GetLibraryResponse
+	13, // 38: library.v1.LibraryService.ListLibraries:output_type -> library.v1.ListLibrariesResponse
+	15, // 39: library.v1.LibraryService.DeleteLibrary:output_type -> library.v1.DeleteLibraryResponse
+	17, // 40: library.v1.LibraryService.ResyncLibrary:output_type -> library.v1.ResyncLibraryResponse
+	19, // 41: library.v1.LibraryService.GetMovie:output_type -> library.v1.GetMovieResponse
+	21, // 42: library.v1.LibraryService.ListMovies:output_type -> library.v1.ListMoviesResponse
+	23, // 43: library.v1.LibraryService.GetSeries:output_type -> library.v1.GetSeriesResponse
+	25, // 44: library.v1.LibraryService.ListSeries:output_type -> library.v1.ListSeriesResponse
+	27, // 45: library.v1.LibraryService.GetSeason:output_type -> library.v1.GetSeasonResponse
+	29, // 46: library.v1.LibraryService.ListSeasons:output_type -> library.v1.ListSeasonsResponse
+	31, // 47: library.v1.LibraryService.GetEpisode:output_type -> library.v1.GetEpisodeResponse
+	33, // 48: library.v1.LibraryService.ListEpisodes:output_type -> library.v1.ListEpisodesResponse
+	36, // [36:49] is the sub-list for method output_type
+	23, // [23:36] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_library_v1_library_proto_init() }
@@ -2770,14 +2912,14 @@ func file_library_v1_library_proto_init() {
 	if File_library_v1_library_proto != nil {
 		return
 	}
-	file_library_v1_library_proto_msgTypes[6].OneofWrappers = []any{}
+	file_library_v1_library_proto_msgTypes[7].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_library_v1_library_proto_rawDesc), len(file_library_v1_library_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
