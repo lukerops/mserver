@@ -449,7 +449,7 @@ Observações:
   sua rota HTTP pura de dados (`GET /locations/{LocationID}/files/{FileID}`, com
   suporte a `Range` via `http.ServeContent` / `sendfile`). Nas rotas de
   streaming do Jellyfin (`GET /Videos/{itemId}/stream*` e
-  `GET /Videos/.../Subtitles/.../Stream.srt`), o plugin `api/jellyfin` atua
+  `GET /Videos/.../Subtitles/.../Stream.{format}`), o plugin `api/jellyfin` atua
   como **proxy reverso em streaming** para o `storage` (ou entrega diretamente
   no monolito), repassando `Range`, `Content-Range`, `Content-Length` e status
   `200`/`206`.
@@ -744,7 +744,9 @@ Estrutura de pastas reconhecida pela identificação:
   de vídeo, áudio e legendas embutidas chegam à `library` pelo evento
   `storage.file.analyzed.v1` gerado pelo analisador `ffprobe` do `storage`.
 - **Legendas externas (MVP — `.srt`):** chegam à `library` pelos eventos
-  `subtitles.subtitle.added.v1` e `subtitles.subtitle.removed.v1`.
+  `subtitles.subtitle.added.v1` e `subtitles.subtitle.removed.v1`, e ficam
+  junto do filme ou episódio (`external_subtitles`), sem alterar os idiomas
+  de legenda das faixas embutidas usados nos filtros.
 - **Capítulos e segmentos de mídia (Pós-MVP):** entrarão no pós-MVP via
   `ffprobe`, `metadata` e `transcoder`.
 
