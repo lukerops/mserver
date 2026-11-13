@@ -81,12 +81,25 @@ func TestStemOf(t *testing.T) {
 }
 
 func TestSubtitleFormat(t *testing.T) {
-	if f, ok := subtitleFormat("application/x-subrip"); !ok || f != "srt" {
-		t.Errorf("subtitleFormat(srt) = %q, %v", f, ok)
-	}
-	for _, m := range []string{"", "video/x-matroska", "text/vtt", "application/octet-stream"} {
-		if _, ok := subtitleFormat(m); ok {
-			t.Errorf("subtitleFormat(%q) = true, want false", m)
+	for _, tt := range []struct {
+		mimeType, filePath string
+		want               string
+		ok                 bool
+	}{
+		{"application/x-subrip", "Movie.en.srt", "srt", true},
+		{"text/vtt", "Movie.en.vtt", "vtt", true},
+		{"text/x-ssa", "Movie.en.ass", "ass", true},
+		{"text/x-ssa", "Movie.en.ssa", "ssa", true},
+		{"application/ttml+xml", "Movie.en.ttml", "ttml", true},
+		{"application/x-sami", "Movie.en.smi", "smi", true},
+		{"", "Movie.en.srt", "", false},
+		{"video/x-matroska", "Movie.mkv", "", false},
+		{"text/plain", "Movie.en.txt", "", false},
+		{"application/octet-stream", "Movie.en.srt", "", false},
+	} {
+		got, ok := subtitleFormat(tt.mimeType, tt.filePath)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("subtitleFormat(%q, %q) = %q, %v; want %q, %v", tt.mimeType, tt.filePath, got, ok, tt.want, tt.ok)
 		}
 	}
 }

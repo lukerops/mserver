@@ -106,7 +106,7 @@ func (s *Service) fileUpdated(ctx context.Context, f *events.FileEventV1) error 
 		return err
 	}
 
-	format, ok := subtitleFormat(f.MimeType)
+	format, ok := subtitleFormat(f.MimeType, f.Path)
 	if !ok {
 		if old == nil {
 			return nil

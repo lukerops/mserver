@@ -306,10 +306,27 @@ func TestNotASubtitleAnymore(t *testing.T) {
 	}
 }
 
-func TestIgnoresOtherFiles(t *testing.T) {
+func TestSubtitleFormats(t *testing.T) {
 	f := newFixture(t)
 	f.movie(events.MovieAddedV1, newID(), newID(), "Movie.mkv")
-	f.storage(events.FileIndexedV1, newID(), "Movie.en.vtt", "text/vtt")
+
+	// Every subtitle format the storage knows is accepted, not only srt.
+	for _, tt := range []struct {
+		path, mime, format string
+	}{
+		{"Movie.en.srt", "application/x-subrip", "srt"},
+		{"Movie.en.vtt", "text/vtt", "vtt"},
+		{"Movie.en.ass", "text/x-ssa", "ass"},
+		{"Movie.en.ssa", "text/x-ssa", "ssa"},
+	} {
+		f.storage(events.FileIndexedV1, newID(), tt.path, tt.mime)
+		added, removed := f.published()
+		if len(added) != 1 || added[0].Format != tt.format || len(removed) != 0 {
+			t.Fatalf("%s: added %+v, removed %+v; want the subtitle", tt.path, added, removed)
+		}
+	}
+
+	// Files that are not subtitles are ignored.
 	f.storage(events.FileIndexedV1, newID(), "Movie.mkv", mkv)
 	f.storage(events.FileIndexedV1, newID(), "Movie.en.srt", "application/octet-stream")
 	if added, removed := f.published(); len(added)+len(removed) != 0 {

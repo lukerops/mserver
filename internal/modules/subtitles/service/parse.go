@@ -8,18 +8,27 @@ import (
 
 // Subtitle formats by media type, as set by the storage. Files of any
 // other media type are not subtitles for the module.
-const (
-	mimeSRT   = "application/x-subrip"
-	formatSRT = "srt"
-)
+var subtitleMimeTypes = map[string]bool{
+	"application/x-subrip": true,
+	"text/vtt":             true,
+	"text/x-ssa":           true,
+	"text/x-ass":           true,
+	"application/ttml+xml": true,
+	"application/x-sami":   true,
+	"text/x-subviewer":     true,
+	"text/x-microdvd":      true,
+	"text/x-lrc":           true,
+}
 
-// subtitleFormat returns the format of a subtitle file of the media type,
-// or false if the media type is not one of a supported subtitle.
-func subtitleFormat(mimeType string) (string, bool) {
-	if mimeType == mimeSRT {
-		return formatSRT, true
+// subtitleFormat returns the format of a subtitle file, given its media type
+// and path: the format is the extension of the file, so that formats that
+// share the media type (e.g. ass and ssa) are told apart. False means the
+// media type is not one of a subtitle.
+func subtitleFormat(mimeType, filePath string) (string, bool) {
+	if !subtitleMimeTypes[mimeType] {
+		return "", false
 	}
-	return "", false
+	return strings.ToLower(strings.TrimPrefix(path.Ext(filePath), ".")), true
 }
 
 // stemOf returns the name of the file of p without its extension.

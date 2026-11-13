@@ -37,10 +37,17 @@ var mimeTypes = map[string]string{
 
 	".mka": "audio/x-matroska",
 
-	".srt": "application/x-subrip",
-	".vtt": "text/vtt",
-	".ass": "text/x-ssa",
-	".ssa": "text/x-ssa",
+	".srt":  "application/x-subrip",
+	".vtt":  "text/vtt",
+	".ass":  "text/x-ssa",
+	".ssa":  "text/x-ssa",
+	".sub":  "text/x-microdvd",
+	".sbv":  "text/x-subviewer",
+	".smi":  "application/x-sami",
+	".sami": "application/x-sami",
+	".ttml": "application/ttml+xml",
+	".dfxp": "application/ttml+xml",
+	".lrc":  "text/x-lrc",
 }
 
 // MimeType is the media type of the file at p, guessed from its extension.
