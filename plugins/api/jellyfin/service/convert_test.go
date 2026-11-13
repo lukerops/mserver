@@ -52,8 +52,8 @@ func TestMovieItem(t *testing.T) {
 	item := movieItem(m, true)
 	if item.Id != "0198a1b2c3d47e5f8a9b0c1d2e3f4a5b" || item.ParentId != "0198a1b2c3d47e5f8a9b000000000001" ||
 		item.Type != "Movie" || item.RunTimeTicks != 15_000_000 || item.Container != "mkv" ||
-		item.ProductionYear != 1979 || !item.IsHD || !item.HasSubtitles || item.Width != 1280 ||
-		item.UserData.Key != item.Id || len(item.MediaStreams) != 4 {
+		item.ProductionYear != 1979 || !item.IsHD || item.HasSubtitles || item.Width != 1280 ||
+		item.UserData.Key != item.Id || len(item.MediaStreams) != 3 {
 		t.Fatalf("item = %+v", item)
 	}
 	src := item.MediaSources[0]
@@ -62,8 +62,12 @@ func TestMovieItem(t *testing.T) {
 		src.DefaultAudioStreamIndex == nil || *src.DefaultAudioStreamIndex != 2 {
 		t.Errorf("media source = %+v", src)
 	}
-	if sub := item.MediaStreams[3]; sub.Type != "Subtitle" || !sub.IsTextSubtitleStream {
-		t.Errorf("subtitle = %+v", sub)
+	// The subtitle embedded in the file is not shown: only external subtitles
+	// are. Without external subtitles, the item has none.
+	for _, s := range item.MediaStreams {
+		if s.Type == "Subtitle" {
+			t.Errorf("embedded subtitle shown = %+v", s)
+		}
 	}
 
 	// Not analyzed yet: a media source without streams.

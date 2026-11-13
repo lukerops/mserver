@@ -323,6 +323,11 @@ func videoFields(id, filePath string, info *libraryv1.MediaInfo, subs []External
 		size = info.GetSize()
 		bitrate = info.GetBitRate()
 		for _, s := range info.GetStreams() {
+			// Only external subtitles are shown: the ones embedded in the
+			// video file are skipped.
+			if s.GetType() == "subtitle" {
+				continue
+			}
 			ms := mediaStream(s)
 			streams = append(streams, ms)
 			switch s.GetType() {
@@ -336,8 +341,6 @@ func videoFields(id, filePath string, info *libraryv1.MediaInfo, subs []External
 					defaultAudioIndex = &index
 					defaultAudio = s.GetDefault()
 				}
-			case "subtitle":
-				hasSubtitles = true
 			}
 		}
 	}
@@ -398,11 +401,14 @@ func externalSubtitles(subs []*libraryv1.ExternalSubtitle) []ExternalSubtitle {
 }
 
 // externalSubtitleBase is the index of the first external subtitle stream
-// of a media source: the ones after the streams embedded in the file, so
-// that the indices do not repeat.
+// of a media source: the ones after the streams shown by the plugin. The
+// subtitles embedded in the file are not shown, so their indices are free.
 func externalSubtitleBase(info *libraryv1.MediaInfo) int {
 	base := 0
 	for _, s := range info.GetStreams() {
+		if s.GetType() == "subtitle" {
+			continue
+		}
 		base = max(base, int(s.GetIndex())+1)
 	}
 	return base

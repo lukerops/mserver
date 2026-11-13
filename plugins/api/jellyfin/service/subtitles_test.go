@@ -63,6 +63,8 @@ func TestVideoItemWithExternalSubtitles(t *testing.T) {
 		MediaInfo: &libraryv1.MediaInfo{Streams: []*libraryv1.Stream{
 			{Index: 0, Type: "video", Codec: "h264"},
 			{Index: 1, Type: "audio", Codec: "aac"},
+			// Embedded and not shown: it does not shift the external indices.
+			{Index: 2, Type: "subtitle", Codec: "subrip"},
 		}},
 		ExternalSubtitles: []*libraryv1.ExternalSubtitle{
 			{Id: "a", FileId: "f1", Format: "srt", Language: "en"},
