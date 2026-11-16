@@ -158,7 +158,7 @@ func (h *Handler) subtitle(w http.ResponseWriter, r *http.Request) {
 	var body []byte
 	contentType := "text/vtt; charset=utf-8"
 	if conversion == service.SubtitleJSON {
-		body, err = json.Marshal(service.SRTToTrackInfo(data))
+		body, err = json.Marshal(service.SubtitleTrackInfoOf(sub.Format, data))
 		if err != nil {
 			h.internalError(w, r, "encode subtitle", err)
 			return

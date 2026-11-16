@@ -22,8 +22,9 @@ const (
 )
 
 // SubtitleConvert tells whether a file of the original format can be served
-// in the requested format, and how. Any format is served as it is; only
-// srt -> vtt (and the JSON of its cues) is converted.
+// in the requested format, and how. Any format is served as it is; srt is
+// converted to vtt, and the cues of the text subtitles this plugin parses
+// (srt and vtt) are served as JSON.
 func SubtitleConvert(original, format string) (SubtitleConversion, bool) {
 	original, format = SubtitleFormatName(original), SubtitleFormatName(format)
 	switch {
@@ -31,10 +32,21 @@ func SubtitleConvert(original, format string) (SubtitleConversion, bool) {
 		return SubtitlePassthrough, true
 	case original == "srt" && format == "vtt":
 		return SubtitleVTT, true
-	case original == "srt" && (format == "js" || format == "json"):
+	case isTextSubtitle(original) && (format == "js" || format == "json"):
 		return SubtitleJSON, true
 	}
 	return 0, false
+}
+
+// isTextSubtitle reports whether this plugin can parse the cues of a text
+// subtitle format. The client fetches the cues of a text subtitle as JSON
+// (replacing the .vtt of the DeliveryUrl with .js).
+func isTextSubtitle(format string) bool {
+	switch format {
+	case "srt", "vtt":
+		return true
+	}
+	return false
 }
 
 // SubtitleTrackInfo is the JSON of the cues of a subtitle, as the Jellyfin
@@ -51,8 +63,29 @@ type SubtitleTrackEvent struct {
 	EndPositionTicks   int64  `json:"EndPositionTicks"`
 }
 
+// SubtitleTrackInfoOf parses the cues of a text subtitle file of the given
+// format (srt or vtt).
+func SubtitleTrackInfoOf(format string, data []byte) SubtitleTrackInfo {
+	if SubtitleFormatName(format) == "vtt" {
+		return VTTToTrackInfo(data)
+	}
+	return SRTToTrackInfo(data)
+}
+
 // SRTToTrackInfo parses the text of an SRT file into its cues.
 func SRTToTrackInfo(srt []byte) SubtitleTrackInfo {
+	return textToTrackInfo(normalizeSubtitleText(srt))
+}
+
+// VTTToTrackInfo parses the text of a WebVTT file into its cues.
+func VTTToTrackInfo(vtt []byte) SubtitleTrackInfo {
+	return textToTrackInfo(normalizeSubtitleText(vtt))
+}
+
+// textToTrackInfo parses the cues of a text subtitle (SRT or WebVTT). The
+// header blocks of WebVTT (WEBVTT, NOTE, STYLE, REGION) come before the
+// first timing and are ignored, as an SRT cue index is.
+func textToTrackInfo(text string) SubtitleTrackInfo {
 	info := SubtitleTrackInfo{TrackEvents: []SubtitleTrackEvent{}}
 	var (
 		id         string
@@ -73,7 +106,7 @@ func SRTToTrackInfo(srt []byte) SubtitleTrackInfo {
 		}
 		id, start, end, body, haveTiming = "", 0, 0, nil, false
 	}
-	for _, line := range strings.Split(normalizeSubtitleText(srt), "\n") {
+	for _, line := range strings.Split(text, "\n") {
 		if s, e, ok := parseSRTTiming(line); ok {
 			if haveTiming {
 				flush()
@@ -118,28 +151,33 @@ func parseSRTTiming(line string) (start, end int64, ok bool) {
 	return start, end, true
 }
 
-// parseSRTTime parses an SRT timestamp (HH:MM:SS,mmm) into ticks (100 ns).
+// parseSRTTime parses a subtitle timestamp into ticks (100 ns). SRT uses
+// HH:MM:SS,mmm; WebVTT also allows MM:SS.mmm.
 func parseSRTTime(v string) (int64, bool) {
-	h, rest, ok := strings.Cut(strings.TrimSpace(v), ":")
+	whole, milli, ok := strings.Cut(strings.TrimSpace(v), ",")
 	if !ok {
-		return 0, false
-	}
-	m, rest, ok := strings.Cut(rest, ":")
-	if !ok {
-		return 0, false
-	}
-	s, milli, ok := strings.Cut(rest, ",")
-	if !ok {
-		s, milli, ok = strings.Cut(rest, ".")
+		whole, milli, ok = strings.Cut(strings.TrimSpace(v), ".")
 		if !ok {
 			return 0, false
 		}
 	}
-	hh, errH := strconv.Atoi(strings.TrimSpace(h))
-	mm, errM := strconv.Atoi(strings.TrimSpace(m))
-	ss, errS := strconv.Atoi(strings.TrimSpace(s))
+	parts := strings.Split(whole, ":")
+	if len(parts) != 2 && len(parts) != 3 {
+		return 0, false
+	}
+	var hh int
+	if len(parts) == 3 {
+		h, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return 0, false
+		}
+		hh = h
+		parts = parts[1:]
+	}
+	mm, errM := strconv.Atoi(strings.TrimSpace(parts[0]))
+	ss, errS := strconv.Atoi(strings.TrimSpace(parts[1]))
 	ms, errMS := strconv.Atoi(strings.TrimSpace(milli))
-	if errH != nil || errM != nil || errS != nil || errMS != nil {
+	if errM != nil || errS != nil || errMS != nil {
 		return 0, false
 	}
 	d := time.Duration(hh)*time.Hour + time.Duration(mm)*time.Minute +

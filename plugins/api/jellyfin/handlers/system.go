@@ -89,6 +89,25 @@ func (h *Handler) brandingConfiguration(w http.ResponseWriter, _ *http.Request) 
 	writeJSON(w, http.StatusOK, service.BrandingOptions{})
 }
 
+// encodingConfiguration answers the encoding configuration the clients read
+// (jellyfin-web and jellyfin-tizen): the plugin never transcodes, so it
+// reports no hardware acceleration. GET returns the configuration; PUT saves
+// it (the plugin accepts the update and keeps its own settings).
+func (h *Handler) encodingConfiguration(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.authenticate(w, r); !ok {
+		return
+	}
+	if r.Method == http.MethodPut {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	writeJSON(w, http.StatusOK, service.EncodingOptions{
+		EncodingThreadCount:    -1,
+		HardwareDecodingCodecs: []string{},
+		AllowOnDemandMetadataBasedKeyframeExtractionForExtensions: []string{},
+	})
+}
+
 // brandingCss has no custom CSS.
 func (h *Handler) brandingCss(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusNoContent)

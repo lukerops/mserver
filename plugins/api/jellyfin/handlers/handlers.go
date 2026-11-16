@@ -46,6 +46,8 @@ func New(svc *service.Service, files *http.Client, log *slog.Logger) *http.Serve
 	mux.HandleFunc("GET /system/endpoint", h.endpointInfo)
 	mux.HandleFunc("GET /system/ping", h.ping)
 	mux.HandleFunc("POST /system/ping", h.ping)
+	mux.HandleFunc("GET /system/configuration/encoding", h.encodingConfiguration)
+	mux.HandleFunc("PUT /system/configuration/encoding", h.encodingConfiguration)
 
 	mux.HandleFunc("GET /branding/configuration", h.brandingConfiguration)
 	mux.HandleFunc("GET /branding/css", h.brandingCss)

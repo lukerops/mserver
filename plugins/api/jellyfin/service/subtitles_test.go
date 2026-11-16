@@ -113,6 +113,8 @@ func TestSubtitleConversion(t *testing.T) {
 		{"srt", "vtt", SubtitleVTT, true},
 		{"srt", "js", SubtitleJSON, true},
 		{"srt", "json", SubtitleJSON, true},
+		{"vtt", "js", SubtitleJSON, true},
+		{"vtt", "json", SubtitleJSON, true},
 		{"srt", "ass", 0, false},
 		{"ass", "ass", SubtitlePassthrough, true},
 		{"ass", "vtt", 0, false},
@@ -183,6 +185,37 @@ func TestSRTToVTT(t *testing.T) {
 	} {
 		if got := string(SRTToVTT([]byte(tt.in))); got != tt.want {
 			t.Errorf("%s: SRTToVTT = %q, want %q", name, got, tt.want)
+		}
+	}
+}
+
+func TestVTTToTrackInfo(t *testing.T) {
+	for name, tt := range map[string]struct {
+		in   string
+		want []SubtitleTrackEvent
+	}{
+		"header and cue": {
+			"WEBVTT\n\n00:00:01.000 --> 00:00:02.500 align:start position:0%\nHello, world\n\n",
+			[]SubtitleTrackEvent{
+				{ID: "1", Text: "Hello, world", StartPositionTicks: 10_000_000, EndPositionTicks: 25_000_000},
+			},
+		},
+		"hours and identifiers": {
+			"WEBVTT\n\nNOTE a comment\n\ncue-1\n00:00:03.000 --> 00:00:04.000\nBye\n",
+			[]SubtitleTrackEvent{
+				{ID: "1", Text: "Bye", StartPositionTicks: 30_000_000, EndPositionTicks: 40_000_000},
+			},
+		},
+	} {
+		got := VTTToTrackInfo([]byte(tt.in))
+		if len(got.TrackEvents) != len(tt.want) {
+			t.Errorf("%s: got %+v, want %+v", name, got.TrackEvents, tt.want)
+			continue
+		}
+		for i := range tt.want {
+			if got.TrackEvents[i] != tt.want[i] {
+				t.Errorf("%s: event %d = %+v, want %+v", name, i, got.TrackEvents[i], tt.want[i])
+			}
 		}
 	}
 }

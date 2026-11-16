@@ -42,6 +42,33 @@ type BrandingOptions struct {
 	SplashscreenEnabled bool
 }
 
+// EncodingOptions is the encoder configuration a client reads from
+// /System/Configuration/encoding. The plugin never transcodes: it serves the
+// files as they are, so it reports no hardware acceleration and no
+// transcoding support.
+type EncodingOptions struct {
+	EncodingThreadCount                                       int
+	TranscodingTempPath                                       string
+	FallbackFontPath                                          string
+	EnableFallbackFont                                        bool
+	EnableAudioVbr                                            bool
+	DownMixAudioBoost                                         float64
+	MaxMuxingQueueSize                                        int
+	EnableThrottling                                          bool
+	ThrottleDelaySeconds                                      int
+	EnableSegmentDeletion                                     bool
+	SegmentKeepSeconds                                        int
+	HardwareAccelerationType                                  string
+	VaapiDevice                                               string
+	QsvDevice                                                 string
+	EnableHardwareEncoding                                    bool
+	AllowHevcEncoding                                         bool
+	AllowAv1Encoding                                          bool
+	EnableSubtitleExtraction                                  bool
+	HardwareDecodingCodecs                                    []string
+	AllowOnDemandMetadataBasedKeyframeExtractionForExtensions []string
+}
+
 type EndPointInfo struct {
 	IsLocal     bool
 	IsInNetwork bool
@@ -357,13 +384,17 @@ type MediaStream struct {
 	Type                   string
 	AspectRatio            string `json:",omitempty"`
 	Index                  int
+	Score                  *int `json:",omitempty"`
 	IsExternal             bool
 	IsTextSubtitleStream   bool
 	SupportsExternalStream bool
 	// DeliveryMethod and DeliveryUrl tell how a subtitle reaches the
-	// client: only external subtitles have them.
+	// client: only external subtitles have them. IsExternalUrl tells that
+	// DeliveryUrl points outside the plugin (an external URL); the plugin
+	// serves its files itself, so it is false.
 	DeliveryMethod string `json:",omitempty"`
 	DeliveryUrl    string `json:",omitempty"`
+	IsExternalUrl  bool   `json:",omitempty"`
 	PixelFormat    string `json:",omitempty"`
 	Level          int
 }
